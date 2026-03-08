@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ha-config-manager"
+version = "1.0.0"
+description = "Home Assistant Configuration Manager Integration"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "unit: Unit tests with HA fixtures",
+    "property: Property-based tests",
+    "integration: Integration tests with HA web component"
+]
+norecursedirs = [".git", ".hypothesis", "__pycache__", ".pytest_cache"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning"
+]
+
+[tool.hypothesis]
+max_examples = 100
+deadline = 5000  # 5 seconds per test
+derandomize = false
+print_blob = true
+
+[tool.coverage.run]
+source = ["custom_components/ha_config_manager"]
+omit = [
+    "tests/*",
+    "**/__pycache__/*",
+    "**/test_*.py"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod"
+]

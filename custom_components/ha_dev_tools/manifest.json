@@ -1,0 +1,18 @@
+{
+  "domain": "ha_config_manager",
+  "name": "Home Assistant Configuration Manager",
+  "version": "1.0.0",
+  "documentation": "https://github.com/your-username/ha-config-manager",
+  "issue_tracker": "https://github.com/your-username/ha-config-manager/issues",
+  "dependencies": [],
+  "codeowners": ["@your-username"],
+  "requirements": [
+    "aiofiles>=23.0.0",
+    "pyyaml>=6.0.0"
+  ],
+  "config_flow": false,
+  "integration_type": "system",
+  "iot_class": "local_push",
+  "after_dependencies": ["http"],
+  "quality_scale": "silver"
+}
