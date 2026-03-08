@@ -3,7 +3,7 @@
 ## Test Execution Summary
 
 **Date**: 2026-03-08  
-**Repository**: ha-dev-tools (renamed from ha_config_manager)  
+**Repository**: ha-dev-tools  
 **Test Environment**: Python 3.12.13, pytest 8.3.4
 
 ## Unit Tests

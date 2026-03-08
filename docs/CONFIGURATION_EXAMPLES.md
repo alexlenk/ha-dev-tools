@@ -18,7 +18,7 @@ This document provides copy-paste ready configuration examples for the Home Assi
 This setup provides read-only access to safe configuration files and storage files while blocking all sensitive data.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     # Read-only paths (safe for viewing, not modifying)
     read_paths:
@@ -69,7 +69,7 @@ ha_config_manager:
 This setup adds write access to specific directories for development workflows.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     # Read-only paths
     read_paths:
@@ -222,7 +222,7 @@ The security system enforces rules in this order:
 
 ```yaml
 # Example showing precedence
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       - "/config/configuration.yaml"  # Read-only
@@ -293,7 +293,7 @@ Write operations are disabled by default for security. To enable them, add paths
 ### Basic Write Configuration
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       - "/config/configuration.yaml"
@@ -311,7 +311,7 @@ ha_config_manager:
 ### Write Operations with Rate Limiting
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     write_paths:
       - "/config/packages/generated/*.yaml"
@@ -332,14 +332,14 @@ ha_config_manager:
 ### Write Operations with Backup Configuration
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     write_paths:
       - "/config/packages/generated/*.yaml"
     
     backup:
       enabled: true
-      location: "/config/backups/ha_config_manager"
+      location: "/config/backups/ha_dev_tools"
       retention_days: 30
       max_backups_per_file: 10
 ```
@@ -353,7 +353,7 @@ ha_config_manager:
 ### Disabling Rate Limiting (Not Recommended)
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     write_paths:
       - "/config/packages/generated/*.yaml"
@@ -371,7 +371,7 @@ ha_config_manager:
 **Goal:** Allow external IDE to view configuration files but prevent modifications.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Main configuration files
@@ -402,7 +402,7 @@ ha_config_manager:
 **Goal:** Allow reading and modifying Lovelace dashboards only.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read-only access to main config
@@ -423,7 +423,7 @@ ha_config_manager:
 **Goal:** Allow reading all configs and writing to automation files.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read all configuration files
@@ -457,7 +457,7 @@ ha_config_manager:
 **Goal:** Allow reading and modifying input helpers only.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read-only access to main config
@@ -489,7 +489,7 @@ ha_config_manager:
 **Goal:** Allow reading logs and basic configuration for monitoring tools.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Minimal read access
@@ -512,7 +512,7 @@ ha_config_manager:
 **Goal:** Allow external tools to generate and write configuration files.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read access to existing configs
@@ -549,7 +549,7 @@ ha_config_manager:
 **Goal:** Full development workflow with read and write access to test files.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read all configuration files
@@ -598,7 +598,7 @@ ha_config_manager:
 **Goal:** Allow creating and modifying package files programmatically.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read main configuration
@@ -642,7 +642,7 @@ ha_config_manager:
 **Goal:** Minimal write access for production environments.
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       # Read-only access to all configs
@@ -707,7 +707,7 @@ Version 2.0.0 introduces **breaking changes** that require configuration updates
    Copy the recommended production configuration:
 
    ```yaml
-   ha_config_manager:
+   ha_dev_tools:
      security:
        read_paths:
          - "/config/.storage/lovelace*"
@@ -769,7 +769,7 @@ If you have old configuration using `allowed_paths` or `allowed_storage_files`, 
 
 ```yaml
 # Old format (deprecated but still supported)
-ha_config_manager:
+ha_dev_tools:
   security:
     allowed_paths:
       - "configuration.yaml"
@@ -784,7 +784,7 @@ ha_config_manager:
 
 ```yaml
 # New format (recommended)
-ha_config_manager:
+ha_dev_tools:
   security:
     read_paths:
       - "/config/configuration.yaml"

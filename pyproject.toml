@@ -3,9 +3,9 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ha-config-manager"
+name = "ha-dev-tools"
 version = "1.0.0"
-description = "Home Assistant Configuration Manager Integration"
+description = "Home Assistant Development Tools Integration"
 requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
@@ -34,7 +34,7 @@ derandomize = false
 print_blob = true
 
 [tool.coverage.run]
-source = ["custom_components/ha_config_manager"]
+source = ["custom_components/ha_dev_tools"]
 omit = [
     "tests/*",
     "**/__pycache__/*",
