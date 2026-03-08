@@ -14,7 +14,7 @@ Key Features:
 
 Example Configuration:
     ```yaml
-    ha_config_manager:
+    ha_dev_tools:
       security:
         # Read-only paths
         read_paths:

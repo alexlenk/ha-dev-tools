@@ -226,7 +226,7 @@ class FileManager:
         """
         try:
             # Create backup directory structure
-            backup_dir = self._config_path / ".ha_config_manager_backups"
+            backup_dir = self._config_path / ".ha_dev_tools_backups"
             backup_dir.mkdir(exist_ok=True)
             
             # Create timestamped backup filename

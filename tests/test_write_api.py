@@ -327,7 +327,7 @@ async def test_write_creates_backup(hass: HomeAssistant, file_api_view, mock_req
     # We need to check the actual directory where FileManager creates backups
     file_manager = file_api_view.api_handler.file_manager
     config_dir = file_manager._config_path
-    backup_dir = config_dir / ".ha_config_manager_backups"
+    backup_dir = config_dir / ".ha_dev_tools_backups"
     assert backup_dir.exists(), f"Backup directory not found at {backup_dir}"
     
     # Check that there's at least one backup file

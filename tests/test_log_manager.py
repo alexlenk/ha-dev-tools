@@ -28,7 +28,7 @@ def log_manager(hass: HomeAssistant, security_manager):
 def mock_log_file(hass: HomeAssistant):
     """Create a mock log file for testing."""
     log_content = """2024-02-08 10:00:00 INFO homeassistant.core: Starting Home Assistant
-2024-02-08 10:00:01 DEBUG homeassistant.loader: Loading integration ha_config_manager
+2024-02-08 10:00:01 DEBUG homeassistant.loader: Loading integration ha_dev_tools
 2024-02-08 10:00:02 WARNING homeassistant.components.sensor: Sensor unavailable
 2024-02-08 10:00:03 ERROR homeassistant.components.light: Failed to turn on light
 2024-02-08 10:00:04 INFO homeassistant.setup: Setup completed
