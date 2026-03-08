@@ -13,6 +13,10 @@ API_BASE_PATH = "/api/management"
 OPERATION_READ = "read"
 OPERATION_WRITE = "write"
 
+# Security modes
+SECURITY_MODE_ALLOWLIST = "allowlist"
+SECURITY_MODE_DENYLIST = "denylist"
+
 # Recommended safe storage patterns (glob patterns for safe .storage files)
 RECOMMENDED_SAFE_STORAGE_PATTERNS = [
     "/config/.storage/lovelace*",
