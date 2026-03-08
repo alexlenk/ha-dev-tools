@@ -828,6 +828,6 @@ ha_config_manager:
 
 For questions or issues with configuration:
 
-- [Issue Tracker](https://github.com/your-username/ha-config-manager/issues)
+- [Issue Tracker](https://github.com/your-username/ha-dev-tools/issues)
 - [Home Assistant Community Forum](https://community.home-assistant.io/)
-- [Documentation](https://github.com/your-username/ha-config-manager)
+- [Documentation](https://github.com/your-username/ha-dev-tools)
