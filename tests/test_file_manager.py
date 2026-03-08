@@ -48,7 +48,7 @@ def file_manager(hass: HomeAssistant, security_manager):
 
 
 @pytest.fixture
-def mock_config_file(hass: HomeAssistant, tmp_path):
+def mock_config_file(hass: HomeAssistant):
     """Create a mock configuration.yaml file for testing."""
     config_content = """homeassistant:
   name: Test Home
@@ -62,11 +62,9 @@ logger:
   default: info
 """
     
-    config_file = tmp_path / "configuration.yaml"
+    # Use the hass config directory (provided by pytest-homeassistant-custom-component)
+    config_file = Path(hass.config.config_dir) / "configuration.yaml"
     config_file.write_text(config_content)
-    
-    # Mock the config directory
-    hass.config.config_dir = str(tmp_path)
     
     return config_file
 
@@ -153,13 +151,10 @@ async def test_write_file_creates_directories(hass: HomeAssistant, file_manager,
     assert content == test_content
 
 
-async def test_read_directory_as_file(hass: HomeAssistant, file_manager, tmp_path):
+async def test_read_directory_as_file(hass: HomeAssistant, file_manager, mock_config_file):
     """Test that trying to read a directory is blocked by security."""
-    # Set up the config directory
-    hass.config.config_dir = str(tmp_path)
-    
     # Create a directory with a yaml extension to pass security check
-    test_dir = tmp_path / "test_directory.yaml"
+    test_dir = Path(hass.config.config_dir) / "test_directory.yaml"
     test_dir.mkdir()
     
     # Try to read the directory as a file
@@ -185,13 +180,10 @@ async def test_file_encoding_handling(hass: HomeAssistant, file_manager, mock_co
     assert content == special_content
 
 
-async def test_empty_file_handling(hass: HomeAssistant, file_manager, tmp_path):
+async def test_empty_file_handling(hass: HomeAssistant, file_manager, mock_config_file):
     """Test handling of empty files."""
-    # Set up the config directory
-    hass.config.config_dir = str(tmp_path)
-    
     # Create an empty file
-    empty_file = tmp_path / "empty.yaml"
+    empty_file = Path(hass.config.config_dir) / "empty.yaml"
     empty_file.write_text("")
     
     # Read the empty file
