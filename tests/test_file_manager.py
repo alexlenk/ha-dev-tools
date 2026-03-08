@@ -159,7 +159,7 @@ async def test_read_directory_as_file(hass: HomeAssistant, file_manager, mock_co
     
     # Try to read the directory as a file
     # Should fail because it's a directory, not a file
-    with pytest.raises(FileNotFoundError, match="File not found: test_directory.yaml"):
+    with pytest.raises(FileNotFoundError, match="Path is not a file: test_directory.yaml"):
         await file_manager.read_file("test_directory.yaml")
 
 
@@ -186,9 +186,10 @@ async def test_empty_file_handling(hass: HomeAssistant, file_manager, mock_confi
     empty_file = Path(hass.config.config_dir) / "empty.yaml"
     empty_file.write_text("")
     
-    # Read the empty file
-    with pytest.raises(FileNotFoundError, match="File not found: empty.yaml"):
-        await file_manager.read_file("empty.yaml")
+    # Read the empty file - should succeed and return empty string
+    content = await file_manager.read_file("empty.yaml")
+    
+    assert content == ""
 
 
 async def test_round_trip_consistency(hass: HomeAssistant, file_manager, mock_config_file):
