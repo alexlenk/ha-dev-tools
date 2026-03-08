@@ -8,8 +8,8 @@
 A comprehensive Home Assistant custom integration that provides secure REST API endpoints for configuration file access, log retrieval, and development tools. This integration enables external development tools to programmatically interact with Home Assistant configuration files and system logs through authenticated API calls.
 
 **Part of the HA Dev Tools ecosystem:**
-- **[ha-dev-tools-mcp](https://github.com/your-username/ha-dev-tools-mcp)** - MCP server for IDE integration
-- **[ha-development-power](https://github.com/your-username/ha-development-power)** - Kiro Power for seamless development workflow
+- **[ha-dev-tools-mcp](https://github.com/alexlenk/ha-dev-tools-mcp)** - MCP server for IDE integration
+- **[ha-development-power](https://github.com/alexlenk/ha-development-power)** - Kiro Power for seamless development workflow
 - **ha-dev-tools** (this repository) - Home Assistant integration providing the API
 
 ## Features
@@ -43,7 +43,7 @@ A comprehensive Home Assistant custom integration that provides secure REST API 
 2. Click on "Integrations"
 3. Click the three dots in the top right corner
 4. Select "Custom repositories"
-5. Add this repository URL: `https://github.com/your-username/ha-dev-tools`
+5. Add this repository URL: `https://github.com/alexlenk/ha-dev-tools`
 6. Select category: "Integration"
 7. Click "Add"
 8. Find "HA Dev Tools" in the integration list
@@ -501,7 +501,7 @@ The following files are **always denied** and cannot be accessed regardless of c
 
 ### IDE Integration with MCP Server
 
-Use this integration with the [ha-dev-tools-mcp](https://github.com/your-username/ha-dev-tools-mcp) server to:
+Use this integration with the [ha-dev-tools-mcp](https://github.com/alexlenk/ha-dev-tools-mcp) server to:
 - Edit configuration files directly from your IDE
 - View and analyze logs in real-time
 - Test templates with live entity data
@@ -509,7 +509,7 @@ Use this integration with the [ha-dev-tools-mcp](https://github.com/your-usernam
 
 ### Kiro Power Integration
 
-Install the [ha-development-power](https://github.com/your-username/ha-development-power) Kiro Power for:
+Install the [ha-development-power](https://github.com/alexlenk/ha-development-power) Kiro Power for:
 - Seamless IDE integration with Home Assistant
 - Automatic MCP server configuration
 - Guided workflows for common development tasks
@@ -590,8 +590,8 @@ For more troubleshooting help, see [Troubleshooting Guide](docs/TROUBLESHOOTING.
 
 This integration is part of the HA Dev Tools ecosystem:
 
-- **[ha-dev-tools-mcp](https://github.com/your-username/ha-dev-tools-mcp)** - MCP server for IDE integration (Python package on PyPI)
-- **[ha-development-power](https://github.com/your-username/ha-development-power)** - Kiro Power for seamless development workflow
+- **[ha-dev-tools-mcp](https://github.com/alexlenk/ha-dev-tools-mcp)** - MCP server for IDE integration (Python package on PyPI)
+- **[ha-development-power](https://github.com/alexlenk/ha-development-power)** - Kiro Power for seamless development workflow
 - **ha-dev-tools** (this repository) - Home Assistant integration providing the API
 
 ## Contributing
@@ -616,12 +616,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-[releases-shield]: https://img.shields.io/github/release/your-username/ha-dev-tools.svg?style=for-the-badge
-[releases]: https://github.com/your-username/ha-dev-tools/releases
-[commits-shield]: https://img.shields.io/github/commit-activity/y/your-username/ha-dev-tools.svg?style=for-the-badge
-[commits]: https://github.com/your-username/ha-dev-tools/commits/main
-[license-shield]: https://img.shields.io/github/license/your-username/ha-dev-tools.svg?style=for-the-badge
+[releases-shield]: https://img.shields.io/github/release/alexlenk/ha-dev-tools.svg?style=for-the-badge
+[releases]: https://github.com/alexlenk/ha-dev-tools/releases
+[commits-shield]: https://img.shields.io/github/commit-activity/y/alexlenk/ha-dev-tools.svg?style=for-the-badge
+[commits]: https://github.com/alexlenk/ha-dev-tools/commits/main
+[license-shield]: https://img.shields.io/github/license/alexlenk/ha-dev-tools.svg?style=for-the-badge
 [hacs]: https://github.com/hacs/integration
 [hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge
-[issues]: https://github.com/your-username/ha-dev-tools/issues
-[documentation]: https://github.com/your-username/ha-dev-tools
+[issues]: https://github.com/alexlenk/ha-dev-tools/issues
+[documentation]: https://github.com/alexlenk/ha-dev-tools

@@ -507,7 +507,7 @@ tail -f ha-dev-test/config/home-assistant.log
 
 - [Home Assistant Community Forum](https://community.home-assistant.io/)
 - [Home Assistant Discord](https://discord.gg/home-assistant)
-- [GitHub Discussions](https://github.com/your-username/ha-dev-tools/discussions)
+- [GitHub Discussions](https://github.com/alexlenk/ha-dev-tools/discussions)
 
 ## License
 

@@ -828,6 +828,6 @@ ha_dev_tools:
 
 For questions or issues with configuration:
 
-- [Issue Tracker](https://github.com/your-username/ha-dev-tools/issues)
+- [Issue Tracker](https://github.com/alexlenk/ha-dev-tools/issues)
 - [Home Assistant Community Forum](https://community.home-assistant.io/)
-- [Documentation](https://github.com/your-username/ha-dev-tools)
+- [Documentation](https://github.com/alexlenk/ha-dev-tools)

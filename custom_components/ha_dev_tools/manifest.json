@@ -2,10 +2,10 @@
   "domain": "ha_dev_tools",
   "name": "HA Dev Tools",
   "version": "1.0.0",
-  "documentation": "https://github.com/your-username/ha-dev-tools",
-  "issue_tracker": "https://github.com/your-username/ha-dev-tools/issues",
+  "documentation": "https://github.com/alexlenk/ha-dev-tools",
+  "issue_tracker": "https://github.com/alexlenk/ha-dev-tools/issues",
   "dependencies": [],
-  "codeowners": ["@your-username"],
+  "codeowners": ["@alexlenk"],
   "requirements": [
     "aiofiles>=23.0.0",
     "pyyaml>=6.0.0"
