@@ -1,18 +1,18 @@
 {
   "domain": "ha_dev_tools",
   "name": "HA Dev Tools",
-  "version": "1.0.0",
-  "documentation": "https://github.com/alexlenk/ha-dev-tools",
-  "issue_tracker": "https://github.com/alexlenk/ha-dev-tools/issues",
-  "dependencies": [],
+  "after_dependencies": ["http"],
   "codeowners": ["@alexlenk"],
+  "config_flow": false,
+  "dependencies": [],
+  "documentation": "https://github.com/alexlenk/ha-dev-tools",
+  "integration_type": "system",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/alexlenk/ha-dev-tools/issues",
+  "quality_scale": "silver",
   "requirements": [
     "aiofiles>=23.0.0",
     "pyyaml>=6.0.0"
   ],
-  "config_flow": false,
-  "integration_type": "system",
-  "iot_class": "local_push",
-  "after_dependencies": ["http"],
-  "quality_scale": "silver"
+  "version": "1.0.0"
 }
