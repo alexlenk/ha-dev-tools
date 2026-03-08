@@ -8,8 +8,8 @@ from hypothesis import given, strategies as st, assume, settings, HealthCheck
 from unittest.mock import Mock
 import string
 
-from custom_components.ha_config_manager.security import SecurityManager
-from custom_components.ha_config_manager.const import (
+from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.const import (
     OPERATION_READ,
     OPERATION_WRITE,
 )

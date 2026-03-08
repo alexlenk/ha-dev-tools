@@ -9,7 +9,7 @@ import string
 import yaml
 import json
 
-from custom_components.ha_config_manager.validation import ValidationManager
+from custom_components.ha_dev_tools.validation import ValidationManager
 
 
 # Strategy for generating valid YAML content

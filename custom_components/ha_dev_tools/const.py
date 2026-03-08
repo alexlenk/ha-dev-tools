@@ -4,7 +4,7 @@ import voluptuous as vol
 from homeassistant.helpers import config_validation as cv
 
 # Domain name for the integration
-DOMAIN = "ha_config_manager"
+DOMAIN = "ha_dev_tools"
 
 # API endpoints base path
 API_BASE_PATH = "/api/management"
@@ -144,7 +144,7 @@ SECURITY_CONFIG_SCHEMA = vol.Schema({
     ),
 })
 
-# Configuration schema for the ha_config_manager domain
+# Configuration schema for the ha_dev_tools domain
 CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
         vol.Optional("security", default={}): SECURITY_CONFIG_SCHEMA,

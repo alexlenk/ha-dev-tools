@@ -62,8 +62,8 @@ class MockHass:
 
 
 # Now import our modules
-from ha_config_manager.log_manager import LogManager, LogFilters, LogEntry
-from ha_config_manager.security import SecurityManager
+from custom_components.ha_dev_tools.log_manager import LogManager, LogFilters, LogEntry
+from custom_components.ha_dev_tools.security import SecurityManager
 
 
 # Strategy for generating valid log levels

@@ -66,9 +66,9 @@ class MockHass:
         return func(*args)
 
 # Now import our modules
-from ha_config_manager.file_manager import FileManager
-from ha_config_manager.security import SecurityManager
-from ha_config_manager.const import DEFAULT_BLACKLIST
+from custom_components.ha_dev_tools.file_manager import FileManager
+from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.const import DEFAULT_BLACKLIST
 
 
 # Strategy for generating valid file paths

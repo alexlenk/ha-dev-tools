@@ -1,9 +1,9 @@
 {
-  "domain": "ha_config_manager",
-  "name": "Home Assistant Configuration Manager",
+  "domain": "ha_dev_tools",
+  "name": "HA Dev Tools",
   "version": "1.0.0",
-  "documentation": "https://github.com/your-username/ha-config-manager",
-  "issue_tracker": "https://github.com/your-username/ha-config-manager/issues",
+  "documentation": "https://github.com/your-username/ha-dev-tools",
+  "issue_tracker": "https://github.com/your-username/ha-dev-tools/issues",
   "dependencies": [],
   "codeowners": ["@your-username"],
   "requirements": [

@@ -1,8 +1,8 @@
 """Unit tests for metadata API endpoints.
 
 This module contains unit tests for the metadata API endpoints including:
-- GET /api/ha_config_manager/metadata/{path} - Single file metadata
-- POST /api/ha_config_manager/metadata/batch - Batch metadata retrieval
+- GET /api/ha_dev_tools/metadata/{path} - Single file metadata
+- POST /api/ha_dev_tools/metadata/batch - Batch metadata retrieval
 
 These tests validate the API layer behavior including error handling,
 security constraints, and response formats.
@@ -57,9 +57,9 @@ class MockHomeAssistantView:
 mock_http.HomeAssistantView = MockHomeAssistantView
 
 # Now import our modules
-from ha_config_manager.api import ManagementAPIHandler, MetadataAPIView, BatchMetadataAPIView
-from ha_config_manager.security import SecurityManager
-from ha_config_manager.file_manager import FileManager
+from custom_components.ha_dev_tools.api import ManagementAPIHandler, MetadataAPIView, BatchMetadataAPIView
+from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.file_manager import FileManager
 
 
 class MockRequest:

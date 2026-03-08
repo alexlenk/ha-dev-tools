@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_config_manager.const import DOMAIN
+from custom_components.ha_dev_tools.const import DOMAIN
 
 
 # This fixture is automatically provided by pytest-homeassistant-custom-component
@@ -65,7 +65,7 @@ async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEn
     - Waits for all async operations to complete
     - Returns the config entry for test use
     """
-    from custom_components.ha_config_manager import async_setup_entry
+    from custom_components.ha_dev_tools import async_setup_entry
     
     # Set up HTTP component first - required for API endpoint registration
     # Note: In test environment, HTTP component may not fully initialize
@@ -107,7 +107,7 @@ async def setup_integration_with_entry(hass: HomeAssistant, mock_config_entry: M
     This fixture uses async_setup_entry instead of async_setup_component
     for testing config entry-based setup.
     """
-    from custom_components.ha_config_manager import async_setup_entry
+    from custom_components.ha_dev_tools import async_setup_entry
     
     # Set up HTTP component first - required for API endpoint registration
     assert await async_setup_component(hass, "http", {"http": {}})

@@ -4,12 +4,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from homeassistant.core import HomeAssistant
 
-from custom_components.ha_config_manager.log_manager import (
+from custom_components.ha_dev_tools.log_manager import (
     LogManager,
     LogEntry,
     LogFilters,
 )
-from custom_components.ha_config_manager.security import SecurityManager
+from custom_components.ha_dev_tools.security import SecurityManager
 
 
 @pytest.fixture

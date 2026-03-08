@@ -5,8 +5,8 @@ from unittest.mock import Mock
 from homeassistant.core import HomeAssistant
 from homeassistant.auth.models import User
 
-from custom_components.ha_config_manager.security import SecurityManager
-from custom_components.ha_config_manager.const import (
+from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.const import (
     ERROR_BLACKLISTED_FILE,
     ERROR_INVALID_PATH,
     ERROR_PERMISSION_DENIED,
@@ -265,7 +265,7 @@ def test_default_configuration_with_none(hass: HomeAssistant):
     assert ".HA_VERSION" in manager.denylist
     
     # Should be in denylist mode by default
-    from custom_components.ha_config_manager.const import SECURITY_MODE_DENYLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_DENYLIST
     assert manager._mode == SECURITY_MODE_DENYLIST
 
 
@@ -283,7 +283,7 @@ def test_default_configuration_with_empty_dict(hass: HomeAssistant):
     assert ".HA_VERSION" in manager.denylist
     
     # Should be in denylist mode by default
-    from custom_components.ha_config_manager.const import SECURITY_MODE_DENYLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_DENYLIST
     assert manager._mode == SECURITY_MODE_DENYLIST
 
 
@@ -548,7 +548,7 @@ def test_invalid_configuration_warning_logs(hass: HomeAssistant, caplog):
 
 def test_allowlist_mode_with_explicit_paths(hass: HomeAssistant):
     """Test allowlist mode with explicit allowed_paths (Task 9.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -578,7 +578,7 @@ def test_allowlist_mode_with_explicit_paths(hass: HomeAssistant):
 def test_allowlist_mode_default_behavior(hass: HomeAssistant, caplog):
     """Test default behavior with no allowed_paths in allowlist mode (Task 9.4)."""
     import logging
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -598,14 +598,14 @@ def test_allowlist_mode_default_behavior(hass: HomeAssistant, caplog):
     assert "default safe storage patterns" in caplog.text.lower()
     
     # Should have safe storage patterns in allowlist
-    from custom_components.ha_config_manager.const import RECOMMENDED_SAFE_STORAGE_PATTERNS
+    from custom_components.ha_dev_tools.const import RECOMMENDED_SAFE_STORAGE_PATTERNS
     for pattern in RECOMMENDED_SAFE_STORAGE_PATTERNS:
         assert pattern in manager.allowlist
 
 
 def test_denylist_mode_operation(hass: HomeAssistant):
     """Test denylist mode operation (Task 9.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_DENYLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_DENYLIST
     
     config = {
         "mode": SECURITY_MODE_DENYLIST,
@@ -631,7 +631,7 @@ def test_denylist_mode_operation(hass: HomeAssistant):
 
 def test_allowlist_mode_denylist_precedence(hass: HomeAssistant):
     """Test that denylist takes precedence in allowlist mode (Task 9.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -654,7 +654,7 @@ def test_allowlist_mode_denylist_precedence(hass: HomeAssistant):
     # Denylist should take precedence in validation
     is_valid, error = manager.validate_file_path("/config/secrets.yaml")
     assert is_valid is False
-    from custom_components.ha_config_manager.const import ERROR_BLACKLISTED_FILE
+    from custom_components.ha_dev_tools.const import ERROR_BLACKLISTED_FILE
     assert error == ERROR_BLACKLISTED_FILE
 
 
@@ -664,7 +664,7 @@ def test_allowlist_mode_denylist_precedence(hass: HomeAssistant):
 
 def test_allowlist_mode_access_to_allowlisted_files(hass: HomeAssistant):
     """Test access to allowlisted files in allowlist mode (Task 10.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -693,7 +693,7 @@ def test_allowlist_mode_access_to_allowlisted_files(hass: HomeAssistant):
 
 def test_allowlist_mode_denial_of_non_allowlisted_files(hass: HomeAssistant):
     """Test denial of non-allowlisted files in allowlist mode (Task 10.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -721,7 +721,7 @@ def test_allowlist_mode_denial_of_non_allowlisted_files(hass: HomeAssistant):
 
 def test_allowlist_mode_directory_matching(hass: HomeAssistant):
     """Test directory matching in allowlist mode (Task 10.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -754,7 +754,7 @@ def test_allowlist_mode_directory_matching(hass: HomeAssistant):
 
 def test_denylist_precedence_over_allowlist(hass: HomeAssistant):
     """Test that denylist takes precedence over allowlist (Task 10.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -794,7 +794,7 @@ def test_denylist_precedence_over_allowlist(hass: HomeAssistant):
 
 def test_path_normalization_with_dot_slash(hass: HomeAssistant):
     """Test path normalization with ./ components (Task 10.3)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -823,7 +823,7 @@ def test_path_normalization_with_dot_slash(hass: HomeAssistant):
 
 def test_path_normalization_with_redundant_separators(hass: HomeAssistant):
     """Test path normalization with redundant separators (Task 10.3)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -851,7 +851,7 @@ def test_path_normalization_with_redundant_separators(hass: HomeAssistant):
 
 def test_path_normalization_consistency(hass: HomeAssistant):
     """Test that equivalent paths are treated consistently (Task 10.3)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -878,7 +878,7 @@ def test_path_normalization_consistency(hass: HomeAssistant):
 
 def test_glob_pattern_asterisk_wildcard(hass: HomeAssistant):
     """Test * wildcard patterns in allowlist (Task 10.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -921,7 +921,7 @@ def test_glob_pattern_asterisk_wildcard(hass: HomeAssistant):
 
 def test_glob_pattern_question_mark_wildcard(hass: HomeAssistant):
     """Test ? wildcard patterns in allowlist (Task 10.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -951,7 +951,7 @@ def test_glob_pattern_question_mark_wildcard(hass: HomeAssistant):
 
 def test_glob_pattern_directory_wildcards(hass: HomeAssistant):
     """Test directory wildcards in allowlist (Task 10.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -977,7 +977,7 @@ def test_glob_pattern_directory_wildcards(hass: HomeAssistant):
 
 def test_glob_pattern_storage_files(hass: HomeAssistant):
     """Test .storage/* patterns for storage files (Task 10.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1012,7 +1012,7 @@ def test_glob_pattern_storage_files(hass: HomeAssistant):
 
 def test_glob_pattern_multiple_wildcards(hass: HomeAssistant):
     """Test patterns with multiple wildcards (Task 10.4)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1056,7 +1056,7 @@ def test_glob_pattern_multiple_wildcards(hass: HomeAssistant):
 
 def test_safe_storage_lovelace_pattern_matches(hass: HomeAssistant):
     """Test .storage/lovelace* pattern matches lovelace files (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1090,7 +1090,7 @@ def test_safe_storage_lovelace_pattern_matches(hass: HomeAssistant):
 
 def test_safe_storage_input_helpers_pattern_matches(hass: HomeAssistant):
     """Test .storage/input_* pattern matches all input helpers (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1118,7 +1118,7 @@ def test_safe_storage_input_helpers_pattern_matches(hass: HomeAssistant):
 
 def test_safe_storage_script_access(hass: HomeAssistant):
     """Test .storage/script access (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1137,7 +1137,7 @@ def test_safe_storage_script_access(hass: HomeAssistant):
 
 def test_safe_storage_automation_access(hass: HomeAssistant):
     """Test .storage/automation access (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1156,7 +1156,7 @@ def test_safe_storage_automation_access(hass: HomeAssistant):
 
 def test_safe_storage_timer_counter_access(hass: HomeAssistant):
     """Test .storage/timer and .storage/counter access (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1181,7 +1181,7 @@ def test_safe_storage_timer_counter_access(hass: HomeAssistant):
 
 def test_safe_storage_scene_access(hass: HomeAssistant):
     """Test .storage/scene access (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1200,7 +1200,7 @@ def test_safe_storage_scene_access(hass: HomeAssistant):
 
 def test_all_safe_storage_files_with_recommended_patterns(hass: HomeAssistant):
     """Test all safe files accessible with recommended patterns (Task 11.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     # Use recommended configuration
     config = {
@@ -1242,7 +1242,7 @@ def test_all_safe_storage_files_with_recommended_patterns(hass: HomeAssistant):
 
 def test_sensitive_storage_auth_pattern_blocks_all_auth_files(hass: HomeAssistant):
     """Test .storage/auth* pattern blocks all auth files (Task 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1272,7 +1272,7 @@ def test_sensitive_storage_auth_pattern_blocks_all_auth_files(hass: HomeAssistan
 
 def test_sensitive_storage_core_pattern_blocks_registry_files(hass: HomeAssistant):
     """Test .storage/core.* pattern blocks all core registry files (Task 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1303,7 +1303,7 @@ def test_sensitive_storage_core_pattern_blocks_registry_files(hass: HomeAssistan
 
 def test_sensitive_storage_onboarding_blocking(hass: HomeAssistant):
     """Test .storage/onboarding blocking (Task 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1323,7 +1323,7 @@ def test_sensitive_storage_onboarding_blocking(hass: HomeAssistant):
 
 def test_sensitive_storage_hassio_blocking(hass: HomeAssistant):
     """Test .storage/hassio blocking (Task 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1343,7 +1343,7 @@ def test_sensitive_storage_hassio_blocking(hass: HomeAssistant):
 
 def test_all_sensitive_storage_files_blocked(hass: HomeAssistant):
     """Test all sensitive files blocked regardless of allowlist (Task 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1376,7 +1376,7 @@ def test_all_sensitive_storage_files_blocked(hass: HomeAssistant):
 
 def test_sensitive_files_blocked_even_with_explicit_allowlist(hass: HomeAssistant):
     """Test sensitive files blocked even when explicitly in allowlist (Task 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1401,7 +1401,7 @@ def test_sensitive_files_blocked_even_with_explicit_allowlist(hass: HomeAssistan
 
 def test_safe_and_sensitive_storage_separation(hass: HomeAssistant):
     """Test that safe files are accessible while sensitive files are blocked (Task 11.1, 11.2)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     # Use recommended configuration
     config = {
@@ -1449,7 +1449,7 @@ def test_safe_and_sensitive_storage_separation(hass: HomeAssistant):
 
 def test_read_operations_on_read_only_paths(hass: HomeAssistant):
     """Test read operations succeed on read-only paths (Task 12.1)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1482,7 +1482,7 @@ def test_read_operations_on_read_only_paths(hass: HomeAssistant):
 
 def test_write_operations_denied_on_read_only_paths(hass: HomeAssistant):
     """Test write operations are denied on read-only paths (Task 12.1)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1515,7 +1515,7 @@ def test_write_operations_denied_on_read_only_paths(hass: HomeAssistant):
 
 def test_error_message_for_write_on_read_only_path(hass: HomeAssistant):
     """Test error message is ERROR_WRITE_NOT_PERMITTED for write on read-only path (Task 12.1)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_WRITE,
         ERROR_WRITE_NOT_PERMITTED,
@@ -1538,7 +1538,7 @@ def test_error_message_for_write_on_read_only_path(hass: HomeAssistant):
 
 def test_read_operations_on_write_enabled_paths(hass: HomeAssistant):
     """Test read operations succeed on write-enabled paths (Task 12.2)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
     )
@@ -1567,7 +1567,7 @@ def test_read_operations_on_write_enabled_paths(hass: HomeAssistant):
 
 def test_write_operations_on_write_enabled_paths(hass: HomeAssistant):
     """Test write operations succeed on write-enabled paths (Task 12.2)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_WRITE,
     )
@@ -1596,7 +1596,7 @@ def test_write_operations_on_write_enabled_paths(hass: HomeAssistant):
 
 def test_write_paths_precedence_over_read_paths(hass: HomeAssistant):
     """Test write_paths takes precedence over read_paths (Task 12.3)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1626,7 +1626,7 @@ def test_write_paths_precedence_over_read_paths(hass: HomeAssistant):
 
 def test_denied_paths_precedence_over_write_paths(hass: HomeAssistant):
     """Test denied_paths takes precedence over write_paths (Task 12.4)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1657,7 +1657,7 @@ def test_denied_paths_precedence_over_write_paths(hass: HomeAssistant):
 
 def test_default_operation_type_is_read(hass: HomeAssistant):
     """Test validate_file_path defaults to read operation (Task 12.5)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
     )
     
@@ -1678,7 +1678,7 @@ def test_default_operation_type_is_read(hass: HomeAssistant):
 
 def test_recommended_read_only_configuration_yaml(hass: HomeAssistant):
     """Test configuration.yaml is read-only in recommended config (Task 12.6)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1707,7 +1707,7 @@ def test_recommended_read_only_configuration_yaml(hass: HomeAssistant):
 
 def test_recommended_read_only_automations_yaml(hass: HomeAssistant):
     """Test automations.yaml is read-only in recommended config (Task 12.6)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1736,7 +1736,7 @@ def test_recommended_read_only_automations_yaml(hass: HomeAssistant):
 
 def test_recommended_read_only_scripts_yaml(hass: HomeAssistant):
     """Test scripts.yaml is read-only in recommended config (Task 12.6)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1765,7 +1765,7 @@ def test_recommended_read_only_scripts_yaml(hass: HomeAssistant):
 
 def test_recommended_read_only_scenes_yaml(hass: HomeAssistant):
     """Test scenes.yaml is read-only in recommended config (Task 12.6)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1794,7 +1794,7 @@ def test_recommended_read_only_scenes_yaml(hass: HomeAssistant):
 
 def test_recommended_read_only_storage_files(hass: HomeAssistant):
     """Test .storage/* files are read-only in recommended config (Task 12.6)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1835,7 +1835,7 @@ def test_recommended_read_only_storage_files(hass: HomeAssistant):
 
 def test_recommended_read_only_packages_yaml_files(hass: HomeAssistant):
     """Test packages/**/*.yaml files are read-only in recommended config (Task 12.6)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         OPERATION_READ,
         OPERATION_WRITE,
@@ -1876,7 +1876,7 @@ def test_recommended_read_only_packages_yaml_files(hass: HomeAssistant):
 
 def test_add_to_allowlist_runtime(hass: HomeAssistant):
     """Test adding path to allowlist at runtime (Task 13.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1904,7 +1904,7 @@ def test_add_to_allowlist_runtime(hass: HomeAssistant):
 
 def test_add_to_allowlist_with_glob_pattern(hass: HomeAssistant):
     """Test adding glob pattern to allowlist at runtime (Task 13.1)."""
-    from custom_components.ha_config_manager.const import SECURITY_MODE_ALLOWLIST
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
         "mode": SECURITY_MODE_ALLOWLIST,
@@ -1964,7 +1964,7 @@ def test_add_to_allowlist_logging(hass: HomeAssistant, caplog):
 
 def test_add_to_denylist_runtime(hass: HomeAssistant):
     """Test adding path to denylist at runtime (Task 13.2)."""
-    from custom_components.ha_config_manager.const import ERROR_BLACKLISTED_FILE
+    from custom_components.ha_dev_tools.const import ERROR_BLACKLISTED_FILE
     
     manager = SecurityManager(hass)
     
@@ -1985,7 +1985,7 @@ def test_add_to_denylist_runtime(hass: HomeAssistant):
 
 def test_add_to_denylist_with_glob_pattern(hass: HomeAssistant):
     """Test adding glob pattern to denylist at runtime (Task 13.2)."""
-    from custom_components.ha_config_manager.const import ERROR_BLACKLISTED_FILE
+    from custom_components.ha_dev_tools.const import ERROR_BLACKLISTED_FILE
     
     manager = SecurityManager(hass)
     
@@ -2038,7 +2038,7 @@ def test_add_to_denylist_logging(hass: HomeAssistant, caplog):
 
 def test_add_to_denylist_overrides_allowlist(hass: HomeAssistant):
     """Test that adding to denylist overrides allowlist (Task 13.2)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         ERROR_BLACKLISTED_FILE,
     )
@@ -2068,7 +2068,7 @@ def test_add_to_denylist_overrides_allowlist(hass: HomeAssistant):
 
 def test_remove_from_allowlist_runtime(hass: HomeAssistant):
     """Test removing path from allowlist at runtime (Task 13.3)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         ERROR_PERMISSION_DENIED,
     )
@@ -2183,7 +2183,7 @@ def test_remove_from_denylist_nonexistent_path(hass: HomeAssistant):
 
 def test_remove_from_denylist_default_sensitive_file(hass: HomeAssistant):
     """Test removing default sensitive file from denylist (Task 13.4)."""
-    from custom_components.ha_config_manager.const import ERROR_BLACKLISTED_FILE
+    from custom_components.ha_dev_tools.const import ERROR_BLACKLISTED_FILE
     
     manager = SecurityManager(hass)
     
@@ -2317,7 +2317,7 @@ def test_query_methods_reflect_runtime_modifications(hass: HomeAssistant):
 
 def test_dynamic_modifications_with_validation(hass: HomeAssistant):
     """Test dynamic modifications affect validation immediately (Task 13.1, 13.2)."""
-    from custom_components.ha_config_manager.const import (
+    from custom_components.ha_dev_tools.const import (
         SECURITY_MODE_ALLOWLIST,
         ERROR_PERMISSION_DENIED,
         ERROR_BLACKLISTED_FILE,

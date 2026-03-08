@@ -29,7 +29,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Home Assistant Management integration from configuration.yaml."""
     _LOGGER.info("Setting up Home Assistant Management Integration")
     
-    # Extract ha_config_manager configuration from config dict
+    # Extract ha_dev_tools configuration from config dict
     domain_config = config.get(DOMAIN, {})
     
     # Extract security configuration from domain config

@@ -13,7 +13,7 @@ from pathlib import Path
 from homeassistant.core import HomeAssistant
 from aiohttp.test_utils import TestClient
 
-from custom_components.ha_config_manager.const import DOMAIN
+from custom_components.ha_dev_tools.const import DOMAIN
 
 # Mark all tests in this module as integration tests that require HTTP
 pytestmark = pytest.mark.skip(reason="Requires full HTTP component - run in real HA environment")

@@ -5,9 +5,9 @@ from aiohttp import web
 from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 
-from custom_components.ha_config_manager.api import ManagementAPIHandler, FileAPIView
-from custom_components.ha_config_manager.security import SecurityManager
-from custom_components.ha_config_manager.const import (
+from custom_components.ha_dev_tools.api import ManagementAPIHandler, FileAPIView
+from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.const import (
     HTTP_OK,
     HTTP_BAD_REQUEST,
     HTTP_FORBIDDEN,
