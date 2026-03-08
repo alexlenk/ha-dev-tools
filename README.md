@@ -1,18 +1,24 @@
-# Home Assistant Configuration Manager Integration
+# HA Dev Tools - Home Assistant Development Integration
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
 [![License][license-shield]](LICENSE)
 [![hacs][hacsbadge]][hacs]
 
-A comprehensive Home Assistant custom integration that provides secure read-only REST API endpoints for configuration file access and log retrieval. This integration enables external development tools to programmatically view Home Assistant configuration files and retrieve logs from the core system through authenticated API calls.
+A comprehensive Home Assistant custom integration that provides secure REST API endpoints for configuration file access, log retrieval, and development tools. This integration enables external development tools to programmatically interact with Home Assistant configuration files and system logs through authenticated API calls.
+
+**Part of the HA Dev Tools ecosystem:**
+- **[ha-dev-tools-mcp](https://github.com/your-username/ha-dev-tools-mcp)** - MCP server for IDE integration
+- **[ha-development-power](https://github.com/your-username/ha-development-power)** - Kiro Power for seamless development workflow
+- **ha-dev-tools** (this repository) - Home Assistant integration providing the API
 
 ## Features
 
-### Configuration File Management (Read-Only)
+### Configuration File Management
 - **Read Files**: Access configuration.yaml and other config files via REST API
 - **List Files**: Browse available configuration files
-- **No Write Operations**: API is read-only for security - no file creation, modification, or deletion
+- **Write Files**: Programmatically update configuration files (with security controls)
+- **Metadata Access**: Get file metadata for version tracking and conflict detection
 
 ### Log Access (Read-Only)
 - **Core Logs**: Retrieve Home Assistant core system logs
@@ -21,10 +27,13 @@ A comprehensive Home Assistant custom integration that provides secure read-only
 
 ### Security Features
 - **Admin-Only Access**: All endpoints require administrator authentication
-- **Blacklist Protection**: Sensitive files (secrets.yaml, .HA_VERSION) are protected
+- **Allowlist Protection**: Only explicitly permitted paths are accessible
+- **Denylist Protection**: Sensitive files (secrets.yaml, auth data) are always blocked
 - **Path Validation**: Prevents directory traversal attacks
-- **File Extension Whitelist**: Only allowed file types can be accessed
 - **Security Logging**: All access attempts are logged for monitoring
+- **Rate Limiting**: Write operations are rate-limited to prevent abuse
+- **YAML Validation**: Automatic validation before writing configuration files
+- **Conflict Detection**: Hash-based conflict detection prevents overwriting newer versions
 
 ## Installation
 
@@ -34,20 +43,20 @@ A comprehensive Home Assistant custom integration that provides secure read-only
 2. Click on "Integrations"
 3. Click the three dots in the top right corner
 4. Select "Custom repositories"
-5. Add this repository URL: `https://github.com/your-username/ha-config-manager`
+5. Add this repository URL: `https://github.com/your-username/ha-dev-tools`
 6. Select category: "Integration"
 7. Click "Add"
-8. Find "Home Assistant Configuration Manager" in the integration list
+8. Find "HA Dev Tools" in the integration list
 9. Click "Download"
 10. Restart Home Assistant
 
 ### Manual Installation
 
 1. Download the latest release from the [releases page][releases]
-2. Extract the `ha_config_manager` folder from the archive
+2. Extract the `ha_dev_tools` folder from the archive
 3. Copy the folder to your `custom_components` directory:
    ```
-   <config_directory>/custom_components/ha_config_manager/
+   <config_directory>/custom_components/ha_dev_tools/
    ```
 4. Restart Home Assistant
 
@@ -55,14 +64,14 @@ A comprehensive Home Assistant custom integration that provides secure read-only
 
 ### Required Configuration
 
-**IMPORTANT**: Starting with version 2.0.0, this integration requires security configuration in your `configuration.yaml`. The integration will not load without it.
+**IMPORTANT**: This integration requires security configuration in your `configuration.yaml`. The integration will not load without it.
 
 Add the following to your `configuration.yaml`:
 
 ### Recommended Production Configuration (Read-Only, Strict)
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     # Read-only paths (safe for viewing, not modifying)
     read_paths:
@@ -160,19 +169,13 @@ For more pattern examples and use cases, see [Configuration Examples](docs/CONFI
 
 **Read-Write Paths** (`write_paths`):
 - Files can be both viewed and modified
-- Currently not recommended (future feature)
 - Requires explicit configuration
+- Subject to rate limiting and validation
 
 **Denied Paths** (`denied_paths`):
 - Files are completely inaccessible
 - Always enforced regardless of other settings
 - Protects sensitive authentication and system files
-
-### Migration from Previous Versions
-
-If you're upgrading from a version before 2.0.0, the integration will fail to load with a helpful error message containing the recommended configuration. Simply copy the recommended production configuration above into your `configuration.yaml` and restart Home Assistant.
-
-For detailed migration instructions and additional configuration examples, see [Configuration Examples](docs/CONFIGURATION_EXAMPLES.md).
 
 ### Additional Resources
 
@@ -184,9 +187,7 @@ For detailed migration instructions and additional configuration examples, see [
 
 All endpoints require authentication with an admin-level access token.
 
-**IMPORTANT: This API is READ-ONLY. No write, update, or delete operations are supported for security reasons.**
-
-### File Operations (Read-Only)
+### File Operations
 
 #### List Files
 ```http
@@ -232,7 +233,7 @@ homeassistant:
 
 #### Get File Metadata
 ```http
-GET /api/ha_config_manager/metadata/{filepath}
+GET /api/ha_dev_tools/metadata/{filepath}
 ```
 
 Returns metadata for a single file without reading its full content. Useful for version checking and conflict detection.
@@ -260,19 +261,7 @@ Returns metadata for a single file without reading its full content. Useful for 
 **Example:**
 ```bash
 curl -H "Authorization: Bearer YOUR_TOKEN" \
-  http://homeassistant.local:8123/api/ha_config_manager/metadata/configuration.yaml
-```
-
-**Response:**
-```json
-{
-  "path": "configuration.yaml",
-  "size": 2048,
-  "modified_at": "2026-03-06T10:30:45.123456",
-  "content_hash": "a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4",
-  "exists": true,
-  "accessible": true
-}
+  http://homeassistant.local:8123/api/ha_dev_tools/metadata/configuration.yaml
 ```
 
 **Use Cases:**
@@ -281,28 +270,9 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 - Track file changes over time
 - Verify file integrity
 
-**Error Responses:**
-
-File not found (404):
-```json
-{
-  "error": "File not found",
-  "path": "nonexistent.yaml"
-}
-```
-
-Access denied (403):
-```json
-{
-  "error": "Access denied",
-  "path": "secrets.yaml",
-  "reason": "File is in denied paths"
-}
-```
-
 #### Batch Get Metadata
 ```http
-POST /api/ha_config_manager/metadata/batch
+POST /api/ha_dev_tools/metadata/batch
 ```
 
 Returns metadata for multiple files in a single request. More efficient than multiple individual requests.
@@ -329,22 +299,6 @@ Returns metadata for multiple files in a single request. More efficient than mul
       "content_hash": "a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4",
       "exists": true,
       "accessible": true
-    },
-    {
-      "path": "automations.yaml",
-      "size": 4096,
-      "modified_at": "2026-03-06T11:15:30.654321",
-      "content_hash": "b4c6d8e0f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6",
-      "exists": true,
-      "accessible": true
-    },
-    {
-      "path": "scripts.yaml",
-      "size": 1024,
-      "modified_at": "2026-03-05T09:45:12.987654",
-      "content_hash": "c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7",
-      "exists": true,
-      "accessible": true
     }
   ],
   "errors": []
@@ -353,62 +307,11 @@ Returns metadata for multiple files in a single request. More efficient than mul
 
 **Batch Size Limit:** Maximum 20 files per request
 
-**Example:**
-```bash
-curl -X POST \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "file_paths": [
-      "configuration.yaml",
-      "automations.yaml",
-      "scripts.yaml"
-    ]
-  }' \
-  http://homeassistant.local:8123/api/ha_config_manager/metadata/batch
-```
-
-**Partial Failures:**
-
-If some files are inaccessible or don't exist, they are reported in the `errors` array:
-
-```json
-{
-  "metadata": [
-    {
-      "path": "configuration.yaml",
-      "size": 2048,
-      "modified_at": "2026-03-06T10:30:45.123456",
-      "content_hash": "a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4",
-      "exists": true,
-      "accessible": true
-    }
-  ],
-  "errors": [
-    {
-      "path": "secrets.yaml",
-      "error": "Access denied",
-      "reason": "File is in denied paths"
-    },
-    {
-      "path": "nonexistent.yaml",
-      "error": "File not found"
-    }
-  ]
-}
-```
-
-**Use Cases:**
-- Check multiple files for modifications in one request
-- Efficient version checking for related files
-- Batch conflict detection before uploading changes
-- Monitor file changes across multiple configuration files
-
 ### File Write Operations
 
 #### Write File
 ```http
-PUT /api/ha_config_manager/files/{filepath}
+PUT /api/ha_dev_tools/files/{filepath}
 ```
 
 Writes content to a configuration file. Only available for paths in `write_paths` configuration.
@@ -456,60 +359,7 @@ curl -X PUT \
     "content": "light:\n  - platform: template\n    lights:\n      living_room:\n        friendly_name: Living Room Light\n",
     "validate_before_write": true
   }' \
-  http://homeassistant.local:8123/api/ha_config_manager/files/packages/generated/lights.yaml
-```
-
-**Conflict Detection:**
-
-If `expected_hash` is provided and doesn't match the current file hash, a conflict is detected:
-
-```json
-{
-  "error": "Version conflict",
-  "message": "File has been modified since last read",
-  "current_hash": "e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9",
-  "expected_hash": "a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4",
-  "path": "packages/generated/lights.yaml"
-}
-```
-
-**Validation Errors:**
-
-If YAML validation fails:
-
-```json
-{
-  "error": "Validation failed",
-  "message": "Invalid YAML syntax",
-  "details": "mapping values are not allowed here\n  in \"<unicode string>\", line 3, column 10",
-  "path": "packages/generated/lights.yaml"
-}
-```
-
-**Access Denied:**
-
-If the file is not in `write_paths`:
-
-```json
-{
-  "error": "Access denied",
-  "message": "Write access not allowed for this path",
-  "path": "configuration.yaml",
-  "reason": "Path not in write_paths configuration"
-}
-```
-
-**Rate Limit Exceeded:**
-
-If rate limit is exceeded:
-
-```json
-{
-  "error": "Rate limit exceeded",
-  "message": "Too many write operations",
-  "limit": "10 writes per minute",
-  "retry_after": 45
-}
+  http://homeassistant.local:8123/api/ha_dev_tools/files/packages/generated/lights.yaml
 ```
 
 ### Log Operations (Read-Only)
@@ -550,6 +400,8 @@ Response:
 }
 ```
 
+For complete API documentation including error responses and security details, see [API Documentation](docs/API.md).
+
 ## Security
 
 ### Authentication
@@ -560,7 +412,7 @@ To create a token:
 1. Go to your Home Assistant profile
 2. Scroll to "Long-Lived Access Tokens"
 3. Click "Create Token"
-4. Give it a name (e.g., "Config Manager API")
+4. Give it a name (e.g., "HA Dev Tools API")
 5. Copy the token and use it in your API requests
 
 ### Write Operations Security
@@ -572,7 +424,7 @@ To create a token:
 To enable write operations for specific paths, add them to the `write_paths` configuration:
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     write_paths:
       # Enable writes for generated automation files
@@ -604,7 +456,7 @@ Write operations are rate-limited to prevent abuse:
 **Configuring Rate Limits:**
 
 ```yaml
-ha_config_manager:
+ha_dev_tools:
   security:
     write_paths:
       - "/config/packages/generated/*.yaml"
@@ -614,15 +466,6 @@ ha_config_manager:
       writes_per_minute: 10
       writes_per_hour: 100
       writes_per_day: 1000
-```
-
-To disable rate limiting (not recommended):
-
-```yaml
-ha_config_manager:
-  security:
-    rate_limiting:
-      enabled: false
 ```
 
 #### Audit Logging
@@ -638,80 +481,9 @@ All write operations are logged for security auditing:
 - Validation results
 - Conflict detection results
 
-**Log Location:** Home Assistant system logs with `ha_config_manager.security` source
+**Log Location:** Home Assistant system logs with `ha_dev_tools.security` source
 
-**Example Log Entries:**
-
-```
-2026-03-06 10:30:45 INFO (MainThread) [ha_config_manager.security] 
-  Write operation: user=admin, path=/config/packages/generated/lights.yaml, 
-  operation=update, status=success, validated=true
-
-2026-03-06 10:31:12 WARNING (MainThread) [ha_config_manager.security] 
-  Write operation denied: user=admin, path=/config/secrets.yaml, 
-  reason=denied_path
-
-2026-03-06 10:32:05 ERROR (MainThread) [ha_config_manager.security] 
-  Write operation failed: user=admin, path=/config/automations.yaml, 
-  reason=validation_failed, error=invalid YAML syntax at line 15
-```
-
-#### Security Best Practices
-
-**DO:**
-- ✅ Use the most restrictive `write_paths` possible
-- ✅ Enable write access only for generated or temporary files
-- ✅ Keep rate limiting enabled in production
-- ✅ Monitor audit logs regularly
-- ✅ Use conflict detection (`expected_hash`) for critical files
-- ✅ Test write operations in a development environment first
-- ✅ Back up your configuration before enabling write operations
-
-**DON'T:**
-- ❌ Enable write access to `configuration.yaml` unless absolutely necessary
-- ❌ Use wildcard patterns that match sensitive files
-- ❌ Disable rate limiting in production environments
-- ❌ Ignore validation errors
-- ❌ Skip backup verification
-- ❌ Grant write access to `.storage/` files
-- ❌ Use write operations for files that should be managed through HA UI
-
-#### Example: Safe Write Configuration
-
-```yaml
-ha_config_manager:
-  security:
-    # Read-only access to main config files
-    read_paths:
-      - "/config/configuration.yaml"
-      - "/config/automations.yaml"
-      - "/config/scripts.yaml"
-      - "/config/.storage/lovelace*"
-    
-    # Write access only to generated files
-    write_paths:
-      - "/config/packages/generated/*.yaml"
-      - "/config/test_configs/*.yaml"
-    
-    # Always deny sensitive files
-    denied_paths:
-      - "/config/secrets.yaml"
-      - "/config/.storage/auth*"
-      - "/config/.storage/core.*"
-    
-    # Enable rate limiting
-    rate_limiting:
-      enabled: true
-      writes_per_minute: 10
-      writes_per_hour: 100
-      writes_per_day: 1000
-```
-
-This configuration:
-- Allows reading main configuration files
-- Restricts writes to specific generated/test directories
-- Protects sensitive files from all access
-- Enforces rate limiting to prevent abuse
+For complete security documentation, see [Security Guide](docs/SECURITY.md).
 
 ### Protected Files
 
@@ -725,44 +497,31 @@ The following files are **always denied** and cannot be accessed regardless of c
 - `.uuid` - System identifier
 - Database files
 
-### Path Security
-
-- **Path Validation**: All file paths must be within the `/config` directory
-- **Traversal Protection**: Path traversal attempts (`../`) are automatically blocked
-- **Glob Support**: Patterns like `*` and `?` are supported for flexible matching
-- **Normalization**: Paths are normalized before validation to prevent bypasses
-- **Operation Tracking**: Read and write operations are tracked separately
-
-### Security Logging
-
-All security events are logged for audit purposes:
-- Denied access attempts
-- Path traversal attempts
-- Invalid configuration warnings
-- Security rule changes
-- Write operations (success and failure)
-- Rate limit violations
-- Validation failures
-
 ## Use Cases
 
-### External Development Tools (Read-Only Access)
+### IDE Integration with MCP Server
+
+Use this integration with the [ha-dev-tools-mcp](https://github.com/your-username/ha-dev-tools-mcp) server to:
+- Edit configuration files directly from your IDE
+- View and analyze logs in real-time
+- Test templates with live entity data
+- Validate configurations before deployment
+
+### Kiro Power Integration
+
+Install the [ha-development-power](https://github.com/your-username/ha-development-power) Kiro Power for:
+- Seamless IDE integration with Home Assistant
+- Automatic MCP server configuration
+- Guided workflows for common development tasks
+- Template testing and validation tools
+
+### External Development Tools
 
 Use this integration with external development tools to:
 - View configuration files from your IDE
 - Monitor configuration state
 - Analyze logs in real-time
 - Validate configurations before manual deployment
-
-**Note**: This integration provides read-only access. File modifications must be done through Home Assistant's UI or direct file system access.
-
-### MCP Server Integration
-
-This integration works seamlessly with the Configuration Manager MCP Server to provide:
-- IDE integration for Home Assistant development
-- Real-time configuration viewing
-- Log monitoring and analysis
-- Configuration analysis and validation
 
 ### Monitoring and Analysis
 
@@ -785,11 +544,10 @@ source .venv/bin/activate
 pip install -r requirements-test.txt
 
 # Run tests
-cd src/ha-integration
 PYTHONPATH=. python -m pytest tests/ -v
 
 # Run with coverage
-PYTHONPATH=. python -m pytest tests/ --cov=custom_components/ha_config_manager
+PYTHONPATH=. python -m pytest tests/ --cov=custom_components/ha_dev_tools
 ```
 
 ### Property-Based Testing
@@ -801,13 +559,15 @@ The integration uses property-based testing with Hypothesis to validate correctn
 PYTHONPATH=. python -m pytest tests/property/ -v --hypothesis-show-statistics
 ```
 
+For detailed development setup instructions, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Troubleshooting
 
 ### Integration Not Loading
 
 1. Check Home Assistant logs for errors
-2. Verify the integration is in the correct directory
-3. Ensure all dependencies are installed
+2. Verify the integration is in the correct directory: `custom_components/ha_dev_tools/`
+3. Ensure security configuration is present in `configuration.yaml`
 4. Restart Home Assistant
 
 ### API Endpoints Not Working
@@ -819,21 +579,24 @@ PYTHONPATH=. python -m pytest tests/property/ -v --hypothesis-show-statistics
 
 ### File Access Denied
 
-1. Check if the file is in the blacklist
-2. Verify the file extension is allowed
+1. Check if the file is in the denylist
+2. Verify the file path is in `read_paths` or `write_paths`
 3. Ensure the path doesn't contain traversal attempts
 4. Review security manager logs
 
+For more troubleshooting help, see [Troubleshooting Guide](docs/TROUBLESHOOTING.md).
+
+## Related Projects
+
+This integration is part of the HA Dev Tools ecosystem:
+
+- **[ha-dev-tools-mcp](https://github.com/your-username/ha-dev-tools-mcp)** - MCP server for IDE integration (Python package on PyPI)
+- **[ha-development-power](https://github.com/your-username/ha-development-power)** - Kiro Power for seamless development workflow
+- **ha-dev-tools** (this repository) - Home Assistant integration providing the API
+
 ## Contributing
 
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
@@ -853,12 +616,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-[releases-shield]: https://img.shields.io/github/release/your-username/ha-config-manager.svg?style=for-the-badge
-[releases]: https://github.com/your-username/ha-config-manager/releases
-[commits-shield]: https://img.shields.io/github/commit-activity/y/your-username/ha-config-manager.svg?style=for-the-badge
-[commits]: https://github.com/your-username/ha-config-manager/commits/main
-[license-shield]: https://img.shields.io/github/license/your-username/ha-config-manager.svg?style=for-the-badge
+[releases-shield]: https://img.shields.io/github/release/your-username/ha-dev-tools.svg?style=for-the-badge
+[releases]: https://github.com/your-username/ha-dev-tools/releases
+[commits-shield]: https://img.shields.io/github/commit-activity/y/your-username/ha-dev-tools.svg?style=for-the-badge
+[commits]: https://github.com/your-username/ha-dev-tools/commits/main
+[license-shield]: https://img.shields.io/github/license/your-username/ha-dev-tools.svg?style=for-the-badge
 [hacs]: https://github.com/hacs/integration
 [hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge
-[issues]: https://github.com/your-username/ha-config-manager/issues
-[documentation]: https://github.com/your-username/ha-config-manager
+[issues]: https://github.com/your-username/ha-dev-tools/issues
+[documentation]: https://github.com/your-username/ha-dev-tools
