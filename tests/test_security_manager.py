@@ -15,8 +15,21 @@ from custom_components.ha_dev_tools.const import (
 
 @pytest.fixture
 def security_manager(hass: HomeAssistant):
-    """Create a SecurityManager instance for testing."""
-    return SecurityManager(hass)
+    """Create a SecurityManager instance for testing with permissive config."""
+    # Configure with permissive paths for testing
+    config = {
+        "read_paths": [
+            "/config/*.yaml",
+            "/config/*.yml",
+            "/config/*.json",
+            "/config/*.txt",
+            "/config/**/*.yaml",
+            "/config/**/*.yml",
+            "/config/**/*.json",
+            "/config/**/*.txt",
+        ]
+    }
+    return SecurityManager(hass, config)
 
 
 @pytest.fixture
@@ -72,7 +85,7 @@ def test_validate_file_path_traversal(hass: HomeAssistant, security_manager):
 
 
 def test_validate_file_path_absolute(hass: HomeAssistant, security_manager):
-    """Test rejection of absolute paths."""
+    """Test rejection of absolute paths outside allowed directories."""
     absolute_paths = [
         "/etc/passwd",
         "/var/log/syslog",
@@ -82,7 +95,9 @@ def test_validate_file_path_absolute(hass: HomeAssistant, security_manager):
     for path in absolute_paths:
         is_valid, error = security_manager.validate_file_path(path)
         assert is_valid is False, f"Path {path} should be rejected"
-        assert error == ERROR_INVALID_PATH
+        # In strict allowlist mode, these paths are not in allowlist
+        # so they return PERMISSION_DENIED
+        assert error == ERROR_PERMISSION_DENIED
 
 
 def test_validate_file_path_blacklisted(hass: HomeAssistant, security_manager):
@@ -112,7 +127,8 @@ def test_validate_file_path_invalid_extension(hass: HomeAssistant, security_mana
     for path in invalid_extensions:
         is_valid, error = security_manager.validate_file_path(path)
         assert is_valid is False, f"Path {path} should be rejected (invalid extension)"
-        assert error == ERROR_INVALID_PATH
+        # In strict allowlist mode, these are rejected because they're not in allowlist
+        assert error == ERROR_PERMISSION_DENIED
 
 
 def test_is_blacklisted_exact_match(hass: HomeAssistant, security_manager):
@@ -236,15 +252,16 @@ def test_allowed_extensions(hass: HomeAssistant, security_manager):
         "test.yml",
         "test.json",
         "test.txt",
-        "test.py",
-        "test.jinja2",
     ]
     
     for file in allowed_files:
         is_valid, error = security_manager.validate_file_path(file)
-        # Should be valid (assuming not blacklisted)
+        # Should be valid (assuming not blacklisted and matches allowlist pattern)
         if not security_manager.is_blacklisted(file):
             assert is_valid is True, f"File {file} should have allowed extension"
+    
+    # test.py and test.jinja2 are not in the /config/*.{yaml,yml,json,txt} pattern
+    # so they will be rejected in strict allowlist mode even though .py is an allowed extension
 
 
 # ============================================================================
@@ -264,9 +281,8 @@ def test_default_configuration_with_none(hass: HomeAssistant):
     assert "secrets.yaml" in manager.denylist
     assert ".HA_VERSION" in manager.denylist
     
-    # Should be in denylist mode by default
-    from custom_components.ha_dev_tools.const import SECURITY_MODE_DENYLIST
-    assert manager._mode == SECURITY_MODE_DENYLIST
+    # System now always operates in strict allowlist mode
+    # No _mode attribute needed
 
 
 def test_default_configuration_with_empty_dict(hass: HomeAssistant):
@@ -282,9 +298,8 @@ def test_default_configuration_with_empty_dict(hass: HomeAssistant):
     assert "secrets.yaml" in manager.denylist
     assert ".HA_VERSION" in manager.denylist
     
-    # Should be in denylist mode by default
-    from custom_components.ha_dev_tools.const import SECURITY_MODE_DENYLIST
-    assert manager._mode == SECURITY_MODE_DENYLIST
+    # System now always operates in strict allowlist mode
+    # No _mode attribute needed
 
 
 def test_default_denylist_loaded(hass: HomeAssistant):
@@ -547,12 +562,9 @@ def test_invalid_configuration_warning_logs(hass: HomeAssistant, caplog):
 
 
 def test_allowlist_mode_with_explicit_paths(hass: HomeAssistant):
-    """Test allowlist mode with explicit allowed_paths (Task 9.4)."""
-    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
-    
+    """Test allowlist with explicit read_paths (Task 9.4)."""
     config = {
-        "mode": SECURITY_MODE_ALLOWLIST,
-        "allowed_paths": [
+        "read_paths": [
             "/config/configuration.yaml",
             "/config/automations.yaml",
         ]
@@ -560,9 +572,7 @@ def test_allowlist_mode_with_explicit_paths(hass: HomeAssistant):
     
     manager = SecurityManager(hass, config=config)
     
-    # Should be in allowlist mode
-    assert manager._mode == SECURITY_MODE_ALLOWLIST
-    
+    # System always operates in strict allowlist mode
     # Configured paths should be in allowlist
     assert "/config/configuration.yaml" in manager.allowlist
     assert "/config/automations.yaml" in manager.allowlist
@@ -576,21 +586,17 @@ def test_allowlist_mode_with_explicit_paths(hass: HomeAssistant):
 
 
 def test_allowlist_mode_default_behavior(hass: HomeAssistant, caplog):
-    """Test default behavior with no allowed_paths in allowlist mode (Task 9.4)."""
+    """Test default behavior with no read_paths specified (Task 9.4)."""
     import logging
-    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
     
     config = {
-        "mode": SECURITY_MODE_ALLOWLIST,
-        # No allowed_paths specified
+        # No read_paths specified
     }
     
     with caplog.at_level(logging.INFO):
         manager = SecurityManager(hass, config=config)
     
-    # Should be in allowlist mode
-    assert manager._mode == SECURITY_MODE_ALLOWLIST
-    
+    # System always operates in strict allowlist mode
     # Should use recommended safe storage patterns
     assert len(manager.allowlist) > 0
     
@@ -604,20 +610,17 @@ def test_allowlist_mode_default_behavior(hass: HomeAssistant, caplog):
 
 
 def test_denylist_mode_operation(hass: HomeAssistant):
-    """Test denylist mode operation (Task 9.4)."""
-    from custom_components.ha_dev_tools.const import SECURITY_MODE_DENYLIST
-    
+    """Test denylist operation with custom denied_paths (Task 9.4)."""
     config = {
-        "mode": SECURITY_MODE_DENYLIST,
         "denied_paths": [
             "/config/custom_blocked.yaml",
+        ],
+        "read_paths": [
+            "/config/*.yaml",
         ]
     }
     
     manager = SecurityManager(hass, config=config)
-    
-    # Should be in denylist mode
-    assert manager._mode == SECURITY_MODE_DENYLIST
     
     # Custom denied path should be in denylist
     assert "/config/custom_blocked.yaml" in manager.denylist
@@ -625,7 +628,7 @@ def test_denylist_mode_operation(hass: HomeAssistant):
     # Should deny access to denylisted files
     assert manager.is_denylisted("/config/custom_blocked.yaml") is True
     
-    # Should allow access to non-denylisted files (in denylist mode)
+    # Should allow access to non-denylisted files that are in allowlist
     assert manager.is_denylisted("/config/configuration.yaml") is False
 
 
@@ -2147,10 +2150,14 @@ def test_remove_from_denylist_runtime(hass: HomeAssistant):
     # Verify path is not in denylist
     assert "/config/test.yaml" not in manager.denylist
     
-    # Verify subsequent validation allows access (assuming not in allowlist mode or in allowlist)
+    # In strict allowlist mode, removing from denylist is not enough
+    # The path must also be in the allowlist to be accessible
+    # Add to allowlist to make it accessible
+    manager.add_to_allowlist("/config/test.yaml")
+    
+    # Now it should be accessible
     is_valid, error = manager.validate_file_path("test.yaml")
-    # In denylist mode (default), should be allowed after removal from denylist
-    assert is_valid is True, "Path removed from denylist should be accessible in denylist mode"
+    assert is_valid is True, "Path removed from denylist and added to allowlist should be accessible"
     assert error is None
 
 
@@ -2183,9 +2190,10 @@ def test_remove_from_denylist_nonexistent_path(hass: HomeAssistant):
 
 def test_remove_from_denylist_default_sensitive_file(hass: HomeAssistant):
     """Test removing default sensitive file from denylist (Task 13.4)."""
-    from custom_components.ha_dev_tools.const import ERROR_BLACKLISTED_FILE
-    
-    manager = SecurityManager(hass)
+    config = {
+        "read_paths": ["/config/*.yaml"]  # Add allowlist config
+    }
+    manager = SecurityManager(hass, config=config)
     
     # secrets.yaml is in default denylist
     assert manager.is_denylisted("secrets.yaml") is True
@@ -2196,9 +2204,11 @@ def test_remove_from_denylist_default_sensitive_file(hass: HomeAssistant):
     # Should no longer be in denylist
     assert "secrets.yaml" not in manager.denylist
     
-    # Should now be accessible (in denylist mode)
+    # In strict allowlist mode, it's now accessible because:
+    # 1. It's no longer in denylist
+    # 2. It matches the /config/*.yaml pattern in read_paths
     is_valid, error = manager.validate_file_path("secrets.yaml")
-    assert is_valid is True, "Removed default sensitive file should be accessible after removal"
+    assert is_valid is True, "Removed default sensitive file should be accessible after removal when in allowlist"
     assert error is None
 
 

@@ -14,8 +14,31 @@ from custom_components.ha_dev_tools.const import (
 
 @pytest.fixture
 def security_manager(hass: HomeAssistant):
-    """Create a SecurityManager instance for testing."""
-    return SecurityManager(hass)
+    """Create a SecurityManager instance for testing with permissive config."""
+    # Configure with permissive paths for testing
+    config = {
+        "read_paths": [
+            "/config/*.yaml",
+            "/config/*.yml",
+            "/config/*.json",
+            "/config/*.txt",
+            "/config/**/*.yaml",
+            "/config/**/*.yml",
+            "/config/**/*.json",
+            "/config/**/*.txt",
+        ],
+        "write_paths": [
+            "/config/*.yaml",
+            "/config/*.yml",
+            "/config/*.json",
+            "/config/*.txt",
+            "/config/**/*.yaml",
+            "/config/**/*.yml",
+            "/config/**/*.json",
+            "/config/**/*.txt",
+        ]
+    }
+    return SecurityManager(hass, config)
 
 
 @pytest.fixture
@@ -100,9 +123,11 @@ async def test_write_and_read_file(hass: HomeAssistant, file_manager, mock_confi
 """
     
     # Write the file
-    success = await file_manager.write_file("automations.yaml", test_content)
+    result = await file_manager.write_file("automations.yaml", test_content)
     
-    assert success is True
+    # write_file returns metadata dictionary on success
+    assert isinstance(result, dict)
+    assert result.get("accessible") is True
     
     # Read it back
     content = await file_manager.read_file("automations.yaml")
@@ -116,9 +141,11 @@ async def test_write_file_creates_directories(hass: HomeAssistant, file_manager,
     test_content = "test: value"
     
     # Write to a nested path
-    success = await file_manager.write_file("subdir/test.yaml", test_content)
+    result = await file_manager.write_file("subdir/test.yaml", test_content)
     
-    assert success is True
+    # write_file returns metadata dictionary on success
+    assert isinstance(result, dict)
+    assert result.get("accessible") is True
     
     # Verify the file was created
     content = await file_manager.read_file("subdir/test.yaml")
@@ -127,17 +154,18 @@ async def test_write_file_creates_directories(hass: HomeAssistant, file_manager,
 
 
 async def test_read_directory_as_file(hass: HomeAssistant, file_manager, tmp_path):
-    """Test that trying to read a directory returns FILE_NOT_FOUND."""
+    """Test that trying to read a directory is blocked by security."""
     # Set up the config directory
     hass.config.config_dir = str(tmp_path)
     
-    # Create a directory
-    test_dir = tmp_path / "test_directory"
+    # Create a directory with a yaml extension to pass security check
+    test_dir = tmp_path / "test_directory.yaml"
     test_dir.mkdir()
     
     # Try to read the directory as a file
-    with pytest.raises(FileNotFoundError, match="File not found: test_directory"):
-        await file_manager.read_file("test_directory")
+    # Should fail because it's a directory, not a file
+    with pytest.raises(FileNotFoundError, match="File not found: test_directory.yaml"):
+        await file_manager.read_file("test_directory.yaml")
 
 
 async def test_file_encoding_handling(hass: HomeAssistant, file_manager, mock_config_file):
@@ -145,9 +173,11 @@ async def test_file_encoding_handling(hass: HomeAssistant, file_manager, mock_co
     special_content = "test: 'special chars: åäö 中文 🎉'"
     
     # Write file with special characters
-    success = await file_manager.write_file("special.yaml", special_content)
+    result = await file_manager.write_file("special.yaml", special_content)
     
-    assert success is True
+    # write_file returns metadata dictionary on success
+    assert isinstance(result, dict)
+    assert result.get("accessible") is True
     
     # Read it back
     content = await file_manager.read_file("special.yaml")
@@ -181,9 +211,11 @@ test:
 """
     
     # Write the content
-    success = await file_manager.write_file("test_roundtrip.yaml", original_content)
+    result = await file_manager.write_file("test_roundtrip.yaml", original_content)
     
-    assert success is True
+    # write_file returns metadata dictionary on success
+    assert isinstance(result, dict)
+    assert result.get("accessible") is True
     
     # Read it back
     read_content = await file_manager.read_file("test_roundtrip.yaml")
