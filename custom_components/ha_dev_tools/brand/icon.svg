@@ -1,0 +1,16 @@
+<!-- Option 5: Hexagon Badge Style -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="grad5" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6A1B9A;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#9C27B0;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" fill="url(#grad5)" rx="24"/>
+  <!-- Hexagon -->
+  <path d="M 64,20 L 90,35 L 90,65 L 64,80 L 38,65 L 38,35 Z" 
+        fill="none" stroke="white" stroke-width="4"/>
+  <text x="64" y="54" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="white" text-anchor="middle">HA</text>
+  <text x="64" y="68" font-family="monospace" font-size="12" fill="#E1BEE7" text-anchor="middle">&lt;dev/&gt;</text>
+  <text x="64" y="108" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="white" text-anchor="middle">DEV TOOLS</text>
+</svg>
