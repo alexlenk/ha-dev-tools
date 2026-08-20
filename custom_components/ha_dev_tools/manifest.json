@@ -3,7 +3,7 @@
   "name": "HA Dev Tools",
   "after_dependencies": ["http"],
   "codeowners": ["@alexlenk"],
-  "config_flow": false,
+  "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/alexlenk/ha-dev-tools",
   "integration_type": "system",

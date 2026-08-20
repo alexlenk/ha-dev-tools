@@ -22,4 +22,11 @@ aiofiles>=23.0.0
 aiohttp>=3.8.0
 
 # Home Assistant core (required for integration testing)
+# NOTE: the real minimum version is 2026.8.2 (see hacs.json) - that's when HA's
+# native `mcp_server` integration shipped, which is what serves the dev_tools
+# llm.API over MCP. Left unpinned here (rather than >=2026.8.2) so this still
+# installs in environments whose package mirror lags behind - this sandbox's
+# is capped at 2025.1.4. Tests in tests/test_llm_api.py use version-tolerant
+# fallbacks for API surface that changed between these versions (e.g.
+# llm.LLMContext's fields, whether llm.async_register_api returns an unsub).
 homeassistant>=2024.1.0

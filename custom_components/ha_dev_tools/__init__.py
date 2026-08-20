@@ -18,6 +18,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .api import ManagementAPIHandler
 from .const import DOMAIN, CONFIG_SCHEMA
+from .llm_api import async_register as async_register_llm_api
 from .security import SecurityManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,12 +81,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     # Register API endpoints
     await api_handler.register_api_endpoints()
-    
+
+    # Register the dev_tools LLM API, exposed over MCP by HA's native
+    # mcp_server integration (no custom transport code needed here).
+    unsub_llm_api = async_register_llm_api(hass)
+
     # Store components in hass.data
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["api_handler"] = api_handler
     hass.data[DOMAIN]["security_manager"] = security_manager
-    
+    hass.data[DOMAIN]["unsub_llm_api"] = unsub_llm_api
+
     _LOGGER.info("Home Assistant Management Integration config entry setup completed")
     return True
 
@@ -99,7 +105,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api_handler = hass.data[DOMAIN].get("api_handler")
         if api_handler:
             await api_handler.cleanup()
-        
+
+        unsub_llm_api = hass.data[DOMAIN].get("unsub_llm_api")
+        if unsub_llm_api:
+            unsub_llm_api()
+
         # Remove from hass.data
         hass.data.pop(DOMAIN)
     

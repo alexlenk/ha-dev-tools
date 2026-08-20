@@ -18,6 +18,12 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'custom_components'))
 
 # Mock homeassistant modules before importing our code
+# Snapshot real sys.modules entries so they can be restored after this
+# file's own imports below - without this, replacing sys.modules['homeassistant']
+# etc. leaks into every test file collected afterward in the same pytest
+# process (breaks anything needing the real homeassistant package, e.g.
+# tests/test_llm_api.py's pytest-homeassistant-custom-component fixtures).
+_ORIGINAL_HA_MODULES = {key: sys.modules.get(key) for key in ['homeassistant', 'homeassistant.core', 'homeassistant.config_entries', 'homeassistant.auth', 'homeassistant.auth.models', 'homeassistant.components', 'homeassistant.components.http', 'homeassistant.const', 'homeassistant.helpers', 'homeassistant.helpers.typing']}
 mock_homeassistant = Mock()
 mock_core = Mock()
 mock_config_entries = Mock()
@@ -60,6 +66,15 @@ mock_http.HomeAssistantView = MockHomeAssistantView
 from custom_components.ha_dev_tools.api import ManagementAPIHandler, MetadataAPIView, BatchMetadataAPIView
 from custom_components.ha_dev_tools.security import SecurityManager
 from custom_components.ha_dev_tools.file_manager import FileManager
+
+# Restore the real sys.modules entries now that the module(s) under test
+# have finished importing against the mocks above - contains the mock
+# pollution to this file instead of leaking into later-collected tests.
+for _key, _mod in _ORIGINAL_HA_MODULES.items():
+    if _mod is not None:
+        sys.modules[_key] = _mod
+    else:
+        sys.modules.pop(_key, None)
 
 
 class MockRequest:
