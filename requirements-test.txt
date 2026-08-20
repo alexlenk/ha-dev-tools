@@ -24,11 +24,23 @@ ruamel.yaml>=0.18.0
 
 # Transitive deps of homeassistant.helpers.llm -> homeassistant.components.
 # conversation -> default_agent, which isn't in homeassistant's own install
-# requirements (conversation is an optional/frontend-adjacent component) but
-# gets imported unconditionally the moment llm_api.py imports `llm`. Found by
-# running against a real install, not by reading requirements lists.
-hassil>=2.0.0
-home-assistant-intents>=2024.1.0
+# requirements (conversation is an optional/frontend-adjacent component,
+# whose own deps are loaded lazily at HA runtime via manifest.json rather
+# than the top-level package's install_requires) but gets imported
+# unconditionally the moment llm_api.py imports `llm`. Pinned exactly to
+# match homeassistant/components/conversation/manifest.json's own
+# requirements for the homeassistant version this resolves to - a floor
+# constraint (hassil>=2.0.0) let pip pick a newer hassil release (3.11.0)
+# that removed the hassil.fuzzy submodule this HA version's default_agent.py
+# still imports. The manifest's own exact pin (hassil==2.1.0) turned out to
+# be wrong too - default_agent.py also imports `Group` from
+# hassil.expression, which 2.1.0 doesn't have (added later than 2.1.0,
+# hassil.fuzzy removed by 3.0.0 - 3.2.0 is the first version confirmed to
+# have both, checked directly rather than assumed). If the resolved
+# `homeassistant` version above ever changes, re-verify against a real
+# install rather than trusting either the manifest pin or this range.
+hassil==3.2.0
+home-assistant-intents==2025.1.1
 
 # Home Assistant core (required for integration testing)
 # NOTE: hacs.json declares a 2026.8.2 minimum (when mcp_server, which serves
