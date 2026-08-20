@@ -89,6 +89,10 @@ async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integr
         "get_automation",
         "write_automation",
         "audit_automations",
+        "list_helpers",
+        "create_helper",
+        "update_helper",
+        "delete_helper",
     }
 
 

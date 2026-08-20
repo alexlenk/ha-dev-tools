@@ -18,14 +18,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
 
-from . import audit_manager, config_tools, entity_manager
+from . import audit_manager, config_tools, entity_manager, helper_manager
 from .automation_manager import (
     AutomationManager,
     AutomationNotFoundError,
     DuplicateAutomationIdError,
 )
 from .const import DOMAIN
+from .helper_manager import (
+    HELPER_DOMAINS,
+    InvalidHelperDomainError,
+    UnresolvedUserError,
+)
 from .log_manager import LogFilters, LogManager
+from .ws_call import WebSocketCommandError
 
 API_ID = "dev_tools"
 API_NAME = "HA Dev Tools"
@@ -276,6 +282,137 @@ class WriteAutomationTool(llm.Tool):
         return {"file_path": location.file_path, "is_package": location.is_package}
 
 
+def _helper_domain_schema() -> vol.Schema:
+    return vol.In(HELPER_DOMAINS)
+
+
+class ListHelpersTool(llm.Tool):
+    """List every storage-defined item in a helper domain (input_boolean, counter, etc.)."""
+
+    name = "list_helpers"
+    description = (
+        "List every helper (input_boolean, input_number, input_text, "
+        "input_select, input_datetime, input_button, counter, timer, or "
+        "schedule) currently defined via the UI/storage in the given "
+        "domain. Does not include YAML-defined helpers of the same "
+        "domain - those aren't reachable this way (see get_automation's "
+        "'layout-aware' approach for the analogous YAML case)."
+    )
+    parameters = vol.Schema({vol.Required("domain"): _helper_domain_schema()})
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List helpers in the given domain."""
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            items = await helper_manager.list_helpers(hass, user, tool_input.tool_args["domain"])
+        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return {"items": items}
+
+
+class CreateHelperTool(llm.Tool):
+    """Create a new helper item."""
+
+    name = "create_helper"
+    description = (
+        "Create a new helper (input_boolean, counter, timer, etc.) via "
+        "the same mechanism the UI's Helpers page uses. 'config' fields "
+        "vary by domain - e.g. input_boolean/counter/timer mainly need "
+        "'name'; input_number additionally needs 'min'/'max'; "
+        "input_select needs 'options' (a list)."
+    )
+    parameters = vol.Schema(
+        {vol.Required("domain"): _helper_domain_schema(), vol.Required("config"): dict}
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Create the helper."""
+        args = tool_input.tool_args
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            created = await helper_manager.create_helper(
+                hass, user, args["domain"], args["config"]
+            )
+        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return created
+
+
+class UpdateHelperTool(llm.Tool):
+    """Update an existing helper item by id."""
+
+    name = "update_helper"
+    description = (
+        "Update an existing storage-defined helper by id. Only works on "
+        "helpers created via the UI/storage, not YAML-defined ones - "
+        "list_helpers' results only include the former for exactly this "
+        "reason."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("domain"): _helper_domain_schema(),
+            vol.Required("item_id"): str,
+            vol.Required("config"): dict,
+        }
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Update the helper."""
+        args = tool_input.tool_args
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            updated = await helper_manager.update_helper(
+                hass, user, args["domain"], args["item_id"], args["config"]
+            )
+        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return updated
+
+
+class DeleteHelperTool(llm.Tool):
+    """Delete a helper item by id."""
+
+    name = "delete_helper"
+    description = "Delete a storage-defined helper by id."
+    parameters = vol.Schema(
+        {vol.Required("domain"): _helper_domain_schema(), vol.Required("item_id"): str}
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete the helper."""
+        args = tool_input.tool_args
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            await helper_manager.delete_helper(hass, user, args["domain"], args["item_id"])
+        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
+
+
 class AuditAutomationsTool(llm.Tool):
     """Static analysis over every known automation for latent reliability bugs."""
 
@@ -331,6 +468,10 @@ class DevToolsAPI(llm.API):
                 GetAutomationTool(self.automation_manager),
                 WriteAutomationTool(self.automation_manager),
                 AuditAutomationsTool(self.automation_manager),
+                ListHelpersTool(),
+                CreateHelperTool(),
+                UpdateHelperTool(),
+                DeleteHelperTool(),
             ],
         )
 
