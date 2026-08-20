@@ -93,6 +93,8 @@ async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integr
         "create_helper",
         "update_helper",
         "delete_helper",
+        "get_dashboard",
+        "write_dashboard",
     }
 
 

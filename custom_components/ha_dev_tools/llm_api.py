@@ -18,13 +18,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
 
-from . import audit_manager, config_tools, entity_manager, helper_manager
+from . import audit_manager, config_tools, dashboard_manager, entity_manager, helper_manager
 from .automation_manager import (
     AutomationManager,
     AutomationNotFoundError,
     DuplicateAutomationIdError,
 )
 from .const import DOMAIN
+from .dashboard_manager import YamlModeDashboardError
 from .helper_manager import (
     HELPER_DOMAINS,
     InvalidHelperDomainError,
@@ -413,6 +414,69 @@ class DeleteHelperTool(llm.Tool):
         return {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
 
 
+class GetDashboardTool(llm.Tool):
+    """Read a dashboard's config - works in both storage and YAML mode."""
+
+    name = "get_dashboard"
+    description = (
+        "Read a Lovelace dashboard's config (views/cards). Omit url_path "
+        "for the default dashboard, or pass an additional dashboard's "
+        "url_path. Works whether the dashboard is UI/storage-managed or "
+        "YAML-mode."
+    )
+    parameters = vol.Schema({vol.Optional("url_path"): str})
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Read the dashboard config."""
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            config = await dashboard_manager.get_dashboard(
+                hass, user, url_path=tool_input.tool_args.get("url_path")
+            )
+        except (UnresolvedUserError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return config
+
+
+class WriteDashboardTool(llm.Tool):
+    """Write a dashboard's config - storage mode only."""
+
+    name = "write_dashboard"
+    description = (
+        "Save a Lovelace dashboard's config (views/cards). Storage-mode "
+        "dashboards only - HA hard-rejects saving YAML-mode dashboards "
+        "through this path (get_dashboard still works for those, just "
+        "not this). Omit url_path for the default dashboard."
+    )
+    parameters = vol.Schema(
+        {vol.Required("config"): dict, vol.Optional("url_path"): str}
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Write the dashboard config."""
+        args = tool_input.tool_args
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            await dashboard_manager.write_dashboard(
+                hass, user, args["config"], url_path=args.get("url_path")
+            )
+        except (UnresolvedUserError, YamlModeDashboardError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return {"saved": True, "url_path": args.get("url_path")}
+
+
 class AuditAutomationsTool(llm.Tool):
     """Static analysis over every known automation for latent reliability bugs."""
 
@@ -472,6 +536,8 @@ class DevToolsAPI(llm.API):
                 CreateHelperTool(),
                 UpdateHelperTool(),
                 DeleteHelperTool(),
+                GetDashboardTool(),
+                WriteDashboardTool(),
             ],
         )
 

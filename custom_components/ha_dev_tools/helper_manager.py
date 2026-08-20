@@ -13,9 +13,19 @@ from typing import Any
 
 from homeassistant.auth.models import User
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import llm
 
-from .ws_call import call_ws_command
+from .ws_call import UnresolvedUserError, call_ws_command, resolve_user
+
+__all__ = [
+    "HELPER_DOMAINS",
+    "InvalidHelperDomainError",
+    "UnresolvedUserError",
+    "create_helper",
+    "delete_helper",
+    "list_helpers",
+    "resolve_user",
+    "update_helper",
+]
 
 HELPER_DOMAINS = (
     "input_boolean",
@@ -30,15 +40,6 @@ HELPER_DOMAINS = (
 )
 
 
-class UnresolvedUserError(Exception):
-    """Raised when the calling context has no resolvable HA user.
-
-    Helper create/update/delete are admin-gated at the real WS command
-    level - refuse before even trying, rather than falling back to some
-    synthetic bypass user.
-    """
-
-
 class InvalidHelperDomainError(Exception):
     """Raised for a domain that isn't one of the nine known helper domains."""
 
@@ -48,24 +49,6 @@ def _check_domain(domain: str) -> None:
         raise InvalidHelperDomainError(
             f"'{domain}' is not a helper domain; must be one of {HELPER_DOMAINS}"
         )
-
-
-async def resolve_user(hass: HomeAssistant, llm_context: llm.LLMContext) -> User:
-    """Resolve the real HA user behind an MCP tool call.
-
-    HA's native mcp_server integration builds LLMContext.context from the
-    authenticated request, so this should be the real caller in
-    production - not a synthetic admin bypass.
-    """
-    user_id = llm_context.context.user_id if llm_context.context else None
-    user = await hass.auth.async_get_user(user_id) if user_id else None
-    if user is None:
-        raise UnresolvedUserError(
-            "Could not resolve a real Home Assistant user from this request's "
-            "context - refusing rather than acting with elevated/ambiguous "
-            "permissions"
-        )
-    return user
 
 
 async def list_helpers(

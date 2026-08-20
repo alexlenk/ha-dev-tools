@@ -28,6 +28,7 @@ from homeassistant.auth.models import User
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import llm
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,34 @@ class WebSocketCommandError(HomeAssistantError):
         """Init with the WS error code/message."""
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+class UnresolvedUserError(Exception):
+    """Raised when the calling context has no resolvable HA user.
+
+    Admin-gated WS commands (helper/dashboard create/update/delete etc.)
+    should refuse before even trying, rather than falling back to some
+    synthetic bypass user.
+    """
+
+
+async def resolve_user(hass: HomeAssistant, llm_context: llm.LLMContext) -> User:
+    """Resolve the real HA user behind an MCP tool call.
+
+    HA's native mcp_server integration builds LLMContext.context from the
+    authenticated request, so this should be the real caller in
+    production - not a synthetic admin bypass. Shared by any WS-backed
+    tool (helpers, dashboards, ...), not helper-specific.
+    """
+    user_id = llm_context.context.user_id if llm_context.context else None
+    user = await hass.auth.async_get_user(user_id) if user_id else None
+    if user is None:
+        raise UnresolvedUserError(
+            "Could not resolve a real Home Assistant user from this request's "
+            "context - refusing rather than acting with elevated/ambiguous "
+            "permissions"
+        )
+    return user
 
 
 def _decode(raw: bytes | str | dict[str, Any]) -> dict[str, Any]:
