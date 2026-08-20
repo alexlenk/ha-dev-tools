@@ -179,6 +179,26 @@ class AutomationManager:
             raise DuplicateAutomationIdError(automation_id, locations)
         return locations[0]
 
+    async def all_automations(self) -> list[tuple[AutomationLocation, dict[str, Any]]]:
+        """Return every automation across every candidate file, for auditing.
+
+        Unlike get_automation, this doesn't resolve/refuse on duplicate ids -
+        an audit needs to see every definition, duplicates included.
+        """
+        results: list[tuple[AutomationLocation, dict[str, Any]]] = []
+        for file_path in await self.candidate_files():
+            document = await self._load_document(file_path)
+            automations = self._automation_list(file_path, document)
+            if not automations:
+                continue
+            location = AutomationLocation(
+                file_path=file_path, is_package=(file_path != DEFAULT_AUTOMATIONS_FILE)
+            )
+            for entry in automations:
+                if isinstance(entry, dict):
+                    results.append((location, dict(entry)))
+        return results
+
     async def get_automation(self, automation_id: str) -> tuple[AutomationLocation, dict[str, Any]]:
         """Return the location and config dict for an automation id."""
         location = await self.find_automation(automation_id)

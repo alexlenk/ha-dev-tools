@@ -74,6 +74,7 @@ async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integr
         "reload_domain",
         "get_automation",
         "write_automation",
+        "audit_automations",
     }
 
 

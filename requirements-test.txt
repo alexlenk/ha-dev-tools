@@ -22,6 +22,14 @@ aiofiles>=23.0.0
 aiohttp>=3.8.0
 ruamel.yaml>=0.18.0
 
+# Transitive deps of homeassistant.helpers.llm -> homeassistant.components.
+# conversation -> default_agent, which isn't in homeassistant's own install
+# requirements (conversation is an optional/frontend-adjacent component) but
+# gets imported unconditionally the moment llm_api.py imports `llm`. Found by
+# running against a real install, not by reading requirements lists.
+hassil>=2.0.0
+home-assistant-intents>=2024.1.0
+
 # Home Assistant core (required for integration testing)
 # NOTE: hacs.json declares a 2026.8.2 minimum (when mcp_server, which serves
 # the dev_tools llm.API over MCP, was added on home-assistant/core's dev

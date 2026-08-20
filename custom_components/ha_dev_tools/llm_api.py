@@ -18,7 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
 
-from . import config_tools, entity_manager
+from . import audit_manager, config_tools, entity_manager
 from .automation_manager import (
     AutomationManager,
     AutomationNotFoundError,
@@ -276,6 +276,36 @@ class WriteAutomationTool(llm.Tool):
         return {"file_path": location.file_path, "is_package": location.is_package}
 
 
+class AuditAutomationsTool(llm.Tool):
+    """Static analysis over every known automation for latent reliability bugs."""
+
+    name = "audit_automations"
+    description = (
+        "Audit every automation (default file and all packages) for "
+        "duplicate ids across files, and for triggers/conditions/actions "
+        "referencing an entity that is currently unavailable or unknown - "
+        "the class of bug that fails silently with no error anywhere. "
+        "Does not yet detect overlapping-trigger race conditions or "
+        "unhandled rest_command/shell_command failures (see the result's "
+        "'note' field)."
+    )
+    parameters = vol.Schema({})
+
+    def __init__(self, automation_manager: AutomationManager) -> None:
+        """Init with the AutomationManager backing this tool."""
+        self._manager = automation_manager
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Run the audit."""
+        return await audit_manager.audit_automations(hass, self._manager)
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
@@ -300,6 +330,7 @@ class DevToolsAPI(llm.API):
                 ReloadDomainTool(),
                 GetAutomationTool(self.automation_manager),
                 WriteAutomationTool(self.automation_manager),
+                AuditAutomationsTool(self.automation_manager),
             ],
         )
 
