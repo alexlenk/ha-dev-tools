@@ -1,0 +1,129 @@
+name: Version Check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    # Only enforce version bump for release branches; skip for infra/workflow-only PRs
+    if: startsWith(github.head_ref, 'claude/release-')
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from PR branch
+        id: pr-version
+        run: |
+          if [ ! -f custom_components/ha_dev_tools/manifest.json ]; then
+            echo "❌ Error: manifest.json not found"
+            exit 1
+          fi
+
+          PR_VERSION=$(jq -r '.version' custom_components/ha_dev_tools/manifest.json)
+          if [ -z "$PR_VERSION" ] || [ "$PR_VERSION" == "null" ]; then
+            echo "❌ Error: version field not found in manifest.json"
+            exit 1
+          fi
+
+          echo "version=$PR_VERSION" >> $GITHUB_OUTPUT
+          echo "📦 PR branch version: $PR_VERSION"
+
+      - name: Extract version from main branch
+        id: main-version
+        run: |
+          git fetch origin main
+          MAIN_VERSION=$(git show origin/main:custom_components/ha_dev_tools/manifest.json | jq -r '.version')
+
+          if [ -z "$MAIN_VERSION" ] || [ "$MAIN_VERSION" == "null" ]; then
+            echo "❌ Error: version field not found in main branch manifest.json"
+            exit 1
+          fi
+
+          echo "version=$MAIN_VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Main branch version: $MAIN_VERSION"
+
+      - name: Check if version was modified
+        id: version-changed
+        run: |
+          PR_VERSION="${{ steps.pr-version.outputs.version }}"
+          MAIN_VERSION="${{ steps.main-version.outputs.version }}"
+
+          if [ "$PR_VERSION" == "$MAIN_VERSION" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "❌ Version has not been incremented"
+            echo "   Current version in main: $MAIN_VERSION"
+            echo "   Version in PR: $PR_VERSION"
+            exit 1
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Version has been modified"
+          fi
+
+      - name: Validate semantic versioning format
+        id: validate-format
+        run: |
+          PR_VERSION="${{ steps.pr-version.outputs.version }}"
+
+          if ! echo "$PR_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ Error: Version '$PR_VERSION' does not follow semantic versioning format"
+            echo "   Expected format: X.Y.Z (e.g., 1.5.9, 2.0.0)"
+            exit 1
+          fi
+
+          echo "✅ Version format is valid: $PR_VERSION"
+
+      - name: Compare version numbers
+        id: compare-versions
+        run: |
+          PR_VERSION="${{ steps.pr-version.outputs.version }}"
+          MAIN_VERSION="${{ steps.main-version.outputs.version }}"
+
+          IFS='.' read -r PR_MAJOR PR_MINOR PR_PATCH <<< "$PR_VERSION"
+          IFS='.' read -r MAIN_MAJOR MAIN_MINOR MAIN_PATCH <<< "$MAIN_VERSION"
+
+          if [ "$PR_MAJOR" -gt "$MAIN_MAJOR" ]; then
+            echo "✅ Version incremented: $MAIN_VERSION → $PR_VERSION (major version bump)"
+            exit 0
+          elif [ "$PR_MAJOR" -lt "$MAIN_MAJOR" ]; then
+            echo "❌ Error: New version ($PR_VERSION) is less than current version ($MAIN_VERSION)"
+            echo "   Major version decreased: $MAIN_MAJOR → $PR_MAJOR"
+            exit 1
+          fi
+
+          if [ "$PR_MINOR" -gt "$MAIN_MINOR" ]; then
+            echo "✅ Version incremented: $MAIN_VERSION → $PR_VERSION (minor version bump)"
+            exit 0
+          elif [ "$PR_MINOR" -lt "$MAIN_MINOR" ]; then
+            echo "❌ Error: New version ($PR_VERSION) is less than current version ($MAIN_VERSION)"
+            echo "   Minor version decreased: $MAIN_MINOR → $PR_MINOR"
+            exit 1
+          fi
+
+          if [ "$PR_PATCH" -gt "$MAIN_PATCH" ]; then
+            echo "✅ Version incremented: $MAIN_VERSION → $PR_VERSION (patch version bump)"
+            exit 0
+          else
+            echo "❌ Error: New version ($PR_VERSION) is not greater than current version ($MAIN_VERSION)"
+            echo "   Patch version must be incremented"
+            exit 1
+          fi
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "## ✅ Version Check Passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Main branch version:** ${{ steps.main-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**PR branch version:** ${{ steps.pr-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The version has been properly incremented and follows semantic versioning format." >> $GITHUB_STEP_SUMMARY
