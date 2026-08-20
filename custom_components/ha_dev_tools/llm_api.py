@@ -107,6 +107,37 @@ class FindEntitiesTool(llm.Tool):
         return entity_manager.find_entities(hass, **tool_input.tool_args)
 
 
+class EntityHealthReportTool(llm.Tool):
+    """Per-integration entity health summary - hundreds of entities, made scannable."""
+
+    name = "entity_health_report"
+    description = (
+        "Summarize entity health per integration: counts of disabled, "
+        "hidden, unavailable, unknown, and 'missing' (registered but no "
+        "state at all - usually the owning integration failed to load) "
+        "entities, plus a capped sample of the actual problem entities. "
+        "Use this instead of find_entities when the goal is 'what's "
+        "broken', not looking up a specific entity."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("area"): str,
+            vol.Optional("integration"): str,
+            vol.Optional("limit", default=entity_manager.HEALTH_REPORT_DEFAULT_LIMIT): int,
+        }
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Run the health report."""
+        return entity_manager.entity_health_report(hass, **tool_input.tool_args)
+
+
 class GetLogsTool(llm.Tool):
     """Tail/filter/search the core Home Assistant log - never an unbounded raw dump."""
 
@@ -526,6 +557,7 @@ class DevToolsAPI(llm.API):
             tools=[
                 DevToolsPingTool(),
                 FindEntitiesTool(),
+                EntityHealthReportTool(),
                 GetLogsTool(self.log_manager),
                 CheckConfigTool(),
                 ReloadDomainTool(),

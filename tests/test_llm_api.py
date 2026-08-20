@@ -83,6 +83,7 @@ async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integr
     assert tool_names == {
         "dev_tools_ping",
         "find_entities",
+        "entity_health_report",
         "get_logs",
         "check_config",
         "reload_domain",
