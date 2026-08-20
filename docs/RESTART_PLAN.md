@@ -103,8 +103,8 @@ Confirmed by reading `mcp_server/server.py`'s `_format_tool()`: it builds `types
 ## Implementation phasing
 
 1. **Foundation** — new `ha_dev_tools` integration skeleton, real (enabled) config flow, registers an empty `llm.API`. Verify end-to-end: a trivial tool shows up and is callable through the native `mcp_server`'s `/api/mcp/dev_tools` from a real MCP client. Prove the architecture before building on it.
-2. **Core authoring loop** — layout detection, `get_logs` (raw file), `find_entities`, `render_template`/`validate_template`, `get_automation`/`write_automation` (default-file path first), `check_config`/`reload_automations`.
-3. **Package safety** — provenance resolution across package files, the package-aware write path, blueprint resolution. Test directly against a package-file-shaped fixture.
+2. **Core authoring loop** — ✅ landed (`feature/llm-tools-foundation`): layout detection, `get_logs` (raw file), `find_entities`, `get_automation`/`write_automation`, `check_config`/`reload_domain`. `render_template`/`validate_template` not yet ported - still open.
+3. **Package safety** — ✅ landed alongside Phase 2 rather than after it (the two turned out inseparable: `write_automation` isn't safe without provenance resolution from the start). Tested directly against a `packages/emhas.yaml`-shaped fixture, which also surfaced and fixed a real bug: `SecurityManager`'s `**` glob matching didn't match direct children of `packages/`, only subdirectories - see CHANGELOG. Blueprint resolution (`blueprint/substitute` for `use_blueprint:` automations) still open - `get_automation` currently returns unexpanded blueprint references as-is.
 4. **Configure surface** — helper CRUD wrapper (cheap, mechanical), dashboards (storage mode first, YAML mode second).
 5. **Audit/hygiene** — automation static analysis, entity health report.
 6. **Monitor** — Supervisor add-on logs.

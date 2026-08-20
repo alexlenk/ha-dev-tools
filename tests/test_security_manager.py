@@ -1873,6 +1873,38 @@ def test_recommended_read_only_packages_yaml_files(hass: HomeAssistant):
         assert error == ERROR_WRITE_NOT_PERMITTED
 
 
+def test_globstar_pattern_matches_direct_children_too(hass: HomeAssistant):
+    """packages/**/*.yaml must match packages/x.yaml, not just packages/sub/x.yaml.
+
+    Found via a real test against the actual recommended default pattern
+    (DEFAULT_READ_ONLY_PATHS uses "/config/packages/**/*.yaml") against a
+    package file placed directly in packages/ - e.g. packages/emhas.yaml,
+    a real user's layout. Plain fnmatch.fnmatch requires the literal '/'
+    between the two '*' groups to be present in the path, so it silently
+    rejected exactly the common case the pattern's own docstring claims to
+    support.
+    """
+    from custom_components.ha_dev_tools.const import SECURITY_MODE_ALLOWLIST
+
+    config = {
+        "mode": SECURITY_MODE_ALLOWLIST,
+        "read_paths": ["/config/packages/**/*.yaml"],
+    }
+    manager = SecurityManager(hass, config=config)
+
+    # Direct child of packages/ - the case that was broken.
+    is_valid, error = manager.validate_file_path("packages/emhas.yaml")
+    assert is_valid is True, f"packages/emhas.yaml should match **, got error={error}"
+
+    # Nested child - already worked, must keep working.
+    is_valid, error = manager.validate_file_path("packages/sub/emhas.yaml")
+    assert is_valid is True
+
+    # Outside packages/ entirely - must still be denied.
+    is_valid, error = manager.validate_file_path("not_packages/emhas.yaml")
+    assert is_valid is False
+
+
 # ============================================================================
 # Dynamic Modifications Tests (Task 13)
 # ============================================================================

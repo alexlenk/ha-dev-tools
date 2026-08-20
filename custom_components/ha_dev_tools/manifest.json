@@ -12,7 +12,8 @@
   "quality_scale": "silver",
   "requirements": [
     "aiofiles>=23.0.0",
-    "pyyaml>=6.0.0"
+    "pyyaml>=6.0.0",
+    "ruamel.yaml>=0.18.0"
   ],
   "version": "1.0.0"
 }

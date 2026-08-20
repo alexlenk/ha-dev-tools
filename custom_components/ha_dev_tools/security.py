@@ -528,24 +528,37 @@ class SecurityManager:
             ```
         
         Note:
-            The ** wildcard for recursive directory matching is not directly
-            supported by fnmatch. For recursive patterns, use separate logic
-            or configure multiple specific patterns.
+            fnmatch has no native concept of "zero or more directories" for
+            `**` - `fnmatch.fnmatch("packages/x.yaml", "packages/**/*.yaml")`
+            is False, because the pattern's literal `/` between the two `*`
+            groups requires an intermediate path segment to actually be
+            present. That silently broke the documented recommended pattern
+            `packages/**/*.yaml` for files placed directly in `packages/`
+            (e.g. `packages/emhas.yaml`) rather than in a subdirectory - found
+            via a real test against that exact layout. `_fnmatch_globstar`
+            below also tries the pattern with `**/` collapsed to nothing, so
+            `**` behaves as "zero or more directories" as documented/intended.
         """
-        # Direct match
+        return (
+            self._fnmatch_globstar(path, pattern)
+            or (
+                not pattern.startswith("/")
+                and (
+                    self._fnmatch_globstar(path, f"/config/{pattern}")
+                    or self._fnmatch_globstar(path, f"/addon_configs/{pattern}")
+                )
+            )
+        )
+
+    @staticmethod
+    def _fnmatch_globstar(path: str, pattern: str) -> bool:
+        """fnmatch.fnmatch, but `**` also matches zero intermediate directories."""
         if fnmatch.fnmatch(path, pattern):
             return True
-        
-        # If pattern doesn't start with /, try matching against path suffixes
-        # This allows patterns like ".storage/auth*" to match "/config/.storage/auth"
-        if not pattern.startswith("/"):
-            # Try matching with /config/ prefix
-            if fnmatch.fnmatch(path, f"/config/{pattern}"):
-                return True
-            # Try matching with /addon_configs/ prefix
-            if fnmatch.fnmatch(path, f"/addon_configs/{pattern}"):
-                return True
-        
+        if "**/" in pattern:
+            return fnmatch.fnmatch(path, pattern.replace("**/", ""))
+        if "/**" in pattern:
+            return fnmatch.fnmatch(path, pattern.replace("/**", ""))
         return False
 
     def validate_file_path(self, file_path: str, operation: str = OPERATION_READ) -> Tuple[bool, Optional[str]]:

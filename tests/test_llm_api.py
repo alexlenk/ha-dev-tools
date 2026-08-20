@@ -61,6 +61,23 @@ async def test_dev_tools_ping_tool_reachable(hass: HomeAssistant, setup_integrat
 
 
 @pytest.mark.asyncio
+async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integration_with_entry):
+    """All Phase 2 tools are registered, not just the diagnostic ping tool."""
+    api_instance = await llm.async_get_api(hass, API_ID, _llm_context())
+
+    tool_names = {tool.name for tool in api_instance.tools}
+    assert tool_names == {
+        "dev_tools_ping",
+        "find_entities",
+        "get_logs",
+        "check_config",
+        "reload_domain",
+        "get_automation",
+        "write_automation",
+    }
+
+
+@pytest.mark.asyncio
 async def test_dev_tools_api_unregistered_on_unload(
     hass: HomeAssistant, setup_integration_with_entry
 ):
