@@ -132,6 +132,8 @@ async def test_dev_tools_real_tools_registered(
         "render_template",
         "validate_template",
         "get_logs",
+        "get_entity_history",
+        "get_logbook",
         "list_addons",
         "get_addon_logs",
         "check_config",

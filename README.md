@@ -98,6 +98,8 @@ repository.
 | Tool | What it does |
 |---|---|
 | `get_logs` | Tail/filter/search the core Home Assistant log |
+| `get_entity_history` | Recorder-backed state history for one or more entities over a time range |
+| `get_logbook` | Recorder-backed, humanized logbook entries (automations/scripts triggering, notable state changes) over a time range |
 | `list_addons` / `get_addon_logs` | Supervisor add-on info and logs (Home Assistant OS/Supervised only) |
 
 **Audit**
