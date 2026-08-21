@@ -123,7 +123,24 @@ async def call_ws_command(
         "refresh_token": SimpleNamespace(id=None),
         "remote": None,
     }
-    accepted = set(inspect.signature(websocket_api.ActiveConnection.__init__).parameters)
+    # Under Python 3.14's deferred annotation evaluation (PEP 649/749),
+    # plain inspect.signature() calls ActiveConnection.__init__'s
+    # __annotate__ to resolve its parameter annotations - and raises
+    # NameError there, because `WebSocketAdapter` isn't resolvable in that
+    # scope at inspection time (confirmed: real failure on HA 2026.8.2 /
+    # Python 3.14.7, not assumed). We only need parameter *names*, never
+    # their annotations, so ask for best-effort ForwardRef placeholders
+    # instead of raising. annotation_format is itself 3.14+ only, so older
+    # interpreters (which don't defer annotation evaluation and so don't
+    # hit this) fall back to the plain call.
+    try:
+        sig = inspect.signature(
+            websocket_api.ActiveConnection.__init__,
+            annotation_format=inspect.Format.FORWARDREF,
+        )
+    except TypeError:
+        sig = inspect.signature(websocket_api.ActiveConnection.__init__)
+    accepted = set(sig.parameters)
     connection = websocket_api.ActiveConnection(
         **{k: v for k, v in all_kwargs.items() if k in accepted}
     )
