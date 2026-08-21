@@ -1,0 +1,7 @@
+[flake8]
+# black targets 88 for code, but doesn't wrap comments/docstrings/string
+# literals - 100 gives those room without re-litigating every line black
+# already settled, while still catching genuinely oversized lines.
+max-line-length = 100
+extend-ignore = E203, W503
+exclude = .git,.hypothesis,__pycache__,.pytest_cache,.venv

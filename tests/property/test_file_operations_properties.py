@@ -1,22 +1,46 @@
 """Property-based tests for FileManager file operations.
 
 This module contains property-based tests that validate the correctness
-of file operations in the Home Assistant Management Integration.
+of file operations in the HA Dev Tools.
 """
-import pytest
+
 import asyncio
-from hypothesis import given, strategies as st, assume, settings, HealthCheck
-import string
-import tempfile
-from pathlib import Path
-from unittest.mock import Mock
-import sys
 import os
+import string
+import sys
+import tempfile
+from unittest.mock import Mock
+
+import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 # Add the custom_components directory to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'custom_components'))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "..", "..", "custom_components")
+)
 
 # Mock homeassistant modules before importing our code
+# Snapshot real sys.modules entries so they can be restored after this
+# file's own imports below - without this, replacing sys.modules['homeassistant']
+# etc. leaks into every test file collected afterward in the same pytest
+# process (breaks anything needing the real homeassistant package, e.g.
+# tests/test_llm_api.py's pytest-homeassistant-custom-component fixtures).
+_ORIGINAL_HA_MODULES = {
+    key: sys.modules.get(key)
+    for key in [
+        "homeassistant",
+        "homeassistant.core",
+        "homeassistant.config_entries",
+        "homeassistant.auth",
+        "homeassistant.auth.models",
+        "homeassistant.components",
+        "homeassistant.components.http",
+        "homeassistant.const",
+        "homeassistant.helpers",
+        "homeassistant.helpers.typing",
+    ]
+}
 mock_homeassistant = Mock()
 mock_core = Mock()
 mock_config_entries = Mock()
@@ -28,16 +52,16 @@ mock_const = Mock()
 mock_helpers = Mock()
 mock_helpers_typing = Mock()
 
-sys.modules['homeassistant'] = mock_homeassistant
-sys.modules['homeassistant.core'] = mock_core
-sys.modules['homeassistant.config_entries'] = mock_config_entries
-sys.modules['homeassistant.auth'] = mock_auth
-sys.modules['homeassistant.auth.models'] = mock_auth_models
-sys.modules['homeassistant.components'] = mock_components
-sys.modules['homeassistant.components.http'] = mock_http
-sys.modules['homeassistant.const'] = mock_const
-sys.modules['homeassistant.helpers'] = mock_helpers
-sys.modules['homeassistant.helpers.typing'] = mock_helpers_typing
+sys.modules["homeassistant"] = mock_homeassistant
+sys.modules["homeassistant.core"] = mock_core
+sys.modules["homeassistant.config_entries"] = mock_config_entries
+sys.modules["homeassistant.auth"] = mock_auth
+sys.modules["homeassistant.auth.models"] = mock_auth_models
+sys.modules["homeassistant.components"] = mock_components
+sys.modules["homeassistant.components.http"] = mock_http
+sys.modules["homeassistant.const"] = mock_const
+sys.modules["homeassistant.helpers"] = mock_helpers
+sys.modules["homeassistant.helpers.typing"] = mock_helpers_typing
 
 # Mock the specific classes and constants we need
 mock_config_entries.ConfigEntry = Mock()
@@ -47,6 +71,7 @@ mock_core.HomeAssistant = Mock()
 mock_auth_models.User = Mock()
 mock_http.HomeAssistantView = Mock()
 
+
 # Mock the HomeAssistant classes we need
 class MockUser:
     def __init__(self, is_admin=True):
@@ -54,47 +79,64 @@ class MockUser:
         self.id = "test_user"
         self.name = "Test User"
 
+
 class MockHass:
     """Mock Home Assistant instance for testing."""
-    
+
     def __init__(self, config_dir: str):
         self.config = Mock()
         self.config.config_dir = config_dir
-        
+
     async def async_add_executor_job(self, func, *args):
         """Mock executor job - just run synchronously."""
         return func(*args)
 
-# Now import our modules
-from custom_components.ha_dev_tools.file_manager import FileManager
-from custom_components.ha_dev_tools.security import SecurityManager
-from custom_components.ha_dev_tools.const import DEFAULT_BLACKLIST
+
+from custom_components.ha_dev_tools.const import DEFAULT_BLACKLIST  # noqa: E402
+
+# Now import our modules - deliberately placed after the mock-pollution
+# setup above, not sloppy ordering (see the sys.modules restore below).
+from custom_components.ha_dev_tools.file_manager import FileManager  # noqa: E402
+from custom_components.ha_dev_tools.security import SecurityManager  # noqa: E402
+
+# Restore the real sys.modules entries now that the module(s) under test
+# have finished importing against the mocks above - contains the mock
+# pollution to this file instead of leaking into later-collected tests.
+for _key, _mod in _ORIGINAL_HA_MODULES.items():
+    if _mod is not None:
+        sys.modules[_key] = _mod
+    else:
+        sys.modules.pop(_key, None)
 
 
 # Strategy for generating valid file paths
 valid_filename_chars = string.ascii_letters + string.digits + "_-"
 valid_filenames = st.builds(
     lambda name, ext: f"{name}.{ext}",
-    name=st.text(alphabet=valid_filename_chars, min_size=1, max_size=20).filter(lambda x: not x.startswith('.')),
-    ext=st.sampled_from(['yaml', 'yml', 'json', 'txt'])
+    name=st.text(alphabet=valid_filename_chars, min_size=1, max_size=20).filter(
+        lambda x: not x.startswith(".")
+    ),
+    ext=st.sampled_from(["yaml", "yml", "json", "txt"]),
 )
 
 # Strategy for generating valid file content
 valid_file_content = st.text(
-    alphabet=string.printable,
-    min_size=0,
-    max_size=1000
-).filter(lambda x: '\x00' not in x)  # Exclude null bytes
+    alphabet=string.printable, min_size=0, max_size=1000
+).filter(
+    lambda x: "\x00" not in x
+)  # Exclude null bytes
 
 # Strategy for generating potentially malicious file paths
-malicious_paths = st.one_of([
-    st.just("../etc/passwd"),
-    st.just("../../etc/shadow"),
-    st.just("/etc/passwd"),
-    st.just("\\..\\windows\\system32\\config\\sam"),
-    st.text(min_size=1, max_size=100).filter(lambda x: '..' in x),
-    st.text(min_size=1, max_size=100).filter(lambda x: x.startswith('/')),
-])
+malicious_paths = st.one_of(
+    [
+        st.just("../etc/passwd"),
+        st.just("../../etc/shadow"),
+        st.just("/etc/passwd"),
+        st.just("\\..\\windows\\system32\\config\\sam"),
+        st.text(min_size=1, max_size=100).filter(lambda x: ".." in x),
+        st.text(min_size=1, max_size=100).filter(lambda x: x.startswith("/")),
+    ]
+)
 
 
 @given(filename=valid_filenames, content=valid_file_content)
@@ -102,51 +144,54 @@ malicious_paths = st.one_of([
 def test_file_round_trip_property(filename, content):
     """
     Feature: ha-config-manager-integration, Property 1: File Operations Round Trip
-    
-    For any valid file path and content, writing content to a file then reading it back 
+
+    For any valid file path and content, writing content to a file then reading it back
     should return the same content.
     **Validates: Requirements 1.2, 1.3**
     """
+
     async def run_test():
         with tempfile.TemporaryDirectory() as temp_dir:
             # Skip blacklisted files
-            if filename in DEFAULT_BLACKLIST or any(filename.startswith(bl) for bl in DEFAULT_BLACKLIST):
+            if filename in DEFAULT_BLACKLIST or any(
+                filename.startswith(bl) for bl in DEFAULT_BLACKLIST
+            ):
                 return  # Skip instead of assume
-            
+
             # Skip files with path traversal attempts
-            if '..' in filename or filename.startswith('/'):
+            if ".." in filename or filename.startswith("/"):
                 return  # Skip instead of assume
-            
+
             # Normalize path separators for cross-platform compatibility
-            normalized_filename = filename.replace('\\', '/')
-            if '/' in normalized_filename and normalized_filename.startswith('/'):
+            normalized_filename = filename.replace("\\", "/")
+            if "/" in normalized_filename and normalized_filename.startswith("/"):
                 return  # Skip instead of assume
-            
+
             # Create mock hass and managers with write permissions
             mock_hass = MockHass(temp_dir)
             security_config = {
                 "write_paths": ["*.yaml", "*.yml"],  # Allow all YAML files for testing
                 "read_paths": [],
-                "denied_paths": []
+                "denied_paths": [],
             }
             security_manager = SecurityManager(mock_hass, security_config)
             file_manager = FileManager(mock_hass, security_manager)
-            
+
             try:
                 # Write the content - may return metadata or boolean
                 result = await file_manager.write_file(filename, content)
                 if isinstance(result, bool) and not result:
                     return  # Write failed, skip test
-                
+
                 # Read the content back
                 read_content = await file_manager.read_file(filename)
-                
+
                 # The read should succeed and return the same content
                 assert read_content == content, f"Content mismatch for {filename}"
             except (PermissionError, ValueError):
                 # If write failed due to security restrictions, skip
                 return  # Skip instead of assume
-    
+
     # Run the async test
     asyncio.run(run_test())
 
@@ -156,30 +201,31 @@ def test_file_round_trip_property(filename, content):
 def test_security_enforcement_property(malicious_path):
     """
     Feature: ha-config-manager-integration, Property: Security Enforcement
-    
-    For any malicious file path (path traversal, absolute paths), 
+
+    For any malicious file path (path traversal, absolute paths),
     all file operations should be rejected with appropriate errors.
     **Validates: Requirements 4.1, 4.2, 4.3**
     """
+
     async def run_test():
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create mock hass and managers
             mock_hass = MockHass(temp_dir)
             security_manager = SecurityManager(mock_hass)
             file_manager = FileManager(mock_hass, security_manager)
-            
+
             # Try to read the malicious path - should raise ValueError
             with pytest.raises((ValueError, PermissionError)):
                 await file_manager.read_file(malicious_path)
-            
+
             # Try to write to the malicious path - should raise ValueError
             with pytest.raises((ValueError, PermissionError)):
                 await file_manager.write_file(malicious_path, "test content")
-            
+
             # Try to check existence of malicious path - should raise ValueError
             with pytest.raises((ValueError, RuntimeError)):
                 await file_manager.file_exists(malicious_path)
-    
+
     # Run the async test
     asyncio.run(run_test())
 
@@ -188,29 +234,34 @@ def test_security_enforcement_property(malicious_path):
 def test_blacklist_enforcement_property(blacklisted_file):
     """
     Feature: ha-config-manager-integration, Property: Blacklist Enforcement
-    
-    For any file in the security blacklist, access attempts should be rejected 
+
+    For any file in the security blacklist, access attempts should be rejected
     with 403 Forbidden responses regardless of path validity.
     **Validates: Requirements 5.1, 5.3**
     """
+
     async def run_test():
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create mock hass and managers
             mock_hass = MockHass(temp_dir)
             security_manager = SecurityManager(mock_hass)
             file_manager = FileManager(mock_hass, security_manager)
-            
+
             # Try to read the blacklisted file - should raise PermissionError
-            with pytest.raises(PermissionError, match="Access to blacklisted file denied"):
+            with pytest.raises(
+                PermissionError, match="Access to blacklisted file denied"
+            ):
                 await file_manager.read_file(blacklisted_file)
-            
+
             # Try to write to the blacklisted file - should raise PermissionError
-            with pytest.raises(PermissionError, match="Access to blacklisted file denied"):
+            with pytest.raises(
+                PermissionError, match="Access to blacklisted file denied"
+            ):
                 await file_manager.write_file(blacklisted_file, "test content")
-            
+
             # file_exists should raise ValueError for blacklisted files
             with pytest.raises(ValueError):
                 await file_manager.file_exists(blacklisted_file)
-    
+
     # Run the async test
     asyncio.run(run_test())

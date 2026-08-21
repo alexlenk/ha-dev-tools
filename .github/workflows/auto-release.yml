@@ -1,0 +1,173 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_run:
+    # Also trigger when auto-merge completes — GitHub prevents GITHUB_TOKEN-triggered
+    # merges from firing push events, so this is the reliable path for auto-releases.
+    workflows: ["Auto Merge Release PRs"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Run for: manual dispatch, direct push to main, or successful auto-merge
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.event.head_commit.message != '') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from manifest
+        id: version
+        run: |
+          if [ ! -f custom_components/ha_dev_tools/manifest.json ]; then
+            echo "❌ Error: manifest.json not found"
+            exit 1
+          fi
+
+          VERSION=$(jq -r '.version // empty' custom_components/ha_dev_tools/manifest.json)
+
+          if [ -z "$VERSION" ]; then
+            echo "❌ Error: Could not extract version from manifest.json"
+            exit 1
+          fi
+
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "⚠️ Warning: Version '$VERSION' may not follow semantic versioning (X.Y.Z)"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Extracted version: $VERSION"
+
+      - name: Check if tag already exists
+        id: check-tag
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+
+          git fetch --tags
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "⏭️ Tag $TAG already exists, will skip release creation"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Tag $TAG does not exist, will create new release"
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        id: release-notes
+        if: steps.check-tag.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES_FILE="/tmp/release_notes.md"
+
+          if [ -f CHANGELOG.md ]; then
+            echo "📄 Found CHANGELOG.md, extracting notes for version $VERSION"
+
+            # Extract the section for this version using a state-machine.
+            # Range form `/start/,/end/` fails here because the start line also matches
+            # the end pattern (`^## \[`), so the range activates and deactivates on the
+            # same line and nothing gets printed.
+            awk -v ver="$VERSION" '
+              $0 ~ "^## \\[" ver "\\]" { in_section = 1; next }
+              in_section && /^## \[/ { exit }
+              in_section { print }
+            ' CHANGELOG.md > "$NOTES_FILE"
+
+            sed -i '/./,$!d' "$NOTES_FILE"
+            sed -i -e :a -e '/^\s*$/d;N;ba' "$NOTES_FILE"
+
+            if [ ! -s "$NOTES_FILE" ]; then
+              echo "⚠️ Version section not found in CHANGELOG.md, using generic release description"
+              echo "# Release v$VERSION" > "$NOTES_FILE"
+              echo "" >> "$NOTES_FILE"
+              echo "This release includes updates and improvements to the HA Dev Tools integration." >> "$NOTES_FILE"
+              echo "" >> "$NOTES_FILE"
+              echo "For detailed changes, see the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)." >> "$NOTES_FILE"
+            else
+              echo "✅ Extracted release notes from CHANGELOG.md"
+            fi
+          else
+            echo "⚠️ CHANGELOG.md not found, generating basic release description"
+            echo "# Release v$VERSION" > "$NOTES_FILE"
+            echo "" >> "$NOTES_FILE"
+            echo "This release includes updates and improvements to the HA Dev Tools integration." >> "$NOTES_FILE"
+          fi
+
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            cat "$NOTES_FILE"
+            echo "RELEASE_NOTES_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        if: steps.check-tag.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v$VERSION"
+
+          echo "🏷️ Creating annotated tag: $TAG"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TAG" -m "Release v$VERSION"
+
+          if git push origin "$TAG"; then
+            echo "✅ Successfully pushed tag $TAG"
+          else
+            echo "❌ Error: Failed to push tag $TAG"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        if: steps.check-tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "📦 Creating GitHub release for $TAG"
+
+          cat > /tmp/release_body.md << 'RELEASE_NOTES_EOF'
+          ${{ steps.release-notes.outputs.notes }}
+          RELEASE_NOTES_EOF
+
+          if gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/release_body.md \
+            --latest; then
+            echo "✅ Successfully created GitHub release $TAG"
+          else
+            echo "❌ Error: Failed to create GitHub release"
+            git push --delete origin "$TAG" || true
+            git tag -d "$TAG" || true
+            exit 1
+          fi
+
+      - name: Notify release created
+        if: steps.check-tag.outputs.exists == 'false'
+        run: |
+          echo "✅ Release ${{ steps.version.outputs.tag }} created successfully!"
+          echo "📦 HACS will automatically detect this release"
+          echo "🔗 View release at: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
+
+      - name: Skip release (tag exists)
+        if: steps.check-tag.outputs.exists == 'true'
+        run: |
+          echo "⏭️ Tag ${{ steps.version.outputs.tag }} already exists, skipping release creation"
+          echo "🔗 Existing release: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"

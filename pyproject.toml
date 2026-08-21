@@ -6,26 +6,21 @@ build-backend = "setuptools.build_meta"
 name = "ha-dev-tools"
 version = "1.0.0"
 description = "Home Assistant Development Tools Integration"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-asyncio_mode = "auto"
-addopts = "-v --tb=short --strict-markers"
-markers = [
-    "unit: Unit tests with HA fixtures",
-    "property: Property-based tests",
-    "integration: Integration tests with HA web component"
-]
-norecursedirs = [".git", ".hypothesis", "__pycache__", ".pytest_cache"]
-filterwarnings = [
-    "error",
-    "ignore::DeprecationWarning",
-    "ignore::PendingDeprecationWarning"
-]
+# Pytest config lives in pytest.ini, not here - pytest.ini takes precedence
+# over [tool.pytest.ini_options] whenever both exist, so a duplicate
+# section here would be silently ignored (confirmed: every real test run's
+# own header reports "configfile: pytest.ini"). A previous version of this
+# file had one anyway, diverging from pytest.ini in ways that were never
+# actually in effect - removed rather than left as a second, dead source of
+# truth.
+
+[tool.black]
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
 
 [tool.hypothesis]
 max_examples = 100

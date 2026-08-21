@@ -1,9 +1,9 @@
 {
   "domain": "ha_dev_tools",
   "name": "HA Dev Tools",
-  "after_dependencies": ["http"],
+  "after_dependencies": ["hassio", "http"],
   "codeowners": ["@alexlenk"],
-  "config_flow": false,
+  "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/alexlenk/ha-dev-tools",
   "integration_type": "system",
@@ -12,7 +12,8 @@
   "quality_scale": "silver",
   "requirements": [
     "aiofiles>=23.0.0",
-    "pyyaml>=6.0.0"
+    "pyyaml>=6.0.0",
+    "ruamel.yaml>=0.18.0"
   ],
-  "version": "1.0.0"
+  "version": "2.0.0"
 }
