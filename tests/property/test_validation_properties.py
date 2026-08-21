@@ -1,7 +1,7 @@
 """Property-based tests for ValidationManager.
 
 This module contains property-based tests that validate the correctness
-of content validation in the Home Assistant Management Integration.
+of content validation in the HA Dev Tools.
 """
 import pytest
 from hypothesis import given, strategies as st, assume, settings, HealthCheck

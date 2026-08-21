@@ -28,7 +28,7 @@ ha-dev-tools/
 │   └── ws_call.py             # In-process WebSocket API loopback (helpers, dashboards)
 ├── tests/                     # Flat pytest files, one per module above
 │   └── property/              # Hypothesis property-based tests
-├── docs/                      # ARCHITECTURE.md, SECURITY.md, CONFIGURATION_EXAMPLES.md
+├── docs/                      # ARCHITECTURE.md, SECURITY.md
 ├── .github/workflows/         # test.yml, hassfest.yml, validate.yml
 └── requirements-test.txt
 ```

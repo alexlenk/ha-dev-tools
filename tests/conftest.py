@@ -1,11 +1,10 @@
-"""Test configuration for Home Assistant Management Integration.
+"""Test configuration for HA Dev Tools.
 
 This conftest.py uses the official pytest-homeassistant-custom-component framework
 to provide proper Home Assistant test fixtures and utilities.
 """
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
@@ -47,57 +46,11 @@ def mock_config_entry():
     """Create a mock config entry for the integration."""
     return MockConfigEntry(
         domain=DOMAIN,
-        title="Home Assistant Configuration Manager",
+        title="HA Dev Tools",
         data={},
         options={},
         entry_id="test_entry_id",
     )
-
-
-@pytest.fixture
-async def setup_integration(hass: HomeAssistant, mock_config_entry: MockConfigEntry):
-    """Set up the integration for testing with proper HA fixtures.
-    
-    This fixture:
-    - Sets up the HTTP component for API endpoint registration
-    - Adds the config entry to Home Assistant
-    - Sets up the integration using async_setup_entry
-    - Waits for all async operations to complete
-    - Returns the config entry for test use
-    """
-    from custom_components.ha_dev_tools import async_setup_entry
-    
-    # Set up HTTP component first - required for API endpoint registration
-    # Note: In test environment, HTTP component may not fully initialize
-    # but the integration should still set up successfully
-    await async_setup_component(hass, "http", {"http": {}})
-    await hass.async_block_till_done()
-    
-    # Add the config entry to hass
-    mock_config_entry.add_to_hass(hass)
-    
-    # Create a test configuration.yaml in the hass config directory
-    config_content = """homeassistant:
-  name: Test Home
-  latitude: 32.87336
-  longitude: 117.22743
-  elevation: 430
-  unit_system: metric
-  time_zone: America/Los_Angeles
-
-logger:
-  default: info
-"""
-    config_file = Path(hass.config.config_dir) / "configuration.yaml"
-    config_file.write_text(config_content)
-    
-    # Set up the integration via config entry
-    entry_setup = await async_setup_entry(hass, mock_config_entry)
-    if not entry_setup:
-        raise RuntimeError("Failed to set up integration")
-    await hass.async_block_till_done()
-    
-    return mock_config_entry
 
 
 @pytest.fixture
@@ -109,7 +62,8 @@ async def setup_integration_with_entry(hass: HomeAssistant, mock_config_entry: M
     """
     from custom_components.ha_dev_tools import async_setup_entry
     
-    # Set up HTTP component first - required for API endpoint registration
+    # Set up HTTP component first - the http/websocket_api components some
+    # tools depend on (ws_call.py's loopback, access_control.py) expect it.
     assert await async_setup_component(hass, "http", {"http": {}})
     await hass.async_block_till_done()
     

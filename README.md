@@ -111,10 +111,10 @@ beyond your own local network - it explains the actual threat this design
 defends against and why a simpler "just require admin" gate isn't enough on
 its own.
 
-File access from `write_automation`, `write_dashboard`, and friends is
-additionally bounded by a path allowlist/denylist - see
-[docs/CONFIGURATION_EXAMPLES.md](docs/CONFIGURATION_EXAMPLES.md) to customize
-it (sane defaults apply if you don't).
+File access from `write_automation` and other file-touching tools is
+additionally bounded by a path allowlist/denylist - not currently
+customizable, defaults only (see [docs/SECURITY.md](docs/SECURITY.md#path-allowlist-file-touching-tools)
+for exactly what's allowed).
 
 ## Architecture
 

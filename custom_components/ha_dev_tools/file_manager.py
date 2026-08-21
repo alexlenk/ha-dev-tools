@@ -1,4 +1,4 @@
-"""File manager for the Home Assistant Management Integration."""
+"""File manager for the HA Dev Tools."""
 from __future__ import annotations
 
 import hashlib

@@ -1,7 +1,7 @@
 """Property-based tests for FileManager file operations.
 
 This module contains property-based tests that validate the correctness
-of file operations in the Home Assistant Management Integration.
+of file operations in the HA Dev Tools.
 """
 import pytest
 import asyncio

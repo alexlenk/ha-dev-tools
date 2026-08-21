@@ -1,13 +1,6 @@
-"""Constants for the Home Assistant Management Integration."""
+"""Constants for the HA Dev Tools integration."""
 
-import voluptuous as vol
-from homeassistant.helpers import config_validation as cv
-
-# Domain name for the integration
 DOMAIN = "ha_dev_tools"
-
-# API endpoints base path
-API_BASE_PATH = "/api/management"
 
 # Operation types
 OPERATION_READ = "read"
@@ -44,8 +37,15 @@ DEFAULT_READ_ONLY_PATHS = [
     "/config/packages/**/*.yaml",
 ]
 
-# Default write paths (empty by default, for future use)
-DEFAULT_WRITE_PATHS = []
+# Default write paths - exactly what write_automation can actually target
+# (AutomationManager.candidate_files(): automations.yaml, packages/**/*.yaml).
+# No YAML/UI config currently populates SecurityManager with anything else, so
+# leaving this empty (as it was before) meant every write was silently
+# rejected out of the box - not a safety margin, just a broken default.
+DEFAULT_WRITE_PATHS = [
+    "/config/automations.yaml",
+    "/config/packages/**/*.yaml",
+]
 
 # Default denylist (always enforced) - includes sensitive storage files with patterns
 DEFAULT_DENYLIST = [
@@ -79,7 +79,7 @@ DEFAULT_BLACKLIST = DEFAULT_DENYLIST
 # Allowed file extensions for security
 ALLOWED_EXTENSIONS = {
     ".yaml",
-    ".yml", 
+    ".yml",
     ".json",
     ".txt",
     ".py",
@@ -92,71 +92,14 @@ ALLOWED_DIRECTORIES = {
     "/addon_configs",
 }
 
-# Default allowlist paths (used when allowlist mode enabled with no config)
-DEFAULT_ALLOWLIST_PATHS = [
-    "configuration.yaml",
-    "automations.yaml",
-    "scripts.yaml",
-    "scenes.yaml",
-    "packages",
-    "blueprints",
-    "custom_components",
-]
-
 # Legacy: Directory/file allowlist (whitelist) - only these paths are accessible
 # Empty list means all non-blacklisted files are allowed (current behavior)
 # When populated, ONLY these paths and their subdirectories are accessible
 DEFAULT_ALLOWLIST = []
 
-# HTTP status codes
-HTTP_OK = 200
-HTTP_CREATED = 201
-HTTP_BAD_REQUEST = 400
-HTTP_UNAUTHORIZED = 401
-HTTP_FORBIDDEN = 403
-HTTP_NOT_FOUND = 404
-HTTP_UNPROCESSABLE_ENTITY = 422
-HTTP_INTERNAL_SERVER_ERROR = 500
-
 # Error codes
 ERROR_INVALID_PATH = "INVALID_PATH"
 ERROR_BLACKLISTED_FILE = "BLACKLISTED_FILE"
-ERROR_DENYLISTED_FILE = "DENYLISTED_FILE"
-ERROR_INVALID_SYNTAX = "INVALID_SYNTAX"
-ERROR_SCHEMA_VIOLATION = "SCHEMA_VIOLATION"
 ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 ERROR_PERMISSION_DENIED = "PERMISSION_DENIED"
-ERROR_AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
 ERROR_WRITE_NOT_PERMITTED = "WRITE_NOT_PERMITTED"
-
-# Configuration schema for security settings
-SECURITY_CONFIG_SCHEMA = vol.Schema({
-    vol.Optional("read_paths", default=[]): vol.All(
-        cv.ensure_list,
-        [cv.string]
-    ),
-    vol.Optional("write_paths", default=[]): vol.All(
-        cv.ensure_list,
-        [cv.string]
-    ),
-    vol.Optional("denied_paths", default=[]): vol.All(
-        cv.ensure_list,
-        [cv.string]
-    ),
-    # Legacy support for old configuration format
-    vol.Optional("allowed_paths", default=[]): vol.All(
-        cv.ensure_list,
-        [cv.string]
-    ),
-    vol.Optional("allowed_storage_files", default=[]): vol.All(
-        cv.ensure_list,
-        [cv.string]
-    ),
-})
-
-# Configuration schema for the ha_dev_tools domain
-CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.Schema({
-        vol.Optional("security", default={}): SECURITY_CONFIG_SCHEMA,
-    })
-}, extra=vol.ALLOW_EXTRA)

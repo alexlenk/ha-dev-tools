@@ -1,7 +1,7 @@
 """Property-based tests for FileManager metadata operations.
 
 This module contains property-based tests that validate the correctness
-of file metadata operations in the Home Assistant Management Integration.
+of file metadata operations in the HA Dev Tools.
 """
 import pytest
 import asyncio

@@ -1,4 +1,4 @@
-"""Log manager for the Home Assistant Management Integration."""
+"""Log manager for the HA Dev Tools."""
 from __future__ import annotations
 
 import logging

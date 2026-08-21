@@ -1,4 +1,4 @@
-"""Validation manager for the Home Assistant Management Integration."""
+"""Validation manager for the HA Dev Tools."""
 from __future__ import annotations
 
 import json

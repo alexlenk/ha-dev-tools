@@ -1,4 +1,4 @@
-"""Security manager for the Home Assistant Management Integration.
+"""Security manager for HA Dev Tools.
 
 This module provides comprehensive security controls for file access validation,
 including support for allowlist/denylist modes, glob pattern matching, and
@@ -262,34 +262,44 @@ class SecurityManager:
     
     def _build_write_paths(self) -> set[str]:
         """Build the read-write paths from configuration.
-        
-        Extracts write_paths from config. Empty by default for security.
-        Write paths allow both reading and writing files.
-        
-        Write access should only be granted when necessary, as it allows
-        file creation, modification, and deletion.
-        
+
+        Extracts write_paths from config. If neither read_paths nor
+        write_paths is configured, falls back to DEFAULT_WRITE_PATHS -
+        mirroring _build_read_paths()'s fallback rule so that a genuinely
+        empty config gets sane defaults for both, while explicitly setting
+        either one opts out of automatic defaults entirely (matching the
+        existing read-side behavior, not a new rule invented here).
+
+        Write paths allow both reading and writing files. DEFAULT_WRITE_PATHS
+        is scoped to exactly what write_automation can target
+        (automations.yaml, packages/**/*.yaml) - not a broad default, the
+        minimum needed for the write tools to function at all out of the box.
+
         Returns:
             Set of read-write paths/patterns
-        
+
         Example:
             ```python
             # With write paths configured
             config = {"write_paths": ["/config/packages/generated/*.yaml"]}
             write_paths = self._build_write_paths()
             # Returns: {"/config/packages/generated/*.yaml"}
-            
-            # Without configuration (empty by default)
+
+            # Without configuration (uses defaults)
             config = {}
             write_paths = self._build_write_paths()
-            # Returns: set()
+            # Returns: {"/config/automations.yaml", "/config/packages/**/*.yaml"}
             ```
         """
         write_paths = set()
-        
+
         # Add configured write paths
         configured_write = self._config.get("write_paths", [])
         write_paths.update(configured_write)
+
+        # If no configuration provided at all, use safe defaults
+        if not configured_write and not self._config.get("read_paths"):
+            write_paths.update(DEFAULT_WRITE_PATHS)
         
         return write_paths
 

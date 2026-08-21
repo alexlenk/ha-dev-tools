@@ -115,9 +115,30 @@ Tools that touch files on disk (`write_automation`, and the underlying
 `FileManager` more generally) are further bounded by `SecurityManager`'s
 allowlist/denylist of paths - independent of, and in addition to, the two
 gates above. Sensitive files (`secrets.yaml`, auth storage, the arm file
-itself) are permanently denylisted regardless of configuration. See
-[CONFIGURATION_EXAMPLES.md](CONFIGURATION_EXAMPLES.md) to customize the
-allowlist; sane defaults apply if you don't.
+itself) are permanently denylisted no matter what.
+
+There's currently no way to customize this - it's defaults-only (no
+`configuration.yaml` option, no UI options flow yet). The defaults
+(`custom_components/ha_dev_tools/const.py`):
+
+- **Readable**: main config files (`configuration.yaml`, `automations.yaml`,
+  `scripts.yaml`, `scenes.yaml`), `packages/**/*.yaml`, and the storage files
+  behind dashboards/helpers/scenes/scripts.
+- **Writable**: exactly what `write_automation` needs and nothing more -
+  `automations.yaml` and `packages/**/*.yaml`.
+- **Always denied**: `secrets.yaml`, all auth/credential storage, the arm
+  file itself, and a handful of other sensitive system files - regardless of
+  what read/write defaults say.
+
+An earlier version of this project had a `configuration.yaml`-based
+`ha_dev_tools: security:` block for customizing this - it was removed
+because it never actually reached the tools that use it (a config-entry
+plumbing bug, not by design), and even working as intended, it left
+`write_paths` empty by default, meaning the write tools never functioned out
+of the box. Fixed by giving `write_paths` a real default instead of trying
+to repair the broken YAML bridge. If per-install customization is ever
+needed, it belongs in a proper options flow (Settings → Devices & Services →
+HA Dev Tools → Configure), not YAML.
 
 ## What this does *not* do
 

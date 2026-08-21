@@ -1,7 +1,7 @@
 """Property-based tests for LogManager log retrieval operations.
 
 This module contains property-based tests that validate the correctness
-of log retrieval operations in the Home Assistant Management Integration.
+of log retrieval operations in the HA Dev Tools.
 """
 import pytest
 import asyncio
