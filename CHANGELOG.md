@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-08-21
+
+The integration wasn't showing up in Home Assistant's "+ Add Integration" search at all after installing via HACS, despite `config_flow: true` and a clean startup log (confirmed via a real install: HA found and parsed the manifest fine, no exceptions anywhere, requirements installed without issue - so this wasn't a HACS placement problem or a Python error).
+
+### Added
+- `strings.json` and `translations/en.json` - the integration had neither, unlike every comparable custom integration (including the author's own `ha-concierge-mcp`), leaving the config flow with no title/description text to source.
+
+### Changed
+- `integration_type` changed from `"system"` to `"service"`. `"system"` is meant for integrations representing a core system concept that users don't manually search for and add (the ones tracked in HA's frontend source only explicitly exclude `"hardware"` from the add-integration search filter, so this wasn't confirmed as *the* cause from source alone) - but it's the one meaningful manifest difference from `ha-concierge-mcp`, a directly comparable custom integration confirmed working on the same Home Assistant instance, so this is the best evidence-based fix available without live access to reproduce the picker's exact behavior.
+- Added `single_config_entry: true`, declaring at the manifest level what `config_flow.py`'s `_async_current_entries()` check already enforced imperatively - matches `ha-concierge-mcp`'s manifest.
+- Removed `quality_scale: "silver"` - inaccurate, unearned metadata; no actual quality-scale compliance audit has been done against Home Assistant's silver-tier ruleset, and `ha-concierge-mcp`'s manifest doesn't declare one either.
+
 ## [2.0.1] - 2026-08-21
 
 ### Added

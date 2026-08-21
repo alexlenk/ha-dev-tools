@@ -6,14 +6,14 @@
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/alexlenk/ha-dev-tools",
-  "integration_type": "system",
+  "integration_type": "service",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/alexlenk/ha-dev-tools/issues",
-  "quality_scale": "silver",
   "requirements": [
     "aiofiles>=23.0.0",
     "pyyaml>=6.0.0",
     "ruamel.yaml>=0.18.0"
   ],
-  "version": "2.0.1"
+  "single_config_entry": true,
+  "version": "2.0.2"
 }

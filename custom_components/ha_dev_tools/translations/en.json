@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up HA Dev Tools",
+        "description": "Registers a `dev_tools` LLM API for Home Assistant's native `mcp_server` integration to serve. No configuration is needed here - tools stay disarmed until you create the arm file described in the documentation, and every tool call is checked against the calling user's admin status. See the documentation link on this integration's page for the arm-file setup step."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "HA Dev Tools is already configured. Only one instance is supported."
+    }
+  }
+}
