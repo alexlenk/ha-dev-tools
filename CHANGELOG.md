@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-21
+
 ### Added
-- Real brand assets (`icon.png`/`icon@2x.png`/`logo.png`/`logo@2x.png`, plus the `icon.svg`/`logo.svg` source) under `custom_components/ha_dev_tools/brand/`, replacing the old pre-restart placeholder (a broken 256x128 purple hexagon graphic with its own title text running off the edge of the canvas). Embedded at the top of `README.md`.
+- Real brand assets (`icon.png`/`icon@2x.png`/`logo.png`/`logo@2x.png`, plus the `icon.svg`/`logo.svg` source) under `custom_components/ha_dev_tools/brand/`, replacing the old pre-restart placeholder (a broken 256x128 purple hexagon graphic with its own title text running off the edge of the canvas). Embedded at the top of `README.md`. Uses Home Assistant's native local-brand-icon support (since HA 2026.3.0) rather than submitting to the now-legacy `home-assistant/brands` repo, which no longer accepts custom-integration submissions.
 
 ## [2.0.0] - 2026-08-21
 
