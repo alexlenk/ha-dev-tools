@@ -65,6 +65,12 @@ DEFAULT_DENYLIST = [
     "known_devices.yaml",
     ".storage/person",
     ".storage/zone",
+    # The dev_tools access-control arm file (see access_control.py) - must
+    # never be writable through our own generic file tools, only through
+    # out-of-band filesystem access (SSH, Terminal add-on). Denylisted here
+    # as defense in depth even though access_control.py's own read/touch
+    # never goes through this path in the first place.
+    ".storage/ha_dev_tools.armed",
 ]
 
 # Backward compatibility alias

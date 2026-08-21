@@ -16,6 +16,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
 
+from . import access_control
 from .api import ManagementAPIHandler
 from .automation_manager import AutomationManager
 from .const import DOMAIN, CONFIG_SCHEMA
@@ -94,11 +95,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, log_manager=log_manager, automation_manager=automation_manager
     )
 
+    # Best-effort periodic cleanup of an expired access-control arm file
+    # (custom_components/ha_dev_tools/access_control.py) - not load-bearing
+    # for security, every gated tool call re-checks the file directly.
+    unsub_arm_cleanup = access_control.async_setup_cleanup(hass)
+
     # Store components in hass.data
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["api_handler"] = api_handler
     hass.data[DOMAIN]["security_manager"] = security_manager
     hass.data[DOMAIN]["unsub_llm_api"] = unsub_llm_api
+    hass.data[DOMAIN]["unsub_arm_cleanup"] = unsub_arm_cleanup
 
     _LOGGER.info("Home Assistant Management Integration config entry setup completed")
     return True
@@ -117,6 +124,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub_llm_api = hass.data[DOMAIN].get("unsub_llm_api")
         if unsub_llm_api:
             unsub_llm_api()
+
+        unsub_arm_cleanup = hass.data[DOMAIN].get("unsub_arm_cleanup")
+        if unsub_arm_cleanup:
+            unsub_arm_cleanup()
 
         # Remove from hass.data
         hass.data.pop(DOMAIN)

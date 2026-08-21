@@ -19,6 +19,7 @@ from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
 
 from . import (
+    access_control,
     audit_manager,
     config_tools,
     dashboard_manager,
@@ -58,6 +59,45 @@ def _tool_error(exc: Exception) -> JsonObjectType:
     return {"error": str(exc), "error_type": type(exc).__name__}
 
 
+class GatedTool(llm.Tool):
+    """Base for every dev_tools tool except the diagnostic ping.
+
+    Enforces two independent checks before a subclass's real logic
+    (_run, not async_call) ever runs - see access_control.py for the
+    full reasoning:
+    - access_control.check_armed(): a human must have proven real
+      filesystem access (SSH, Terminal add-on) recently, outside
+      dev_tools' own reach - a leaked HA token alone isn't enough.
+    - access_control.require_admin(): the resolved calling user must be
+      a real admin, checked here rather than trusted to mcp_server's
+      own gate alone (which has a bare-endpoint bypass).
+    A successful call extends the idle arm window via touch_armed().
+    """
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Check both gates, run the tool, then extend the idle window."""
+        access_control.check_armed(hass)
+        await access_control.require_admin(hass, llm_context)
+        result = await self._run(hass, tool_input, llm_context)
+        access_control.touch_armed(hass)
+        return result
+
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Subclasses implement their actual logic here, not async_call."""
+        raise NotImplementedError
+
+
 class DevToolsPingTool(llm.Tool):
     """Confirm the dev_tools API is registered and reachable.
 
@@ -84,7 +124,7 @@ class DevToolsPingTool(llm.Tool):
         return {"status": "ok", "domain": DOMAIN}
 
 
-class FindEntitiesTool(llm.Tool):
+class FindEntitiesTool(GatedTool):
     """Area/domain-scoped entity lookup - avoids dumping hundreds of entities."""
 
     name = "find_entities"
@@ -106,7 +146,7 @@ class FindEntitiesTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -116,7 +156,7 @@ class FindEntitiesTool(llm.Tool):
         return entity_manager.find_entities(hass, **tool_input.tool_args)
 
 
-class EntityHealthReportTool(llm.Tool):
+class EntityHealthReportTool(GatedTool):
     """Per-integration entity health summary - hundreds of entities, made scannable."""
 
     name = "entity_health_report"
@@ -137,7 +177,7 @@ class EntityHealthReportTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -147,7 +187,7 @@ class EntityHealthReportTool(llm.Tool):
         return entity_manager.entity_health_report(hass, **tool_input.tool_args)
 
 
-class RenderTemplateTool(llm.Tool):
+class RenderTemplateTool(GatedTool):
     """Render a Jinja2 template against live state - the core author/iterate loop primitive."""
 
     name = "render_template"
@@ -163,7 +203,7 @@ class RenderTemplateTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -176,7 +216,7 @@ class RenderTemplateTool(llm.Tool):
         )
 
 
-class ValidateTemplateTool(llm.Tool):
+class ValidateTemplateTool(GatedTool):
     """Check template syntax and referenced entities without necessarily needing a full render."""
 
     name = "validate_template"
@@ -193,7 +233,7 @@ class ValidateTemplateTool(llm.Tool):
     parameters = vol.Schema({vol.Required("template"): str})
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -203,7 +243,7 @@ class ValidateTemplateTool(llm.Tool):
         return await template_manager.validate_template(hass, tool_input.tool_args["template"])
 
 
-class GetLogsTool(llm.Tool):
+class GetLogsTool(GatedTool):
     """Tail/filter/search the core Home Assistant log - never an unbounded raw dump."""
 
     name = "get_logs"
@@ -228,7 +268,7 @@ class GetLogsTool(llm.Tool):
         self._log_manager = log_manager
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -247,7 +287,7 @@ class GetLogsTool(llm.Tool):
         return {"entries": [e.to_dict() for e in entries], "count": len(entries)}
 
 
-class ListAddonsTool(llm.Tool):
+class ListAddonsTool(GatedTool):
     """List installed Supervisor add-ons - Home Assistant OS/Supervised only."""
 
     name = "list_addons"
@@ -260,7 +300,7 @@ class ListAddonsTool(llm.Tool):
     parameters = vol.Schema({})
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -274,7 +314,7 @@ class ListAddonsTool(llm.Tool):
         return {"addons": addons}
 
 
-class GetAddonLogsTool(llm.Tool):
+class GetAddonLogsTool(GatedTool):
     """Tail a Supervisor add-on's logs - Home Assistant OS/Supervised only."""
 
     name = "get_addon_logs"
@@ -292,7 +332,7 @@ class GetAddonLogsTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -308,7 +348,7 @@ class GetAddonLogsTool(llm.Tool):
             return _tool_error(exc)
 
 
-class CheckConfigTool(llm.Tool):
+class CheckConfigTool(GatedTool):
     """Validate the full HA configuration - no changes, no restart."""
 
     name = "check_config"
@@ -320,7 +360,7 @@ class CheckConfigTool(llm.Tool):
     parameters = vol.Schema({})
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -330,7 +370,7 @@ class CheckConfigTool(llm.Tool):
         return await config_tools.check_ha_config(hass)
 
 
-class ReloadDomainTool(llm.Tool):
+class ReloadDomainTool(GatedTool):
     """Reload a domain's config (automation/script/scene/...) - never a full restart."""
 
     name = "reload_domain"
@@ -343,7 +383,7 @@ class ReloadDomainTool(llm.Tool):
     parameters = vol.Schema({vol.Required("domain"): str})
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -353,7 +393,7 @@ class ReloadDomainTool(llm.Tool):
         return await config_tools.reload_domain(hass, tool_input.tool_args["domain"])
 
 
-class GetAutomationTool(llm.Tool):
+class GetAutomationTool(GatedTool):
     """Layout-aware automation read - resolves the file that actually defines it."""
 
     name = "get_automation"
@@ -371,7 +411,7 @@ class GetAutomationTool(llm.Tool):
         self._manager = automation_manager
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -391,7 +431,7 @@ class GetAutomationTool(llm.Tool):
         }
 
 
-class WriteAutomationTool(llm.Tool):
+class WriteAutomationTool(GatedTool):
     """Layout-aware, package-safe automation write - see docs/RESTART_PLAN.md."""
 
     name = "write_automation"
@@ -420,7 +460,7 @@ class WriteAutomationTool(llm.Tool):
         self._manager = automation_manager
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -444,7 +484,7 @@ def _helper_domain_schema() -> vol.Schema:
     return vol.In(HELPER_DOMAINS)
 
 
-class ListHelpersTool(llm.Tool):
+class ListHelpersTool(GatedTool):
     """List every storage-defined item in a helper domain (input_boolean, counter, etc.)."""
 
     name = "list_helpers"
@@ -459,7 +499,7 @@ class ListHelpersTool(llm.Tool):
     parameters = vol.Schema({vol.Required("domain"): _helper_domain_schema()})
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -474,7 +514,7 @@ class ListHelpersTool(llm.Tool):
         return {"items": items}
 
 
-class CreateHelperTool(llm.Tool):
+class CreateHelperTool(GatedTool):
     """Create a new helper item."""
 
     name = "create_helper"
@@ -490,7 +530,7 @@ class CreateHelperTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -508,7 +548,7 @@ class CreateHelperTool(llm.Tool):
         return created
 
 
-class UpdateHelperTool(llm.Tool):
+class UpdateHelperTool(GatedTool):
     """Update an existing helper item by id."""
 
     name = "update_helper"
@@ -527,7 +567,7 @@ class UpdateHelperTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -545,7 +585,7 @@ class UpdateHelperTool(llm.Tool):
         return updated
 
 
-class DeleteHelperTool(llm.Tool):
+class DeleteHelperTool(GatedTool):
     """Delete a helper item by id."""
 
     name = "delete_helper"
@@ -555,7 +595,7 @@ class DeleteHelperTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -571,7 +611,7 @@ class DeleteHelperTool(llm.Tool):
         return {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
 
 
-class GetDashboardTool(llm.Tool):
+class GetDashboardTool(GatedTool):
     """Read a dashboard's config - works in both storage and YAML mode."""
 
     name = "get_dashboard"
@@ -584,7 +624,7 @@ class GetDashboardTool(llm.Tool):
     parameters = vol.Schema({vol.Optional("url_path"): str})
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -601,7 +641,7 @@ class GetDashboardTool(llm.Tool):
         return config
 
 
-class WriteDashboardTool(llm.Tool):
+class WriteDashboardTool(GatedTool):
     """Write a dashboard's config - storage mode only."""
 
     name = "write_dashboard"
@@ -616,7 +656,7 @@ class WriteDashboardTool(llm.Tool):
     )
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -634,7 +674,7 @@ class WriteDashboardTool(llm.Tool):
         return {"saved": True, "url_path": args.get("url_path")}
 
 
-class AuditAutomationsTool(llm.Tool):
+class AuditAutomationsTool(GatedTool):
     """Static analysis over every known automation for latent reliability bugs."""
 
     name = "audit_automations"
@@ -654,7 +694,7 @@ class AuditAutomationsTool(llm.Tool):
         self._manager = automation_manager
 
     @override
-    async def async_call(
+    async def _run(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,

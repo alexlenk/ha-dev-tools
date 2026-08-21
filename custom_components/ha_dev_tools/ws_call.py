@@ -130,15 +130,20 @@ async def call_ws_command(
     # scope at inspection time (confirmed: real failure on HA 2026.8.2 /
     # Python 3.14.7, not assumed). We only need parameter *names*, never
     # their annotations, so ask for best-effort ForwardRef placeholders
-    # instead of raising. annotation_format is itself 3.14+ only, so older
-    # interpreters (which don't defer annotation evaluation and so don't
-    # hit this) fall back to the plain call.
-    try:
+    # instead of raising. inspect.Format itself is 3.14+ only - checked
+    # with getattr rather than try/except TypeError, since referencing
+    # inspect.Format at all raises AttributeError on older interpreters
+    # before the call even happens (confirmed: a bare `except TypeError`
+    # here does not catch that - real failure on Python 3.12, not
+    # assumed). Older interpreters don't defer annotation evaluation and
+    # so don't hit the NameError this guards against either way.
+    annotation_format = getattr(inspect, "Format", None)
+    if annotation_format is not None:
         sig = inspect.signature(
             websocket_api.ActiveConnection.__init__,
-            annotation_format=inspect.Format.FORWARDREF,
+            annotation_format=annotation_format.FORWARDREF,
         )
-    except TypeError:
+    else:
         sig = inspect.signature(websocket_api.ActiveConnection.__init__)
     accepted = set(sig.parameters)
     connection = websocket_api.ActiveConnection(

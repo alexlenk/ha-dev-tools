@@ -30,20 +30,24 @@ installed version actually has, and treats the unsub-callable behavior as
 best-effort rather than asserting it unconditionally.
 """
 import inspect
+import time
 
 import pytest
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
+from pytest_homeassistant_custom_component.common import MockUser
 
-from custom_components.ha_dev_tools.llm_api import API_ID, DOMAIN, DevToolsPingTool
+from custom_components.ha_dev_tools import access_control
+from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
+from custom_components.ha_dev_tools.llm_api import API_ID, DOMAIN, DevToolsPingTool, FindEntitiesTool
 
 
-def _llm_context() -> llm.LLMContext:
+def _llm_context(user_id: str | None = None) -> llm.LLMContext:
     """Build an LLMContext for calling the API, tolerant of field changes across HA versions."""
     fields = {
         "platform": DOMAIN,
-        "context": None,
+        "context": Context(user_id=user_id) if user_id else None,
         "user_prompt": None,
         "language": "en",
         "assistant": "test",
@@ -51,6 +55,33 @@ def _llm_context() -> llm.LLMContext:
     }
     accepted = set(inspect.signature(llm.LLMContext.__init__).parameters)
     return llm.LLMContext(**{k: v for k, v in fields.items() if k in accepted})
+
+
+def _arm(hass: HomeAssistant) -> None:
+    """Arm dev_tools as a human would (out-of-band), for tests of gated tools."""
+    path = access_control._arm_file_path(hass)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(time.time()))
+
+
+@pytest.fixture(autouse=True)
+def _clean_arm_file(hass: HomeAssistant):
+    """See test_access_control.py's identical fixture for why this is needed -
+    hass.config.config_dir is a shared, non-per-test-isolated directory."""
+    path = access_control._arm_file_path(hass)
+    path.unlink(missing_ok=True)
+    yield
+    path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+async def admin_user(hass: HomeAssistant):
+    return MockUser(is_owner=True).add_to_hass(hass)
+
+
+@pytest.fixture
+async def non_admin_user(hass: HomeAssistant):
+    return MockUser(is_owner=False).add_to_hass(hass)
 
 
 @pytest.mark.asyncio
@@ -125,3 +156,49 @@ async def test_dev_tools_api_unregistered_on_unload(
     api_ids = {api.id for api in llm.async_get_apis(hass)}
     if unsub_supported:
         assert API_ID not in api_ids
+
+
+@pytest.mark.asyncio
+async def test_gated_tool_refuses_when_not_armed(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """A real gated tool (not just access_control's own unit tests) refuses when unarmed."""
+    with pytest.raises(NotArmedError):
+        await FindEntitiesTool().async_call(
+            hass,
+            llm.ToolInput(tool_name="find_entities", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+
+
+@pytest.mark.asyncio
+async def test_gated_tool_refuses_non_admin_even_when_armed(
+    hass: HomeAssistant, setup_integration_with_entry, non_admin_user
+):
+    _arm(hass)
+
+    with pytest.raises(NotAdminError):
+        await FindEntitiesTool().async_call(
+            hass,
+            llm.ToolInput(tool_name="find_entities", tool_args={}),
+            _llm_context(non_admin_user.id),
+        )
+
+
+@pytest.mark.asyncio
+async def test_gated_tool_succeeds_when_armed_and_admin(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    _arm(hass)
+    path = access_control._arm_file_path(hass)
+    mtime_before = path.stat().st_mtime
+
+    result = await FindEntitiesTool().async_call(
+        hass,
+        llm.ToolInput(tool_name="find_entities", tool_args={}),
+        _llm_context(admin_user.id),
+    )
+
+    assert isinstance(result, dict)
+    # A successful call extends the idle window (touch_armed).
+    assert path.stat().st_mtime >= mtime_before
