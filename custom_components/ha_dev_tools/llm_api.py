@@ -17,6 +17,7 @@ from typing import Any, override
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
+from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonObjectType
 
 from . import (
@@ -26,6 +27,7 @@ from . import (
     dashboard_manager,
     entity_manager,
     helper_manager,
+    history_manager,
     supervisor_manager,
     template_manager,
 )
@@ -41,6 +43,7 @@ from .helper_manager import (
     InvalidHelperDomainError,
     UnresolvedUserError,
 )
+from .history_manager import RecorderNotAvailableError
 from .log_manager import LogFilters, LogManager
 from .supervisor_manager import SupervisorNotAvailableError
 from .ws_call import WebSocketCommandError
@@ -58,6 +61,14 @@ API_PROMPT = (
 def _tool_error(exc: Exception) -> JsonObjectType:
     """Uniform error payload for tool responses - never let a raw exception escape a Tool."""
     return {"error": str(exc), "error_type": type(exc).__name__}
+
+
+def _parse_datetime(value: str, *, field: str) -> Any:
+    """Parse an ISO 8601 datetime string, raising ValueError with a clear message on failure."""
+    parsed = dt_util.parse_datetime(value)
+    if parsed is None:
+        raise ValueError(f"'{field}' is not a valid ISO 8601 datetime: {value!r}")
+    return parsed
 
 
 class GatedTool(llm.Tool):
@@ -337,6 +348,119 @@ class GetLogsTool(GatedTool):
         )
         entries = await self._log_manager.get_core_logs(filters)
         return {"entries": [e.to_dict() for e in entries], "count": len(entries)}
+
+
+class GetEntityHistoryTool(GatedTool):
+    """Recorder-backed state history - what an entity's state actually was, and when."""
+
+    name = "get_entity_history"
+    description = (
+        "Read recorded state history for one or more entities over a time "
+        "range - the recorder-backed equivalent of the History page. Use "
+        "this to establish what actually happened (did a trigger entity "
+        "change state, was an automation entity off) instead of guessing "
+        "from current state alone. start_time/end_time are ISO 8601 "
+        "datetimes; end_time defaults to now. Every requested entity_id is "
+        "always present in the result, even with zero states, so a typo'd "
+        "or never-recorded entity_id is visible rather than silently "
+        "dropped. Bounded by the recorder's own retention (purge_keep_days, "
+        "10 days by default) - an empty result for an old enough time range "
+        "means the data is gone, not that nothing happened; say so rather "
+        "than concluding nothing occurred."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("entity_ids"): vol.All([str], vol.Length(min=1)),
+            vol.Required("start_time"): str,
+            vol.Optional("end_time"): str,
+            vol.Optional("significant_changes_only", default=True): bool,
+            vol.Optional("limit", default=200): vol.All(
+                int, vol.Range(min=1, max=2000)
+            ),
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Fetch state history for the requested entities."""
+        args = tool_input.tool_args
+        try:
+            start_time = _parse_datetime(args["start_time"], field="start_time")
+            end_time = (
+                _parse_datetime(args["end_time"], field="end_time")
+                if args.get("end_time")
+                else None
+            )
+            return await history_manager.get_entity_history(
+                hass,
+                args["entity_ids"],
+                start_time=start_time,
+                end_time=end_time,
+                significant_changes_only=args.get("significant_changes_only", True),
+                limit=args.get("limit", 200),
+            )
+        except (RecorderNotAvailableError, ValueError) as exc:
+            return _tool_error(exc)
+
+
+class GetLogbookTool(GatedTool):
+    """Recorder-backed logbook - humanized events, including what triggered what."""
+
+    name = "get_logbook"
+    description = (
+        "Read humanized logbook entries for a time range - the same "
+        "entries the Logbook page shows (automations/scripts triggering, "
+        "notable state changes), including what caused each one where HA "
+        "recorded that context. Prefer this over get_entity_history when "
+        "the question is 'what happened and why', not just 'what was the "
+        "state'. Omit entity_ids for every entity; scope it down when "
+        "possible. start_time/end_time are ISO 8601 datetimes; end_time "
+        "defaults to now. Bounded by the recorder's own retention "
+        "(purge_keep_days, 10 days by default) - an empty result for an "
+        "old enough time range means the data is gone, not that nothing "
+        "happened; say so rather than concluding nothing occurred."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("start_time"): str,
+            vol.Optional("end_time"): str,
+            vol.Optional("entity_ids"): vol.All([str], vol.Length(min=1)),
+            vol.Optional("limit", default=200): vol.All(
+                int, vol.Range(min=1, max=2000)
+            ),
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Fetch logbook entries for the requested period."""
+        args = tool_input.tool_args
+        try:
+            start_time = _parse_datetime(args["start_time"], field="start_time")
+            end_time = (
+                _parse_datetime(args["end_time"], field="end_time")
+                if args.get("end_time")
+                else None
+            )
+            return await history_manager.get_logbook_entries(
+                hass,
+                start_time=start_time,
+                end_time=end_time,
+                entity_ids=args.get("entity_ids"),
+                limit=args.get("limit", 200),
+            )
+        except (RecorderNotAvailableError, ValueError) as exc:
+            return _tool_error(exc)
 
 
 class ListAddonsTool(GatedTool):
@@ -805,6 +929,8 @@ class DevToolsAPI(llm.API):
                 RenderTemplateTool(),
                 ValidateTemplateTool(),
                 GetLogsTool(self.log_manager),
+                GetEntityHistoryTool(),
+                GetLogbookTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),
                 CheckConfigTool(),

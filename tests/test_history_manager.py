@@ -1,0 +1,184 @@
+"""Tests for recorder-backed state history and logbook access (history_manager.py).
+
+Uses a real recorder against a real `hass` instance (per CONTRIBUTING.md's
+"prefer real HA machinery over mocks" guidance) rather than mocking
+`recorder.history`/`logbook.processor` directly - those are exactly the
+pieces of Home Assistant's own query machinery this module exists to
+reuse correctly, so a mock would only prove this module calls a mock the
+way it was told to, not that it calls the real thing correctly.
+
+`recorder_mock` is applied via `@pytest.mark.usefixtures(...)`, never as a
+second test-function parameter alongside `hass` - pytest-homeassistant-
+custom-component's own `recorder_db_url` fixture must run *before* `hass`
+is instantiated, and listing `hass` as an explicit parameter puts it ahead
+of `recorder_mock` in fixture resolution order, tripping that fixture's
+own ordering assertion. Same pattern `ha-concierge-mcp`'s working
+`get_history` tests use for the identical reason.
+"""
+
+from unittest.mock import patch
+
+import pytest
+from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.components.recorder.common import (
+    async_wait_recording_done,
+)
+
+from custom_components.ha_dev_tools.history_manager import (
+    RecorderNotAvailableError,
+    get_entity_history,
+    get_logbook_entries,
+)
+
+
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations():
+    """Shadow conftest.py's autouse fixture of the same name for this module.
+
+    That fixture depends on `hass`, forcing it to instantiate before any
+    other fixture gets a chance to run - including `recorder_mock`, whose
+    own setup (via pytest_homeassistant_custom_component's `recorder_db_url`
+    fixture) must run *before* `hass` exists, or its own ordering assertion
+    fails. None of the tests in this module need custom-component discovery
+    (they call history_manager's functions directly rather than going
+    through config entry setup), so it's safe to no-op here instead.
+    """
+    yield
+
+
+@pytest.mark.asyncio
+async def test_get_entity_history_raises_when_recorder_not_set_up(hass: HomeAssistant):
+    """Without the recorder set up, this fails clearly rather than a raw KeyError."""
+    with pytest.raises(RecorderNotAvailableError):
+        await get_entity_history(hass, ["sensor.x"], start_time=dt_util.utcnow())
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_entries_raises_when_recorder_not_set_up(hass: HomeAssistant):
+    with pytest.raises(RecorderNotAvailableError):
+        await get_logbook_entries(hass, start_time=dt_util.utcnow())
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_logbook_entries_raises_when_logbook_not_set_up(hass: HomeAssistant):
+    """Recorder alone isn't enough - logbook is a separate component that depends on it."""
+    with pytest.raises(RecorderNotAvailableError):
+        await get_logbook_entries(hass, start_time=dt_util.utcnow())
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_entity_history_returns_recorded_states(hass: HomeAssistant):
+    start_time = dt_util.utcnow()
+
+    hass.states.async_set("input_boolean.cleaning", "on")
+    await hass.async_block_till_done()
+    hass.states.async_set("input_boolean.cleaning", "off")
+    await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
+
+    result = await get_entity_history(
+        hass,
+        ["input_boolean.cleaning"],
+        start_time=start_time,
+        end_time=dt_util.utcnow(),
+    )
+
+    states = result["entities"]["input_boolean.cleaning"]["states"]
+    assert [s["state"] for s in states] == ["on", "off"]
+    assert result["entities"]["input_boolean.cleaning"]["truncated"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_entity_history_includes_unrecorded_entity_id_as_empty(
+    hass: HomeAssistant,
+):
+    """A requested entity_id with no rows in the window still comes back explicitly.
+
+    Not silently dropped, unlike a raw get_significant_states() call.
+    """
+    start_time = dt_util.utcnow()
+
+    result = await get_entity_history(
+        hass, ["sensor.never_existed"], start_time=start_time
+    )
+
+    assert result["entities"]["sensor.never_existed"] == {
+        "states": [],
+        "count": 0,
+        "truncated": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_entity_history_truncates_to_limit(hass: HomeAssistant):
+    start_time = dt_util.utcnow()
+
+    for i in range(5):
+        hass.states.async_set("counter.x", str(i))
+        await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
+
+    result = await get_entity_history(
+        hass,
+        ["counter.x"],
+        start_time=start_time,
+        significant_changes_only=False,
+        limit=2,
+    )
+
+    entry = result["entities"]["counter.x"]
+    assert entry["count"] == 2
+    assert entry["truncated"] is True
+    # Kept the most recent states, not the oldest.
+    assert [s["state"] for s in entry["states"]] == ["3", "4"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_logbook_entries_includes_state_change(hass: HomeAssistant):
+    # logbook's manifest hard-depends on frontend (it registers a built-in
+    # panel), which in turn needs the hass_frontend static-assets package -
+    # not installed here, and not something this integration needs to
+    # actually serve for get_logbook_entries to work. Faking frontend as
+    # already-set-up (the standard HA test pattern for an unwanted
+    # dependency) skips its real async_setup entirely; the one thing
+    # logbook's own setup then does with it - registering the panel - is
+    # mocked out since frontend's own state was never really initialized.
+    hass.config.components.add("frontend")
+    with patch("homeassistant.components.frontend.async_register_built_in_panel"):
+        assert await async_setup_component(hass, "logbook", {})
+    await hass.async_block_till_done()
+
+    start_time = dt_util.utcnow()
+    # logbook.log fires a plain EVENT_LOGBOOK_ENTRY - always in
+    # async_determine_event_types()'s BUILT_IN_EVENTS regardless of domain,
+    # unlike a bare hass.states.async_set() on a test entity with no owning
+    # integration/config entry (async_determine_event_types() narrows event
+    # types by the entity's config-entry domain when entity_ids is given,
+    # which a plain test entity doesn't have).
+    await hass.services.async_call(
+        "logbook",
+        "log",
+        {
+            "name": "Cleaning",
+            "message": "started",
+            "entity_id": "input_boolean.cleaning",
+        },
+        blocking=True,
+    )
+    await async_wait_recording_done(hass)
+
+    result = await get_logbook_entries(
+        hass, start_time=start_time, end_time=dt_util.utcnow()
+    )
+
+    assert result["count"] >= 1
+    assert any(e.get("name") == "Cleaning" for e in result["entries"])
+    # `when` is a JSON-safe ISO string, not the raw epoch float EventProcessor returns.
+    assert all(isinstance(e["when"], str) for e in result["entries"])

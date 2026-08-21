@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `get_entity_history` and `get_logbook` tools, closing the gap `docs/ARCHITECTURE.md`'s API-vs-file-access table already flagged: nothing previously exposed the recorder's own state-history/logbook data, so a question like "why didn't this automation fire yesterday" had no timestamped trace to answer it from - only current live state and a core log with no retention of its own. `get_entity_history` wraps `recorder.history.get_significant_states` (same call the History page's websocket API makes); `get_logbook` wraps `logbook.processor.EventProcessor` (same class the Logbook page and `logbook/get_events` WS command use), returning entries already humanized rather than raw `state_changed` events. Both are bounded by the recorder's own retention (`purge_keep_days`, 10 days by default) - see `history_manager.py`.
+
 ## [2.1.0] - 2026-08-21
 
 ### Added

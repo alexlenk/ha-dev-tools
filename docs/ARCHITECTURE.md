@@ -40,6 +40,8 @@ the actual source rather than assumed:
 | Automation/script CRUD, packages/custom layout | Direct YAML file read/write + explicit reload | The REST API hard-codes `automations.yaml`/`scripts.yaml` - packaged configs are invisible to it (see below) |
 | Recent warnings, quick glance | `system_log/list` WS command | Cheap, but capped ~50 entries, WARNING+ only, in-memory |
 | Real log forensics | Raw `home-assistant.log` | No API substitute exists anywhere in core - `logbook` is recorder/DB-backed, `logger` is live-level-only, `system_log` is lossy |
+| "Did entity X change state, and when" | `recorder.history.get_significant_states` (`get_entity_history`) | Same call the History page's own websocket API makes; bounded by the recorder's own retention (`purge_keep_days`, 10 days by default) - not a substitute for the log file, but the log file isn't a substitute for it either (a state change isn't a log line) |
+| "What fired, and what caused it" | `logbook.processor.EventProcessor` (`get_logbook`) | Same class the Logbook page and `logbook/get_events` WS command use - entries come back already humanized and, where HA recorded it, with the triggering context, rather than raw `state_changed` events this integration would otherwise have to re-derive meaning from. Same recorder-retention bound as above |
 | Add-on/Supervisor logs | Supervisor API | Separate subsystem, HA OS/Supervised only |
 | Dashboards, storage mode | WS `lovelace/config`, `lovelace/config/save` | Fully sufficient |
 | Dashboards, YAML mode | Raw `ui-lovelace.yaml` | `lovelace/config/save` explicitly raises "Not supported" for YAML-mode dashboards - not implemented here, read-only for that case |
