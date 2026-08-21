@@ -24,6 +24,21 @@ from custom_components.ha_dev_tools.history_manager import (
 )
 
 
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations():
+    """Shadow conftest.py's autouse fixture of the same name for this module.
+
+    That fixture depends on `hass`, forcing it to instantiate before any
+    other fixture gets a chance to run - including `recorder_mock`, whose
+    own setup (via pytest_homeassistant_custom_component's `recorder_db_url`
+    fixture) must run *before* `hass` exists, or its own ordering assertion
+    fails. None of the tests in this module need custom-component discovery
+    (they call history_manager's functions directly rather than going
+    through config entry setup), so it's safe to no-op here instead.
+    """
+    yield
+
+
 @pytest.mark.asyncio
 async def test_get_entity_history_raises_when_recorder_not_set_up(hass: HomeAssistant):
     """Without the recorder set up, this fails clearly rather than a raw KeyError."""
