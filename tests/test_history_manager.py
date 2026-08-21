@@ -16,6 +16,8 @@ own ordering assertion. Same pattern `ha-concierge-mcp`'s working
 `get_history` tests use for the identical reason.
 """
 
+from unittest.mock import patch
+
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
@@ -140,7 +142,17 @@ async def test_get_entity_history_truncates_to_limit(hass: HomeAssistant):
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("recorder_mock")
 async def test_get_logbook_entries_includes_state_change(hass: HomeAssistant):
-    assert await async_setup_component(hass, "logbook", {})
+    # logbook's manifest hard-depends on frontend (it registers a built-in
+    # panel), which in turn needs the hass_frontend static-assets package -
+    # not installed here, and not something this integration needs to
+    # actually serve for get_logbook_entries to work. Faking frontend as
+    # already-set-up (the standard HA test pattern for an unwanted
+    # dependency) skips its real async_setup entirely; the one thing
+    # logbook's own setup then does with it - registering the panel - is
+    # mocked out since frontend's own state was never really initialized.
+    hass.config.components.add("frontend")
+    with patch("homeassistant.components.frontend.async_register_built_in_panel"):
+        assert await async_setup_component(hass, "logbook", {})
     await hass.async_block_till_done()
 
     start_time = dt_util.utcnow()
