@@ -32,6 +32,7 @@ best-effort rather than asserting it unconditionally.
 
 import inspect
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import voluptuous as vol
@@ -42,11 +43,14 @@ from pytest_homeassistant_custom_component.common import MockUser
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.const import OPT_DRY_RUN
+from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
     DevToolsPingTool,
     FindEntitiesTool,
+    GetEntityHistoryTool,
+    GetLogbookTool,
     WriteGatedTool,
 )
 
@@ -295,3 +299,123 @@ async def test_write_gated_tool_dry_run_still_requires_armed_and_admin(
             _llm_context(admin_user.id),
         )
     assert tool.write_called is False
+
+
+# --- GetEntityHistoryTool / GetLogbookTool -----------------------------------
+#
+# _run() is exercised directly against a mocked history_manager rather than a
+# real recorder here - test_history_manager.py already covers the real
+# recorder/logbook query logic end to end. What's specific to these two
+# Tool classes and not covered there is the thin adapter layer: parsing
+# start_time/end_time, applying argument defaults, and turning
+# RecorderNotAvailableError/ValueError into a _tool_error() payload instead
+# of letting them escape.
+
+
+@pytest.mark.asyncio
+async def test_get_entity_history_tool_calls_manager(hass: HomeAssistant):
+    tool = GetEntityHistoryTool()
+    mock_get_history = AsyncMock(
+        return_value={"entities": {"sensor.x": {"states": []}}}
+    )
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.history_manager.get_entity_history",
+        mock_get_history,
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_entity_history",
+                tool_args={
+                    "entity_ids": ["sensor.x"],
+                    "start_time": "2026-08-10T00:00:00+00:00",
+                    "end_time": "2026-08-11T00:00:00+00:00",
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"entities": {"sensor.x": {"states": []}}}
+    mock_get_history.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_entity_history_tool_rejects_invalid_start_time(hass: HomeAssistant):
+    tool = GetEntityHistoryTool()
+
+    result = await tool._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_entity_history",
+            tool_args={"entity_ids": ["sensor.x"], "start_time": "not-a-date"},
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_get_entity_history_tool_surfaces_recorder_not_available(
+    hass: HomeAssistant,
+):
+    tool = GetEntityHistoryTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.history_manager.get_entity_history",
+        AsyncMock(side_effect=RecorderNotAvailableError()),
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_entity_history",
+                tool_args={
+                    "entity_ids": ["sensor.x"],
+                    "start_time": "2026-08-10T00:00:00+00:00",
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "RecorderNotAvailableError"
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_tool_calls_manager(hass: HomeAssistant):
+    tool = GetLogbookTool()
+    mock_get_logbook = AsyncMock(
+        return_value={"entries": [], "count": 0, "truncated": False}
+    )
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.history_manager.get_logbook_entries",
+        mock_get_logbook,
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_logbook",
+                tool_args={"start_time": "2026-08-10T00:00:00+00:00"},
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"entries": [], "count": 0, "truncated": False}
+    mock_get_logbook.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_tool_rejects_invalid_end_time(hass: HomeAssistant):
+    tool = GetLogbookTool()
+
+    result = await tool._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_logbook",
+            tool_args={
+                "start_time": "2026-08-10T00:00:00+00:00",
+                "end_time": "not-a-date",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "ValueError"
