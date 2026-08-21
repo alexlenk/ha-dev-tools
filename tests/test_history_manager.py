@@ -156,20 +156,29 @@ async def test_get_logbook_entries_includes_state_change(hass: HomeAssistant):
     await hass.async_block_till_done()
 
     start_time = dt_util.utcnow()
-    hass.states.async_set("input_boolean.cleaning", "on", {"friendly_name": "Cleaning"})
-    await hass.async_block_till_done()
+    # logbook.log fires a plain EVENT_LOGBOOK_ENTRY - always in
+    # async_determine_event_types()'s BUILT_IN_EVENTS regardless of domain,
+    # unlike a bare hass.states.async_set() on a test entity with no owning
+    # integration/config entry (async_determine_event_types() narrows event
+    # types by the entity's config-entry domain when entity_ids is given,
+    # which a plain test entity doesn't have).
+    await hass.services.async_call(
+        "logbook",
+        "log",
+        {
+            "name": "Cleaning",
+            "message": "started",
+            "entity_id": "input_boolean.cleaning",
+        },
+        blocking=True,
+    )
     await async_wait_recording_done(hass)
 
     result = await get_logbook_entries(
-        hass,
-        start_time=start_time,
-        end_time=dt_util.utcnow(),
-        entity_ids=["input_boolean.cleaning"],
+        hass, start_time=start_time, end_time=dt_util.utcnow()
     )
 
     assert result["count"] >= 1
-    assert any(
-        e.get("entity_id") == "input_boolean.cleaning" for e in result["entries"]
-    )
+    assert any(e.get("name") == "Cleaning" for e in result["entries"])
     # `when` is a JSON-safe ISO string, not the raw epoch float EventProcessor returns.
     assert all(isinstance(e["when"], str) for e in result["entries"])
