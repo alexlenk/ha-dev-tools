@@ -1,13 +1,17 @@
 """Test LogManager functionality with Home Assistant fixtures."""
 
+import logging
+
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
 
 from custom_components.ha_dev_tools.log_manager import LogEntry, LogFilters, LogManager
 from custom_components.ha_dev_tools.security import SecurityManager
+
+_TEST_LOGGER = logging.getLogger("tests.test_log_manager.fixture_logger")
 
 
 @pytest.fixture
@@ -22,38 +26,45 @@ def log_manager(hass: HomeAssistant, security_manager):
     return LogManager(hass, security_manager)
 
 
-@pytest.fixture
-def mock_log_file(hass: HomeAssistant):
-    """Create a mock log file for testing."""
-    log_content = """2024-02-08 10:00:00 INFO homeassistant.core: Starting Home Assistant
-2024-02-08 10:00:01 DEBUG homeassistant.loader: Loading integration ha_dev_tools
-2024-02-08 10:00:02 WARNING homeassistant.components.sensor: Sensor unavailable
-2024-02-08 10:00:03 ERROR homeassistant.components.light: Failed to turn on light
-2024-02-08 10:00:04 INFO homeassistant.setup: Setup completed
-"""
-
-    # Use the hass config directory
-    log_file = Path(hass.config.config_dir) / "home-assistant.log"
-    log_file.write_text(log_content)
-
-    return log_file
+async def _setup_system_log(hass: HomeAssistant) -> None:
+    """Set up the real system_log integration backing get_core_logs."""
+    assert await async_setup_component(hass, "system_log", {})
 
 
-async def test_get_core_logs_basic(hass: HomeAssistant, log_manager, mock_log_file):
+async def _seed_log_entries(hass: HomeAssistant) -> None:
+    """Emit real WARNING/ERROR log records for system_log to capture.
+
+    system_log's handler is installed at logging.WARNING - DEBUG/INFO
+    records are never captured, matching the native Logs page.
+    """
+    _TEST_LOGGER.warning("Sensor unavailable")
+    _TEST_LOGGER.error("Failed to turn on light")
+    await hass.async_block_till_done()
+
+
+async def test_get_core_logs_basic(hass: HomeAssistant, log_manager):
     """Test retrieving core logs without filters."""
-    filters = LogFilters()
+    await _setup_system_log(hass)
+    await _seed_log_entries(hass)
 
+    filters = LogFilters()
     logs = await log_manager.get_core_logs(filters)
 
     assert len(logs) > 0
     assert all(isinstance(log, LogEntry) for log in logs)
 
 
-async def test_get_core_logs_empty_file(hass: HomeAssistant, log_manager):
-    """Test retrieving logs from empty file."""
-    # Create empty log file
-    log_file = Path(hass.config.config_dir) / "home-assistant.log"
-    log_file.write_text("")
+async def test_get_core_logs_no_system_log(hass: HomeAssistant, log_manager):
+    """Test retrieving logs when system_log hasn't been set up."""
+    filters = LogFilters()
+    logs = await log_manager.get_core_logs(filters)
+
+    assert logs == []
+
+
+async def test_get_core_logs_empty_buffer(hass: HomeAssistant, log_manager):
+    """Test retrieving logs when system_log has no records yet."""
+    await _setup_system_log(hass)
 
     filters = LogFilters()
     logs = await log_manager.get_core_logs(filters)
@@ -61,16 +72,14 @@ async def test_get_core_logs_empty_file(hass: HomeAssistant, log_manager):
     assert logs == []
 
 
-async def test_get_core_logs_missing_file(hass: HomeAssistant, log_manager):
-    """Test retrieving logs when file doesn't exist."""
-    filters = LogFilters()
-    logs = await log_manager.get_core_logs(filters)
-
-    assert logs == []
-
-
-async def test_log_filtering_by_lines(hass: HomeAssistant, log_manager, mock_log_file):
+async def test_log_filtering_by_lines(hass: HomeAssistant, log_manager):
     """Test filtering logs by number of lines."""
+    await _setup_system_log(hass)
+    _TEST_LOGGER.warning("First warning")
+    _TEST_LOGGER.error("First error")
+    _TEST_LOGGER.critical("First critical")
+    await hass.async_block_till_done()
+
     filters = LogFilters(lines=2)
 
     logs = await log_manager.get_core_logs(filters)
@@ -78,31 +87,40 @@ async def test_log_filtering_by_lines(hass: HomeAssistant, log_manager, mock_log
     assert len(logs) <= 2
 
 
-async def test_log_filtering_by_level(hass: HomeAssistant, log_manager, mock_log_file):
+async def test_log_filtering_by_level(hass: HomeAssistant, log_manager):
     """Test filtering logs by level."""
+    await _setup_system_log(hass)
+    await _seed_log_entries(hass)
+
     filters = LogFilters(level="ERROR")
 
     logs = await log_manager.get_core_logs(filters)
 
+    assert len(logs) > 0
     assert all(log.level == "ERROR" for log in logs)
 
 
-async def test_log_filtering_by_search(hass: HomeAssistant, log_manager, mock_log_file):
+async def test_log_filtering_by_search(hass: HomeAssistant, log_manager):
     """Test filtering logs by search term."""
+    await _setup_system_log(hass)
+    await _seed_log_entries(hass)
+
     filters = LogFilters(search="light")
 
     logs = await log_manager.get_core_logs(filters)
 
+    assert len(logs) > 0
     assert all(
         "light" in log.message.lower() or "light" in log.component.lower()
         for log in logs
     )
 
 
-async def test_log_filtering_by_time_range(
-    hass: HomeAssistant, log_manager, mock_log_file
-):
+async def test_log_filtering_by_time_range(hass: HomeAssistant, log_manager):
     """Test filtering logs by time range."""
+    await _setup_system_log(hass)
+    await _seed_log_entries(hass)
+
     now = datetime.now()
     since = now - timedelta(hours=1)
     until = now + timedelta(hours=1)
@@ -111,6 +129,7 @@ async def test_log_filtering_by_time_range(
 
     logs = await log_manager.get_core_logs(filters)
 
+    assert len(logs) > 0
     # All logs should be within the time range
     for log in logs:
         assert since <= log.timestamp <= until
@@ -136,8 +155,15 @@ async def test_log_entry_to_dict(hass: HomeAssistant):
     assert result["component"] == "test.component"
 
 
-async def test_log_ordering(hass: HomeAssistant, log_manager, mock_log_file):
+async def test_log_ordering(hass: HomeAssistant, log_manager):
     """Test that logs are ordered by timestamp (newest first)."""
+    await _setup_system_log(hass)
+    for i in range(5):
+        logging.getLogger(f"tests.test_log_manager.ordering.{i}").warning(
+            "Warning %d", i
+        )
+    await hass.async_block_till_done()
+
     filters = LogFilters()
 
     logs = await log_manager.get_core_logs(filters)
@@ -147,10 +173,15 @@ async def test_log_ordering(hass: HomeAssistant, log_manager, mock_log_file):
         assert logs[i].timestamp >= logs[i + 1].timestamp
 
 
-async def test_log_filters_offset_and_limit(
-    hass: HomeAssistant, log_manager, mock_log_file
-):
+async def test_log_filters_offset_and_limit(hass: HomeAssistant, log_manager):
     """Test pagination with offset and limit."""
+    await _setup_system_log(hass)
+    for i in range(5):
+        logging.getLogger(f"tests.test_log_manager.pagination.{i}").warning(
+            "Warning %d", i
+        )
+    await hass.async_block_till_done()
+
     # Get all logs first
     all_filters = LogFilters(limit=100)
     all_logs = await log_manager.get_core_logs(all_filters)

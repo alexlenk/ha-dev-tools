@@ -8,9 +8,7 @@ import asyncio
 import os
 import string
 import sys
-import tempfile
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import Mock
 
 from hypothesis import HealthCheck, given, settings
@@ -76,13 +74,53 @@ mock_http.HomeAssistantView = Mock()
 class MockHass:
     """Mock Home Assistant instance for testing."""
 
-    def __init__(self, config_dir: str):
-        self.config = Mock()
-        self.config.config_dir = config_dir
+    def __init__(self):
+        self.data = {}
 
     async def async_add_executor_job(self, func, *args):
         """Mock executor job - just run synchronously."""
         return func(*args)
+
+
+class _FakeRecords:
+    """Stand-in for system_log's DedupStore - just needs to_list()."""
+
+    def __init__(self, records):
+        self._records = records
+
+    def to_list(self):
+        """Return the raw record dicts, newest first (system_log's own order)."""
+        return self._records
+
+
+class _FakeSystemLogHandler:
+    """Stand-in for system_log's LogErrorHandler - just needs .records."""
+
+    def __init__(self, records):
+        self.records = _FakeRecords(records)
+
+
+def install_system_log_records(hass: "MockHass", log_entries: list) -> None:
+    """Populate hass.data["system_log"] the way the real integration would.
+
+    Each dict in log_entries has timestamp (datetime)/level/component/message
+    keys, matching system_log's own record shape: timestamp as a float epoch
+    (record.created), name as the logger name, message as a list of strings.
+    """
+    records = [
+        {
+            "name": entry["component"],
+            "message": [entry["message"]],
+            "level": entry["level"],
+            "source": ("test.py", 1),
+            "timestamp": entry["timestamp"].timestamp(),
+            "exception": "",
+            "count": 1,
+            "first_occurred": entry["timestamp"].timestamp(),
+        }
+        for entry in log_entries
+    ]
+    hass.data["system_log"] = _FakeSystemLogHandler(records)
 
 
 # Now import our modules - deliberately placed after the mock-pollution
@@ -139,21 +177,6 @@ def generate_timestamp():
 valid_timestamps = generate_timestamp()
 
 
-def create_log_file(log_dir: Path, log_entries: list) -> None:
-    """Create a log file with the given entries."""
-    log_file = log_dir / "home-assistant.log"
-
-    with open(log_file, "w", encoding="utf-8") as f:
-        for entry in log_entries:
-            # Format: YYYY-MM-DD HH:MM:SS LEVEL component: message
-            timestamp_str = entry["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
-            component_part = f"{entry['component']}: " if entry["component"] else ""
-            log_line = (
-                f"{timestamp_str} {entry['level']} {component_part}{entry['message']}\n"
-            )
-            f.write(log_line)
-
-
 @given(
     log_entries=st.lists(
         st.fixed_dictionaries(
@@ -179,72 +202,69 @@ def test_log_retrieval_completeness_property(log_entries):
     """
 
     async def run_test():
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create mock hass and managers
-            mock_hass = MockHass(temp_dir)
-            security_manager = SecurityManager(mock_hass)
-            log_manager = LogManager(mock_hass, security_manager)
+        # Create mock hass and managers
+        mock_hass = MockHass()
+        security_manager = SecurityManager(mock_hass)
+        log_manager = LogManager(mock_hass, security_manager)
 
-            # Create log file with entries
-            create_log_file(Path(temp_dir), log_entries)
+        # Populate hass.data["system_log"] with the generated entries
+        install_system_log_records(mock_hass, log_entries)
 
-            # Retrieve logs without filters
-            filters = LogFilters()
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        # Retrieve logs without filters
+        filters = LogFilters()
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
+        # Should succeed
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
 
-            # Should return log entries
-            assert len(retrieved_logs) > 0, "Should retrieve at least one log entry"
+        # Should return log entries
+        assert len(retrieved_logs) > 0, "Should retrieve at least one log entry"
 
-            # All retrieved entries should be properly formatted LogEntry objects
-            for log_entry in retrieved_logs:
-                assert isinstance(
-                    log_entry, LogEntry
-                ), f"Entry should be LogEntry, got {type(log_entry)}"
-                assert hasattr(log_entry, "timestamp"), "Entry should have timestamp"
-                assert hasattr(log_entry, "level"), "Entry should have level"
-                assert hasattr(log_entry, "source"), "Entry should have source"
-                assert hasattr(log_entry, "message"), "Entry should have message"
-                assert hasattr(log_entry, "component"), "Entry should have component"
+        # All retrieved entries should be properly formatted LogEntry objects
+        for log_entry in retrieved_logs:
+            assert isinstance(
+                log_entry, LogEntry
+            ), f"Entry should be LogEntry, got {type(log_entry)}"
+            assert hasattr(log_entry, "timestamp"), "Entry should have timestamp"
+            assert hasattr(log_entry, "level"), "Entry should have level"
+            assert hasattr(log_entry, "source"), "Entry should have source"
+            assert hasattr(log_entry, "message"), "Entry should have message"
+            assert hasattr(log_entry, "component"), "Entry should have component"
 
-                # Validate timestamp is a datetime object
-                assert isinstance(
-                    log_entry.timestamp, datetime
-                ), f"Timestamp should be datetime, got {type(log_entry.timestamp)}"
+            # Validate timestamp is a datetime object
+            assert isinstance(
+                log_entry.timestamp, datetime
+            ), f"Timestamp should be datetime, got {type(log_entry.timestamp)}"
 
-                # Validate level is a string
-                assert isinstance(
-                    log_entry.level, str
-                ), f"Level should be string, got {type(log_entry.level)}"
+            # Validate level is a string
+            assert isinstance(
+                log_entry.level, str
+            ), f"Level should be string, got {type(log_entry.level)}"
 
-                # Validate source is 'core' for core logs
-                assert (
-                    log_entry.source == "core"
-                ), f"Source should be 'core', got {log_entry.source}"
+            # Validate source is 'core' for core logs
+            assert (
+                log_entry.source == "core"
+            ), f"Source should be 'core', got {log_entry.source}"
 
-                # Validate message is a string
-                assert isinstance(
-                    log_entry.message, str
-                ), f"Message should be string, got {type(log_entry.message)}"
+            # Validate message is a string
+            assert isinstance(
+                log_entry.message, str
+            ), f"Message should be string, got {type(log_entry.message)}"
 
-                # Validate component is a string
-                assert isinstance(
-                    log_entry.component, str
-                ), f"Component should be string, got {type(log_entry.component)}"
+            # Validate component is a string
+            assert isinstance(
+                log_entry.component, str
+            ), f"Component should be string, got {type(log_entry.component)}"
 
-            # Verify we can convert to dict (for JSON serialization)
-            for log_entry in retrieved_logs:
-                entry_dict = log_entry.to_dict()
-                assert isinstance(
-                    entry_dict, dict
-                ), "to_dict() should return a dictionary"
-                assert "timestamp" in entry_dict, "Dict should contain timestamp"
-                assert "level" in entry_dict, "Dict should contain level"
-                assert "source" in entry_dict, "Dict should contain source"
-                assert "message" in entry_dict, "Dict should contain message"
-                assert "component" in entry_dict, "Dict should contain component"
+        # Verify we can convert to dict (for JSON serialization)
+        for log_entry in retrieved_logs:
+            entry_dict = log_entry.to_dict()
+            assert isinstance(entry_dict, dict), "to_dict() should return a dictionary"
+            assert "timestamp" in entry_dict, "Dict should contain timestamp"
+            assert "level" in entry_dict, "Dict should contain level"
+            assert "source" in entry_dict, "Dict should contain source"
+            assert "message" in entry_dict, "Dict should contain message"
+            assert "component" in entry_dict, "Dict should contain component"
 
     # Run the async test
     asyncio.run(run_test())
@@ -276,26 +296,25 @@ def test_log_filtering_lines_property(log_entries, lines_limit):
     """
 
     async def run_test():
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create mock hass and managers
-            mock_hass = MockHass(temp_dir)
-            security_manager = SecurityManager(mock_hass)
-            log_manager = LogManager(mock_hass, security_manager)
+        # Create mock hass and managers
+        mock_hass = MockHass()
+        security_manager = SecurityManager(mock_hass)
+        log_manager = LogManager(mock_hass, security_manager)
 
-            # Create log file with entries
-            create_log_file(Path(temp_dir), log_entries)
+        # Populate hass.data["system_log"] with the generated entries
+        install_system_log_records(mock_hass, log_entries)
 
-            # Retrieve logs with lines filter
-            filters = LogFilters(lines=lines_limit)
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        # Retrieve logs with lines filter
+        filters = LogFilters(lines=lines_limit)
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
+        # Should succeed
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
 
-            # Should not exceed the lines limit
-            assert (
-                len(retrieved_logs) <= lines_limit
-            ), f"Retrieved {len(retrieved_logs)} logs, but limit was {lines_limit}"
+        # Should not exceed the lines limit
+        assert (
+            len(retrieved_logs) <= lines_limit
+        ), f"Retrieved {len(retrieved_logs)} logs, but limit was {lines_limit}"
 
     # Run the async test
     asyncio.run(run_test())
@@ -327,27 +346,26 @@ def test_log_filtering_level_property(log_entries, filter_level):
     """
 
     async def run_test():
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create mock hass and managers
-            mock_hass = MockHass(temp_dir)
-            security_manager = SecurityManager(mock_hass)
-            log_manager = LogManager(mock_hass, security_manager)
+        # Create mock hass and managers
+        mock_hass = MockHass()
+        security_manager = SecurityManager(mock_hass)
+        log_manager = LogManager(mock_hass, security_manager)
 
-            # Create log file with entries
-            create_log_file(Path(temp_dir), log_entries)
+        # Populate hass.data["system_log"] with the generated entries
+        install_system_log_records(mock_hass, log_entries)
 
-            # Retrieve logs with level filter
-            filters = LogFilters(level=filter_level)
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        # Retrieve logs with level filter
+        filters = LogFilters(level=filter_level)
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
+        # Should succeed
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
 
-            # All returned logs should match the filter level
-            for log_entry in retrieved_logs:
-                assert (
-                    log_entry.level == filter_level.upper()
-                ), f"Log entry level {log_entry.level} doesn't match filter {filter_level}"
+        # All returned logs should match the filter level
+        for log_entry in retrieved_logs:
+            assert (
+                log_entry.level == filter_level.upper()
+            ), f"Log entry level {log_entry.level} doesn't match filter {filter_level}"
 
     # Run the async test
     asyncio.run(run_test())
@@ -379,35 +397,34 @@ def test_log_filtering_search_property(log_entries, search_term):
     """
 
     async def run_test():
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Ensure at least one log entry contains the search term
-            # Add the search term to at least one entry
-            if log_entries:
-                log_entries[0]["message"] = f"Test message with {search_term} included"
+        # Ensure at least one log entry contains the search term
+        # Add the search term to at least one entry
+        if log_entries:
+            log_entries[0]["message"] = f"Test message with {search_term} included"
 
-            # Create mock hass and managers
-            mock_hass = MockHass(temp_dir)
-            security_manager = SecurityManager(mock_hass)
-            log_manager = LogManager(mock_hass, security_manager)
+        # Create mock hass and managers
+        mock_hass = MockHass()
+        security_manager = SecurityManager(mock_hass)
+        log_manager = LogManager(mock_hass, security_manager)
 
-            # Create log file with entries
-            create_log_file(Path(temp_dir), log_entries)
+        # Populate hass.data["system_log"] with the generated entries
+        install_system_log_records(mock_hass, log_entries)
 
-            # Retrieve logs with search filter
-            filters = LogFilters(search=search_term)
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        # Retrieve logs with search filter
+        filters = LogFilters(search=search_term)
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
+        # Should succeed
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
 
-            # All returned logs should contain the search term
-            search_lower = search_term.lower()
-            for log_entry in retrieved_logs:
-                message_match = search_lower in log_entry.message.lower()
-                component_match = search_lower in log_entry.component.lower()
-                assert (
-                    message_match or component_match
-                ), f"Log entry doesn't contain search term '{search_term}': {log_entry.message}"
+        # All returned logs should contain the search term
+        search_lower = search_term.lower()
+        for log_entry in retrieved_logs:
+            message_match = search_lower in log_entry.message.lower()
+            component_match = search_lower in log_entry.component.lower()
+            assert (
+                message_match or component_match
+            ), f"Log entry doesn't contain search term '{search_term}': {log_entry.message}"
 
     # Run the async test
     asyncio.run(run_test())
@@ -438,73 +455,71 @@ def test_log_time_ordering_property(log_entries):
     """
 
     async def run_test():
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create mock hass and managers
-            mock_hass = MockHass(temp_dir)
-            security_manager = SecurityManager(mock_hass)
-            log_manager = LogManager(mock_hass, security_manager)
+        # Create mock hass and managers
+        mock_hass = MockHass()
+        security_manager = SecurityManager(mock_hass)
+        log_manager = LogManager(mock_hass, security_manager)
 
-            # Create log file with entries
-            create_log_file(Path(temp_dir), log_entries)
+        # Populate hass.data["system_log"] with the generated entries
+        install_system_log_records(mock_hass, log_entries)
 
-            # Retrieve logs without filters
-            filters = LogFilters()
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        # Retrieve logs without filters
+        filters = LogFilters()
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
+        # Should succeed
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
 
-            # Should have at least 2 entries to check ordering
-            if len(retrieved_logs) >= 2:
-                # Verify logs are ordered by timestamp (newest first)
-                for i in range(len(retrieved_logs) - 1):
-                    current_time = retrieved_logs[i].timestamp
-                    next_time = retrieved_logs[i + 1].timestamp
-                    assert (
-                        current_time >= next_time
-                    ), f"Logs not properly ordered: {current_time} should be >= {next_time}"
+        # Should have at least 2 entries to check ordering
+        if len(retrieved_logs) >= 2:
+            # Verify logs are ordered by timestamp (newest first)
+            for i in range(len(retrieved_logs) - 1):
+                current_time = retrieved_logs[i].timestamp
+                next_time = retrieved_logs[i + 1].timestamp
+                assert (
+                    current_time >= next_time
+                ), f"Logs not properly ordered: {current_time} should be >= {next_time}"
 
     # Run the async test
     asyncio.run(run_test())
 
 
-def test_empty_log_file_property():
+def test_empty_system_log_property():
     """
-    Feature: ha-config-manager-integration, Property: Empty Log File Handling
+    Feature: ha-config-manager-integration, Property: Empty Log Buffer Handling
 
-    When the log file is empty or doesn't exist, the system should handle
-    it gracefully and return an empty list without errors.
+    When system_log has no records, or hasn't been set up at all, the
+    system should handle it gracefully and return an empty list without
+    errors.
     **Validates: Requirements 10.1**
     """
 
     async def run_test():
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create mock hass and managers
-            mock_hass = MockHass(temp_dir)
-            security_manager = SecurityManager(mock_hass)
-            log_manager = LogManager(mock_hass, security_manager)
+        # Create mock hass and managers
+        mock_hass = MockHass()
+        security_manager = SecurityManager(mock_hass)
+        log_manager = LogManager(mock_hass, security_manager)
 
-            # Don't create a log file - test missing file handling
-            filters = LogFilters()
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        # Don't populate hass.data["system_log"] - test the "not loaded" case
+        filters = LogFilters()
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed with empty list
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
-            assert (
-                len(retrieved_logs) == 0
-            ), "Should return empty list for missing log file"
+        # Should succeed with empty list
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
+        assert (
+            len(retrieved_logs) == 0
+        ), "Should return empty list when system_log isn't loaded"
 
-            # Now test with empty log file
-            log_file = Path(temp_dir) / "home-assistant.log"
-            log_file.touch()
+        # Now test with system_log loaded but holding no records
+        install_system_log_records(mock_hass, [])
 
-            retrieved_logs = await log_manager.get_core_logs(filters)
+        retrieved_logs = await log_manager.get_core_logs(filters)
 
-            # Should succeed with empty list
-            assert retrieved_logs is not None, "Retrieved logs should not be None"
-            assert (
-                len(retrieved_logs) == 0
-            ), "Should return empty list for empty log file"
+        # Should succeed with empty list
+        assert retrieved_logs is not None, "Retrieved logs should not be None"
+        assert (
+            len(retrieved_logs) == 0
+        ), "Should return empty list for an empty system_log buffer"
 
     # Run the async test
     asyncio.run(run_test())

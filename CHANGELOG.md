@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-08-21
+
+### Fixed
+- `get_logs` always returned `{"entries": [], "count": 0}`, even with maximally permissive parameters, while the native Settings → System → Logs page showed live WARNING/ERROR entries from the same instance. It was reading a static `home-assistant.log` file in the config directory - the wrong data source, since the native Logs page (and HA's own `system_log/list` websocket command) is backed by the `system_log` integration's in-memory WARNING+ record buffer instead. Depending on the install, that file can be missing, rotated, or simply not what's being written to, producing exactly this always-empty-but-reachable symptom. `get_core_logs` now reads `hass.data["system_log"].records` directly, matching what the native page actually shows.
+
 ## [2.2.1] - 2026-08-21
 
 ### Changed
