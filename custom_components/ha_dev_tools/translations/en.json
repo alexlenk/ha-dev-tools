@@ -9,5 +9,18 @@
     "abort": {
       "single_instance_allowed": "HA Dev Tools is already configured. Only one instance is supported."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA Dev Tools options",
+        "data": {
+          "dry_run": "Dry-run mode"
+        },
+        "data_description": {
+          "dry_run": "When enabled, every write tool (write_automation, create/update/delete_helper, write_dashboard) is blocked - the tool call's own input is returned to the agent as a preview instead of being applied. Read-only tools and reload_domain/check_config are unaffected."
+        }
+      }
+    }
   }
 }

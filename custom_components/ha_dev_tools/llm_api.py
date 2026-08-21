@@ -99,6 +99,49 @@ class GatedTool(llm.Tool):
         raise NotImplementedError
 
 
+class WriteGatedTool(GatedTool):
+    """Base for every tool that mutates state (create/update/delete/write).
+
+    When this integration's dry-run option is enabled, the underlying
+    write never runs at all - the call's own validated arguments are
+    returned as a "would_apply" preview instead, so the agent can show
+    the user what it was about to do before anything actually changes.
+    This is a policy block, not a simulation: it does not attempt to
+    verify the write would have succeeded (e.g. path/schema checks),
+    only that it didn't happen.
+    """
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Short-circuit into a dry-run preview, or hand off to _write()."""
+        if access_control.is_dry_run(hass):
+            return {
+                "dry_run": True,
+                "action": self.name,
+                "would_apply": tool_input.tool_args,
+                "note": (
+                    "Dry-run mode is enabled for this integration - no "
+                    "changes were made. Show this to the user; dry-run can "
+                    "be turned off from this integration's Configure page."
+                ),
+            }
+        return await self._write(hass, tool_input, llm_context)
+
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Subclasses implement their actual write logic here, not _run."""
+        raise NotImplementedError
+
+
 class DevToolsPingTool(llm.Tool):
     """Confirm the dev_tools API is registered and reachable.
 
@@ -442,7 +485,7 @@ class GetAutomationTool(GatedTool):
         }
 
 
-class WriteAutomationTool(GatedTool):
+class WriteAutomationTool(WriteGatedTool):
     """Layout-aware, package-safe automation write - see docs/ARCHITECTURE.md."""
 
     name = "write_automation"
@@ -471,7 +514,7 @@ class WriteAutomationTool(GatedTool):
         self._manager = automation_manager
 
     @override
-    async def _run(
+    async def _write(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -531,7 +574,7 @@ class ListHelpersTool(GatedTool):
         return {"items": items}
 
 
-class CreateHelperTool(GatedTool):
+class CreateHelperTool(WriteGatedTool):
     """Create a new helper item."""
 
     name = "create_helper"
@@ -547,7 +590,7 @@ class CreateHelperTool(GatedTool):
     )
 
     @override
-    async def _run(
+    async def _write(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -569,7 +612,7 @@ class CreateHelperTool(GatedTool):
         return created
 
 
-class UpdateHelperTool(GatedTool):
+class UpdateHelperTool(WriteGatedTool):
     """Update an existing helper item by id."""
 
     name = "update_helper"
@@ -588,7 +631,7 @@ class UpdateHelperTool(GatedTool):
     )
 
     @override
-    async def _run(
+    async def _write(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -610,7 +653,7 @@ class UpdateHelperTool(GatedTool):
         return updated
 
 
-class DeleteHelperTool(GatedTool):
+class DeleteHelperTool(WriteGatedTool):
     """Delete a helper item by id."""
 
     name = "delete_helper"
@@ -620,7 +663,7 @@ class DeleteHelperTool(GatedTool):
     )
 
     @override
-    async def _run(
+    async def _write(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -672,7 +715,7 @@ class GetDashboardTool(GatedTool):
         return config
 
 
-class WriteDashboardTool(GatedTool):
+class WriteDashboardTool(WriteGatedTool):
     """Write a dashboard's config - storage mode only."""
 
     name = "write_dashboard"
@@ -687,7 +730,7 @@ class WriteDashboardTool(GatedTool):
     )
 
     @override
-    async def _run(
+    async def _write(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,

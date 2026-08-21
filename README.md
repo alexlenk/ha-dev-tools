@@ -66,6 +66,14 @@ repository.
    client that supports Streamable HTTP) to
    `https://<your-ha-instance>/api/mcp/dev_tools`, authenticated with a
    normal Home Assistant admin long-lived access token as a Bearer token.
+5. **Optional: turn on dry-run mode.** From this integration's card in
+   Settings → Devices & Services, click **Configure** and enable dry-run.
+   Every write tool (`write_automation`, `create_helper`/`update_helper`/
+   `delete_helper`, `write_dashboard`) then returns the exact input it would
+   have applied instead of actually applying it, so an agent's proposed
+   changes can be reviewed before you turn dry-run back off. Takes effect
+   immediately, no restart needed. Read-only tools and
+   `reload_domain`/`check_config` are unaffected either way.
 
 ## Tools
 

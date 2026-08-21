@@ -34,17 +34,20 @@ import inspect
 import time
 
 import pytest
+import voluptuous as vol
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
+from custom_components.ha_dev_tools.const import OPT_DRY_RUN
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
     DevToolsPingTool,
     FindEntitiesTool,
+    WriteGatedTool,
 )
 
 
@@ -213,3 +216,80 @@ async def test_gated_tool_succeeds_when_armed_and_admin(
     assert isinstance(result, dict)
     # A successful call extends the idle window (touch_armed).
     assert path.stat().st_mtime >= mtime_before
+
+
+# --- WriteGatedTool / dry-run ------------------------------------------------
+
+
+class _StubWriteTool(WriteGatedTool):
+    """Minimal WriteGatedTool subclass so these tests exercise only the
+    dry-run gating itself, decoupled from any specific manager's setup."""
+
+    name = "stub_write"
+    description = "stub"
+    parameters = vol.Schema({})
+
+    def __init__(self) -> None:
+        self.write_called = False
+
+    async def _write(self, hass, tool_input, llm_context):
+        self.write_called = True
+        return {"wrote": True}
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_performs_write_when_dry_run_disabled(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    _arm(hass)
+    tool = _StubWriteTool()
+
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
+        _llm_context(admin_user.id),
+    )
+
+    assert tool.write_called is True
+    assert result == {"wrote": True}
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_blocks_write_when_dry_run_enabled(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry, options={OPT_DRY_RUN: True}
+    )
+    _arm(hass)
+    tool = _StubWriteTool()
+
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
+        _llm_context(admin_user.id),
+    )
+
+    assert tool.write_called is False
+    assert result["dry_run"] is True
+    assert result["action"] == "stub_write"
+    assert result["would_apply"] == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_dry_run_still_requires_armed_and_admin(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """Dry-run mode previews a write, it doesn't bypass the access gate."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry, options={OPT_DRY_RUN: True}
+    )
+    tool = _StubWriteTool()
+
+    with pytest.raises(NotArmedError):
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="stub_write", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+    assert tool.write_called is False

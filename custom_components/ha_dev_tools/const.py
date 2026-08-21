@@ -2,6 +2,9 @@
 
 DOMAIN = "ha_dev_tools"
 
+# Options flow key for the dry-run toggle (see access_control.is_dry_run()).
+OPT_DRY_RUN = "dry_run"
+
 # Operation types
 OPERATION_READ = "read"
 OPERATION_WRITE = "write"

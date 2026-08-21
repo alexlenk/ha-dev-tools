@@ -8,9 +8,11 @@ CHANGELOG's Removed entry for why that was dropped rather than fixed).
 from __future__ import annotations
 
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import DOMAIN
+from .options_flow import HADevToolsOptionsFlow
 
 
 # mypy doesn't know HA's ConfigFlow.__init_subclass__ accepts `domain=` -
@@ -21,6 +23,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call
     """Handle a config flow for HA Dev Tools."""
 
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry: ConfigEntry) -> HADevToolsOptionsFlow:
+        """Get the options flow (currently just the dry-run toggle)."""
+        return HADevToolsOptionsFlow(config_entry)
 
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         """Handle the initial (and only) step."""
