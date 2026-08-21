@@ -5,7 +5,7 @@ irrelevant to any one task. `find_entities` resolves an area name (matching
 HA's own fallback: an entity without its own area inherits its device's
 area) plus optional domain/name filters, and reports live availability
 alongside registry metadata - registries alone have no availability field
-(see docs/RESTART_PLAN.md), only the state machine does.
+(see docs/ARCHITECTURE.md), only the state machine does.
 
 `entity_health_report` uses the same registry-plus-live-state approach to
 turn "hundreds of entities" into a scannable per-integration summary

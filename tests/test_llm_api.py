@@ -3,7 +3,7 @@
 Verifies the foundation of the redesigned architecture: this integration
 registers into Home Assistant's own `homeassistant.helpers.llm` tool
 registry, which HA's native `mcp_server` integration serves over MCP with
-no custom transport code of our own. See docs/RESTART_PLAN.md.
+no custom transport code of our own. See docs/ARCHITECTURE.md.
 
 NOTE on `llm.APIInstance.async_call_tool`: that method does its own
 deferred `from homeassistant.components.conversation import (...)` purely
@@ -107,7 +107,7 @@ async def test_dev_tools_ping_tool_reachable(hass: HomeAssistant, setup_integrat
 
 @pytest.mark.asyncio
 async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integration_with_entry):
-    """All Phase 2 tools are registered, not just the diagnostic ping tool."""
+    """The real tool surface is registered, not just the diagnostic ping tool."""
     api_instance = await llm.async_get_api(hass, API_ID, _llm_context())
 
     tool_names = {tool.name for tool in api_instance.tools}

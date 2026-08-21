@@ -1,7 +1,7 @@
 """Tests for the layout-aware, package-safe AutomationManager.
 
 These are the highest-value tests in the redesign: they verify the "hard
-safety rule" from docs/RESTART_PLAN.md actually holds in code - a
+safety rule" from docs/ARCHITECTURE.md actually holds in code - a
 package-defined automation is found and edited through its real file, never
 silently duplicated into automations.yaml or missed entirely.
 """

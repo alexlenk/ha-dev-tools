@@ -2,8 +2,9 @@
 
 Proves the loopback pattern actually works against real HA WS command
 dispatch (schema validation, admin enforcement, async handler scheduling)
-before any real tool is built on top of it - see docs/RESTART_PLAN.md's
-Phase 4 note. Uses a toy command to prove the mechanics, then a real
+before any real tool is built on top of it - see docs/ARCHITECTURE.md's
+"WebSocket loopback pattern" section. Uses a toy command to prove the
+mechanics, then a real
 `input_boolean` CRUD round-trip to prove genuine interop with the exact
 class of component (helpers) this exists for.
 """

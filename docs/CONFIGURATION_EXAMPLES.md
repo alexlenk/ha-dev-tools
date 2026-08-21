@@ -1,6 +1,13 @@
 # Configuration Examples
 
-This document provides copy-paste ready configuration examples for the Home Assistant Configuration Manager integration.
+This document covers `configuration.yaml`'s `ha_dev_tools: security:` block
+- the path allowlist/denylist that bounds what file-touching tools
+(`write_automation` and the underlying `FileManager`) can reach. It's
+independent of, and in addition to, the arm-file/admin gate covered in
+[SECURITY.md](SECURITY.md) - that gate controls *when* tools run at all;
+this controls *which paths* they can touch once they do. Sane defaults
+apply if you never add this block at all; add it to narrow or widen access
+from those defaults.
 
 ## Table of Contents
 
@@ -284,11 +291,13 @@ Result:
 Write operations are disabled by default for security. To enable them, add paths to the `write_paths` configuration.
 
 **Important Security Notes:**
-- Write operations require admin authentication
+- Write operations require admin authentication (and dev_tools' own arm-file
+  gate - see [SECURITY.md](SECURITY.md))
 - Only paths in `write_paths` can be modified
 - All YAML files are validated before writing
-- Files are backed up automatically before modification
-- Rate limiting is enforced by default
+- Existing files are backed up automatically before being overwritten, to a
+  fixed `.ha_dev_tools_backups/` directory alongside your config - this
+  isn't currently configurable (no `backup:` YAML block exists)
 
 ### Basic Write Configuration
 
@@ -308,61 +317,13 @@ ha_dev_tools:
       - "/config/.storage/auth*"
 ```
 
-### Write Operations with Rate Limiting
+### Backups
 
-```yaml
-ha_dev_tools:
-  security:
-    write_paths:
-      - "/config/packages/generated/*.yaml"
-      - "/config/test_configs/*.yaml"
-    
-    rate_limiting:
-      enabled: true
-      writes_per_minute: 10
-      writes_per_hour: 100
-      writes_per_day: 1000
-```
-
-**Rate Limit Defaults:**
-- 10 writes per minute
-- 100 writes per hour
-- 1000 writes per day
-
-### Write Operations with Backup Configuration
-
-```yaml
-ha_dev_tools:
-  security:
-    write_paths:
-      - "/config/packages/generated/*.yaml"
-    
-    backup:
-      enabled: true
-      location: "/config/backups/ha_dev_tools"
-      retention_days: 30
-      max_backups_per_file: 10
-```
-
-**Backup Features:**
-- Automatic backup before every write
-- Timestamped backup files
-- Configurable retention period
-- Per-file backup limits
-
-### Disabling Rate Limiting (Not Recommended)
-
-```yaml
-ha_dev_tools:
-  security:
-    write_paths:
-      - "/config/packages/generated/*.yaml"
-    
-    rate_limiting:
-      enabled: false  # Not recommended for production
-```
-
-**Warning:** Disabling rate limiting removes protection against abuse. Only disable in trusted development environments.
+Every write to an existing file is preceded by an automatic, timestamped
+backup to `.ha_dev_tools_backups/` next to your config directory - this
+isn't a separate config block, it always happens for real (not
+newly-created) files, and isn't currently tunable (no retention/location
+options exist yet).
 
 ## Common Use Cases
 
@@ -688,80 +649,6 @@ ha_dev_tools:
 - Audit-heavy environments
 
 ## Migration Guide
-
-### Migrating from Version 1.x to 2.0.0
-
-Version 2.0.0 introduces **breaking changes** that require configuration updates.
-
-#### What Changed
-
-- **Configuration is now required** - The integration will not load without security configuration
-- **Strict allowlist mode** - Only explicitly permitted paths are accessible
-- **Read/write distinction** - Separate configuration for read-only and read-write access
-- **Glob pattern support** - Use wildcards for flexible path matching
-
-#### Migration Steps
-
-1. **Add security configuration to configuration.yaml**
-
-   Copy the recommended production configuration:
-
-   ```yaml
-   ha_dev_tools:
-     security:
-       read_paths:
-         - "/config/.storage/lovelace*"
-         - "/config/.storage/input_*"
-         - "/config/.storage/timer"
-         - "/config/.storage/counter"
-         - "/config/.storage/script"
-         - "/config/.storage/scene"
-         - "/config/.storage/automation"
-         - "/config/configuration.yaml"
-         - "/config/automations.yaml"
-         - "/config/scripts.yaml"
-         - "/config/scenes.yaml"
-         - "/config/packages/**/*.yaml"
-       
-       write_paths: []
-       
-       denied_paths:
-         - "/config/.storage/auth*"
-         - "/config/.storage/core.*"
-         - "/config/secrets.yaml"
-         - "/config/.HA_VERSION"
-   ```
-
-2. **Restart Home Assistant**
-
-   The integration will now load with the new security configuration.
-
-3. **Test API access**
-
-   Verify that your API calls still work with the new configuration:
-
-   ```bash
-   curl -H "Authorization: Bearer YOUR_TOKEN" \
-     http://homeassistant.local:8123/api/management/files/configuration.yaml
-   ```
-
-4. **Adjust configuration as needed**
-
-   If you need access to additional files, add them to `read_paths` or `write_paths`.
-
-#### Troubleshooting Migration
-
-**Problem:** Integration fails to load with "Configuration required" error
-
-**Solution:** Add the security configuration to configuration.yaml and restart
-
-**Problem:** API returns 403 Forbidden for files that worked before
-
-**Solution:** Add the file paths to `read_paths` in your configuration
-
-**Problem:** Write operations fail with "Write not permitted" error
-
-**Solution:** Add the file paths to `write_paths` (only if you need write access)
 
 ### Legacy Configuration Format
 

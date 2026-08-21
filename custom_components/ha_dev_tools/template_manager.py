@@ -4,7 +4,7 @@ Runs entirely in-process via `homeassistant.helpers.template.Template` -
 no HTTP/WS round-trip needed at all, unlike the file/helper/dashboard
 tools. This is the tight "draft, render against live state, adjust,
 re-render" loop the restart plan calls out as the core of the author/
-iterate workflow (see docs/RESTART_PLAN.md) - the agent should never need
+iterate workflow (see docs/ARCHITECTURE.md) - the agent should never need
 to ask the user to paste a template into the Developer Tools UI.
 """
 from __future__ import annotations

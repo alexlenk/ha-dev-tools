@@ -5,8 +5,9 @@ and dashboards) is only reachable through the WebSocket API - the
 component that owns it (e.g. `input_boolean/__init__.py`) keeps its
 `StorageCollection` as a private local variable inside its own
 `async_setup`, never exposed via `hass.data` (confirmed by reading the
-actual home-assistant/core source - see docs/RESTART_PLAN.md's Phase 4
-note). The WS API is genuinely the only public interface for it.
+actual home-assistant/core source - see docs/ARCHITECTURE.md's "WebSocket
+loopback pattern" section). The WS API is genuinely the only public
+interface for it.
 
 Rather than open a real network loopback connection to ourselves, this
 constructs a `websocket_api.ActiveConnection` with a fake `send_message`

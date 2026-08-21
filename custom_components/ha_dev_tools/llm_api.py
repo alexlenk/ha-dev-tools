@@ -4,8 +4,9 @@ Registers a `dev_tools` API into Home Assistant's LLM tool registry
 (`homeassistant.helpers.llm`). Home Assistant's own native `mcp_server`
 integration exposes whatever is registered here over MCP (Streamable HTTP)
 with no custom transport or auth code required on our side - see
-docs/RESTART_PLAN.md for the full architecture and the "Concrete tool
-list" section for what each tool below implements and why.
+docs/ARCHITECTURE.md for the full architecture, README.md's Tools table
+for what each tool below implements and why, and docs/SECURITY.md for
+why every tool but the diagnostic ping is gated.
 """
 from __future__ import annotations
 
@@ -101,9 +102,9 @@ class GatedTool(llm.Tool):
 class DevToolsPingTool(llm.Tool):
     """Confirm the dev_tools API is registered and reachable.
 
-    Not part of the real tool surface (see docs/RESTART_PLAN.md's "Concrete
-    tool list") - kept as a zero-dependency smoke test for the llm.API/
-    mcp_server wiring itself.
+    Not part of the real tool surface (see README.md's Tools table) - kept
+    as a zero-dependency smoke test for the llm.API/mcp_server wiring
+    itself, and deliberately the one tool NOT behind GatedTool.
     """
 
     name = "dev_tools_ping"
@@ -432,7 +433,7 @@ class GetAutomationTool(GatedTool):
 
 
 class WriteAutomationTool(GatedTool):
-    """Layout-aware, package-safe automation write - see docs/RESTART_PLAN.md."""
+    """Layout-aware, package-safe automation write - see docs/ARCHITECTURE.md."""
 
     name = "write_automation"
     description = (

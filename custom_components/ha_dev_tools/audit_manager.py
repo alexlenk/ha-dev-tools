@@ -2,7 +2,7 @@
 
 Home Assistant won't stop you from creating a duplicate automation id
 across packages (package merge just concatenates - see
-docs/RESTART_PLAN.md), and an automation whose trigger/condition/action
+docs/ARCHITECTURE.md), and an automation whose trigger/condition/action
 references a currently-unavailable entity will simply never fire without
 any error - the exact class of "latent failure" this project exists to
 surface. `audit_automations` walks every known automation and reports
@@ -12,7 +12,7 @@ Scope: this first pass covers duplicate ids and unavailable-entity
 references, the two checks that are cheap and reliable to detect
 statically. Overlapping-trigger race detection and unhandled
 rest_command/shell_command failures (also called out in
-docs/RESTART_PLAN.md) are real but need more careful semantic analysis
+docs/ARCHITECTURE.md) are real but need more careful semantic analysis
 to avoid false positives/negatives - deliberately left for a follow-up
 rather than shipped half-confident.
 """

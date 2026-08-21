@@ -5,7 +5,7 @@ it) hard-codes `automations.yaml` and has zero awareness of packages.
 Editing a package-defined automation through it doesn't fail loudly - a
 write silently creates a diverging duplicate in `automations.yaml`, and a
 delete silently no-ops while reporting success, leaving the real
-package-defined automation untouched. See docs/RESTART_PLAN.md's "Hard
+package-defined automation untouched. See docs/ARCHITECTURE.md's "Hard
 safety rule: package provenance" for the full finding.
 
 This module resolves, for a given automation id, which file actually
@@ -64,7 +64,7 @@ class DuplicateAutomationIdError(Exception):
     """Raised when an automation id is defined in more than one file.
 
     HA's own package merge doesn't hard-error on this (see
-    docs/RESTART_PLAN.md) - it silently concatenates. We refuse to guess
+    docs/ARCHITECTURE.md) - it silently concatenates. We refuse to guess
     which one the caller means.
     """
 

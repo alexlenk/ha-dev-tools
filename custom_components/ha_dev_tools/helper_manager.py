@@ -1,7 +1,7 @@
 """CRUD for HA "helper" entities (input_boolean, counter, timer, etc.).
 
 All nine helper domains share one generic storage-collection pattern in
-HA core (confirmed by reading the source - see docs/RESTART_PLAN.md) with
+HA core (confirmed by reading the source - see docs/ARCHITECTURE.md) with
 no in-process access point, only WS commands. Built on `ws_call.py`'s
 verified loopback mechanism - see tests/test_ws_call.py's real
 `input_boolean` CRUD round-trip proving this actually works before this

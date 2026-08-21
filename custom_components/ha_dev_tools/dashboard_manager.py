@@ -1,7 +1,7 @@
 """Dashboard (Lovelace) read/write, storage mode only.
 
 Storage-mode dashboards (the default; YAML mode is legacy and being
-removed per home-assistant/core's dev branch - see docs/RESTART_PLAN.md)
+removed per home-assistant/core's dev branch - see docs/ARCHITECTURE.md)
 are fully reachable through `lovelace/config` and `lovelace/config/save`,
 via the same `ws_call.py` loopback verified for helpers. YAML-mode
 dashboards hard-reject `lovelace/config/save` at the HA level ("Not
