@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-08-21
+
+### Changed
+- The arm gate's error message and the config flow's setup description now spell out the literal, copy-pasteable arm command (`date +%s > /config/.storage/ha_dev_tools.armed`) instead of describing it ("create the file with the current unix timestamp as its content") - the latter left a reader to work out how to actually generate and write a unix timestamp themselves, which turned a one-line copy-paste into a real obstacle in practice.
+
 ## [2.2.0] - 2026-08-21
 
 ### Added
