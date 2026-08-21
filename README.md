@@ -1,5 +1,7 @@
 # HA Dev Tools
 
+![HA Dev Tools logo](custom_components/ha_dev_tools/brand/logo.png)
+
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
 [![License][license-shield]](LICENSE)
