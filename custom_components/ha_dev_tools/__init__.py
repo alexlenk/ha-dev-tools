@@ -6,6 +6,7 @@ served over MCP by Home Assistant's native `mcp_server` integration - see
 docs/ARCHITECTURE.md. Config-entry only; there is no configuration.yaml
 setup path (see CHANGELOG's Removed entry for why).
 """
+
 from __future__ import annotations
 
 import logging

@@ -8,15 +8,18 @@ mechanics, then a real
 `input_boolean` CRUD round-trip to prove genuine interop with the exact
 class of component (helpers) this exists for.
 """
-import voluptuous as vol
-import pytest
 
+import pytest
+import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
-from custom_components.ha_dev_tools.ws_call import WebSocketCommandError, call_ws_command
+from custom_components.ha_dev_tools.ws_call import (
+    WebSocketCommandError,
+    call_ws_command,
+)
 
 
 @pytest.fixture
@@ -40,7 +43,9 @@ async def setup_websocket_api(hass: HomeAssistant):
     assert await async_setup_component(hass, "websocket_api", {})
 
 
-@websocket_api.websocket_command({vol.Required("type"): "test/echo", vol.Required("value"): str})
+@websocket_api.websocket_command(
+    {vol.Required("type"): "test/echo", vol.Required("value"): str}
+)
 @websocket_api.async_response
 async def _echo_command(hass, connection, msg):
     connection.send_result(msg["id"], {"echoed": msg["value"]})
@@ -84,7 +89,9 @@ async def test_call_ws_command_enforces_real_admin_check(
 
 
 @pytest.mark.asyncio
-async def test_call_ws_command_against_real_input_boolean_crud(hass: HomeAssistant, admin_user):
+async def test_call_ws_command_against_real_input_boolean_crud(
+    hass: HomeAssistant, admin_user
+):
     """The actual use case: CRUD on a helper domain via its real WS commands."""
     assert await async_setup_component(hass, "input_boolean", {})
 
@@ -98,11 +105,17 @@ async def test_call_ws_command_against_real_input_boolean_crud(hass: HomeAssista
     assert any(item["id"] == item_id for item in listed)
 
     updated = await call_ws_command(
-        hass, admin_user, "input_boolean/update", input_boolean_id=item_id, name="Renamed"
+        hass,
+        admin_user,
+        "input_boolean/update",
+        input_boolean_id=item_id,
+        name="Renamed",
     )
     assert updated["name"] == "Renamed"
 
-    await call_ws_command(hass, admin_user, "input_boolean/delete", input_boolean_id=item_id)
+    await call_ws_command(
+        hass, admin_user, "input_boolean/delete", input_boolean_id=item_id
+    )
 
     listed_after = await call_ws_command(hass, admin_user, "input_boolean/list")
     assert not any(item["id"] == item_id for item in listed_after)

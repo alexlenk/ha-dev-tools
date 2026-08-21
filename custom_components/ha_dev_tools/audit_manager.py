@@ -16,6 +16,7 @@ docs/ARCHITECTURE.md) are real but need more careful semantic analysis
 to avoid false positives/negatives - deliberately left for a follow-up
 rather than shipped half-confident.
 """
+
 from __future__ import annotations
 
 from typing import Any

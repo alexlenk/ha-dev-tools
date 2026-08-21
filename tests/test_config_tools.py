@@ -1,9 +1,9 @@
 """Tests for config validation and reload (config_tools.py)."""
+
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 
 from custom_components.ha_dev_tools import config_tools

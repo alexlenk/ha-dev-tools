@@ -6,6 +6,7 @@ structured result instead of a plain joined string. `reload_domain` wraps
 `<domain>.reload` service calls (automation/script/scene/input_boolean
 etc. all support the pattern) - always prefer this over restarting.
 """
+
 from __future__ import annotations
 
 from typing import Any

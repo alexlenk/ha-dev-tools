@@ -8,13 +8,13 @@ docs/ARCHITECTURE.md for the full architecture, README.md's Tools table
 for what each tool below implements and why, and docs/SECURITY.md for
 why every tool but the diagnostic ping is gated.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, override
 
 import voluptuous as vol
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
@@ -173,7 +173,9 @@ class EntityHealthReportTool(GatedTool):
         {
             vol.Optional("area"): str,
             vol.Optional("integration"): str,
-            vol.Optional("limit", default=entity_manager.HEALTH_REPORT_DEFAULT_LIMIT): int,
+            vol.Optional(
+                "limit", default=entity_manager.HEALTH_REPORT_DEFAULT_LIMIT
+            ): int,
         }
     )
 
@@ -241,7 +243,9 @@ class ValidateTemplateTool(GatedTool):
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """Validate the template."""
-        return await template_manager.validate_template(hass, tool_input.tool_args["template"])
+        return await template_manager.validate_template(
+            hass, tool_input.tool_args["template"]
+        )
 
 
 class GetLogsTool(GatedTool):
@@ -256,11 +260,15 @@ class GetLogsTool(GatedTool):
     )
     parameters = vol.Schema(
         {
-            vol.Optional("lines", default=100): vol.All(int, vol.Range(min=1, max=1000)),
+            vol.Optional("lines", default=100): vol.All(
+                int, vol.Range(min=1, max=1000)
+            ),
             vol.Optional("level"): str,
             vol.Optional("search"): str,
             vol.Optional("offset", default=0): vol.All(int, vol.Range(min=0)),
-            vol.Optional("limit", default=100): vol.All(int, vol.Range(min=1, max=1000)),
+            vol.Optional("limit", default=100): vol.All(
+                int, vol.Range(min=1, max=1000)
+            ),
         }
     )
 
@@ -328,7 +336,9 @@ class GetAddonLogsTool(GatedTool):
     parameters = vol.Schema(
         {
             vol.Required("slug"): str,
-            vol.Optional("lines", default=100): vol.All(int, vol.Range(min=1, max=1000)),
+            vol.Optional("lines", default=100): vol.All(
+                int, vol.Range(min=1, max=1000)
+            ),
         }
     )
 
@@ -509,8 +519,14 @@ class ListHelpersTool(GatedTool):
         """List helpers in the given domain."""
         try:
             user = await helper_manager.resolve_user(hass, llm_context)
-            items = await helper_manager.list_helpers(hass, user, tool_input.tool_args["domain"])
-        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+            items = await helper_manager.list_helpers(
+                hass, user, tool_input.tool_args["domain"]
+            )
+        except (
+            UnresolvedUserError,
+            InvalidHelperDomainError,
+            WebSocketCommandError,
+        ) as exc:
             return _tool_error(exc)
         return {"items": items}
 
@@ -544,7 +560,11 @@ class CreateHelperTool(GatedTool):
             created = await helper_manager.create_helper(
                 hass, user, args["domain"], args["config"]
             )
-        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+        except (
+            UnresolvedUserError,
+            InvalidHelperDomainError,
+            WebSocketCommandError,
+        ) as exc:
             return _tool_error(exc)
         return created
 
@@ -581,7 +601,11 @@ class UpdateHelperTool(GatedTool):
             updated = await helper_manager.update_helper(
                 hass, user, args["domain"], args["item_id"], args["config"]
             )
-        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+        except (
+            UnresolvedUserError,
+            InvalidHelperDomainError,
+            WebSocketCommandError,
+        ) as exc:
             return _tool_error(exc)
         return updated
 
@@ -606,8 +630,14 @@ class DeleteHelperTool(GatedTool):
         args = tool_input.tool_args
         try:
             user = await helper_manager.resolve_user(hass, llm_context)
-            await helper_manager.delete_helper(hass, user, args["domain"], args["item_id"])
-        except (UnresolvedUserError, InvalidHelperDomainError, WebSocketCommandError) as exc:
+            await helper_manager.delete_helper(
+                hass, user, args["domain"], args["item_id"]
+            )
+        except (
+            UnresolvedUserError,
+            InvalidHelperDomainError,
+            WebSocketCommandError,
+        ) as exc:
             return _tool_error(exc)
         return {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
 
@@ -670,7 +700,11 @@ class WriteDashboardTool(GatedTool):
             await dashboard_manager.write_dashboard(
                 hass, user, args["config"], url_path=args.get("url_path")
             )
-        except (UnresolvedUserError, YamlModeDashboardError, WebSocketCommandError) as exc:
+        except (
+            UnresolvedUserError,
+            YamlModeDashboardError,
+            WebSocketCommandError,
+        ) as exc:
             return _tool_error(exc)
         return {"saved": True, "url_path": args.get("url_path")}
 
@@ -746,7 +780,10 @@ class DevToolsAPI(llm.API):
 
 
 def async_register(
-    hass: HomeAssistant, *, log_manager: LogManager, automation_manager: AutomationManager
+    hass: HomeAssistant,
+    *,
+    log_manager: LogManager,
+    automation_manager: AutomationManager,
 ) -> Any:
     """Register the dev_tools API and return its unsubscribe callable."""
     return llm.async_register_api(

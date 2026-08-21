@@ -6,6 +6,7 @@ best-effort cleanup task. Uses explicit past timestamps (os.utime /
 file content) rather than freezegun or real sleeps, since the checks
 are pure comparisons against time.time() and don't need a frozen clock.
 """
+
 import time
 
 import pytest
@@ -14,10 +15,7 @@ from homeassistant.helpers import llm
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.ha_dev_tools import access_control
-from custom_components.ha_dev_tools.access_control import (
-    NotAdminError,
-    NotArmedError,
-)
+from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.ws_call import UnresolvedUserError
 
 
@@ -82,7 +80,9 @@ def test_check_armed_raises_when_file_missing(hass: HomeAssistant):
 
 def test_check_armed_raises_when_idle_expired(hass: HomeAssistant):
     now = time.time()
-    _write_arm_file(hass, armed_at=now, mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1)
+    _write_arm_file(
+        hass, armed_at=now, mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1
+    )
 
     with pytest.raises(NotArmedError):
         access_control.check_armed(hass)
@@ -159,7 +159,9 @@ async def test_require_admin_raises_for_unresolvable_user(hass: HomeAssistant):
 @pytest.mark.asyncio
 async def test_cleanup_removes_expired_file(hass: HomeAssistant):
     now = time.time()
-    _write_arm_file(hass, armed_at=now, mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1)
+    _write_arm_file(
+        hass, armed_at=now, mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1
+    )
     path = access_control._arm_file_path(hass)
     assert path.exists()
 

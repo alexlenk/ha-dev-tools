@@ -6,21 +6,6 @@ DOMAIN = "ha_dev_tools"
 OPERATION_READ = "read"
 OPERATION_WRITE = "write"
 
-# Security modes
-SECURITY_MODE_ALLOWLIST = "allowlist"
-SECURITY_MODE_DENYLIST = "denylist"
-
-# Recommended safe storage patterns (glob patterns for safe .storage files)
-RECOMMENDED_SAFE_STORAGE_PATTERNS = [
-    "/config/.storage/lovelace*",
-    "/config/.storage/input_*",
-    "/config/.storage/timer",
-    "/config/.storage/counter",
-    "/config/.storage/script",
-    "/config/.storage/scene",
-    "/config/.storage/automation",
-]
-
 # Default read-only paths (recommended configuration)
 DEFAULT_READ_ONLY_PATHS = [
     "/config/.storage/lovelace*",
@@ -91,11 +76,6 @@ ALLOWED_DIRECTORIES = {
     "/config",
     "/addon_configs",
 }
-
-# Legacy: Directory/file allowlist (whitelist) - only these paths are accessible
-# Empty list means all non-blacklisted files are allowed (current behavior)
-# When populated, ONLY these paths and their subdirectories are accessible
-DEFAULT_ALLOWLIST = []
 
 # Error codes
 ERROR_INVALID_PATH = "INVALID_PATH"

@@ -18,12 +18,16 @@ Supervised. Tests here check our own logic (the not-available guard, and
 the shape built from a client response) against mocks, not a real round-
 trip.
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 from homeassistant.components.hassio import const as hassio_const
-from homeassistant.components.hassio.handler import HassioAPIError, get_supervisor_client
+from homeassistant.components.hassio.handler import (
+    HassioAPIError,
+    get_supervisor_client,
+)
 from homeassistant.core import HomeAssistant
 
 # The hass.data key HassIO is stored under has drifted across HA versions:

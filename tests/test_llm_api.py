@@ -29,18 +29,23 @@ this file builds LLMContext dynamically from whatever fields the
 installed version actually has, and treats the unsub-callable behavior as
 best-effort rather than asserting it unconditionally.
 """
+
 import inspect
 import time
 
 import pytest
-
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
-from custom_components.ha_dev_tools.llm_api import API_ID, DOMAIN, DevToolsPingTool, FindEntitiesTool
+from custom_components.ha_dev_tools.llm_api import (
+    API_ID,
+    DOMAIN,
+    DevToolsPingTool,
+    FindEntitiesTool,
+)
 
 
 def _llm_context(user_id: str | None = None) -> llm.LLMContext:
@@ -85,14 +90,18 @@ async def non_admin_user(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
-async def test_dev_tools_api_registered(hass: HomeAssistant, setup_integration_with_entry):
+async def test_dev_tools_api_registered(
+    hass: HomeAssistant, setup_integration_with_entry
+):
     """The dev_tools API is registered in HA's LLM API registry after setup."""
     api_ids = {api.id for api in llm.async_get_apis(hass)}
     assert API_ID in api_ids
 
 
 @pytest.mark.asyncio
-async def test_dev_tools_ping_tool_reachable(hass: HomeAssistant, setup_integration_with_entry):
+async def test_dev_tools_ping_tool_reachable(
+    hass: HomeAssistant, setup_integration_with_entry
+):
     """The ping tool is genuinely registered and its own logic works."""
     api_instance = await llm.async_get_api(hass, API_ID, _llm_context())
 
@@ -106,7 +115,9 @@ async def test_dev_tools_ping_tool_reachable(hass: HomeAssistant, setup_integrat
 
 
 @pytest.mark.asyncio
-async def test_dev_tools_real_tools_registered(hass: HomeAssistant, setup_integration_with_entry):
+async def test_dev_tools_real_tools_registered(
+    hass: HomeAssistant, setup_integration_with_entry
+):
     """The real tool surface is registered, not just the diagnostic ping tool."""
     api_instance = await llm.async_get_api(hass, API_ID, _llm_context())
 

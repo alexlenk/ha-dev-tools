@@ -1,11 +1,14 @@
 """Tests for dashboard read/write (dashboard_manager.py), against real HA lovelace."""
-import pytest
 
+import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
-from custom_components.ha_dev_tools.dashboard_manager import get_dashboard, write_dashboard
+from custom_components.ha_dev_tools.dashboard_manager import (
+    get_dashboard,
+    write_dashboard,
+)
 from custom_components.ha_dev_tools.ws_call import WebSocketCommandError
 
 
@@ -21,13 +24,18 @@ async def admin_user(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
-async def test_get_default_dashboard_raises_when_never_saved(hass: HomeAssistant, admin_user):
+async def test_get_default_dashboard_raises_when_never_saved(
+    hass: HomeAssistant, admin_user
+):
     """A fresh instance has no default dashboard config at all yet - not an
     empty one. Real behavior, confirmed here rather than assumed."""
     with pytest.raises(WebSocketCommandError) as exc_info:
         await get_dashboard(hass, admin_user)
 
-    assert "not_found" in str(exc_info.value).lower() or "no config" in str(exc_info.value).lower()
+    assert (
+        "not_found" in str(exc_info.value).lower()
+        or "no config" in str(exc_info.value).lower()
+    )
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ verified loopback mechanism - see tests/test_ws_call.py's real
 `input_boolean` CRUD round-trip proving this actually works before this
 module was written on top of it.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -72,12 +73,21 @@ async def update_helper(
 ) -> dict[str, Any]:
     """Update an existing helper item by id."""
     _check_domain(domain)
+    # mypy flags **{...: item_id} (a dict[str, str]) as possibly colliding
+    # with call_ws_command's keyword-only `timeout: float` - it can't prove
+    # no key here is literally "timeout". It never is in practice (domain
+    # names never end in "_id" = "timeout"); genuinely false positive.
+    id_kwarg = {f"{domain}_id": item_id}
     return await call_ws_command(
-        hass, user, f"{domain}/update", **{f"{domain}_id": item_id}, **config
+        hass, user, f"{domain}/update", **id_kwarg, **config  # type: ignore[arg-type]
     )
 
 
-async def delete_helper(hass: HomeAssistant, user: User, domain: str, item_id: str) -> None:
+async def delete_helper(
+    hass: HomeAssistant, user: User, domain: str, item_id: str
+) -> None:
     """Delete a helper item by id."""
     _check_domain(domain)
-    await call_ws_command(hass, user, f"{domain}/delete", **{f"{domain}_id": item_id})
+    # Same false positive as update_helper above.
+    id_kwarg = {f"{domain}_id": item_id}
+    await call_ws_command(hass, user, f"{domain}/delete", **id_kwarg)  # type: ignore[arg-type]

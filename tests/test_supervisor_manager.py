@@ -7,10 +7,10 @@ our own logic (the not-available guard, and the shape built from a
 client's response) against mocks, not a real Supervisor round-trip - an
 actual end-to-end check needs a real Supervised/HA OS instance.
 """
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from homeassistant.components.hassio.handler import HassioAPIError
 from homeassistant.core import HomeAssistant
 
@@ -24,7 +24,7 @@ from custom_components.ha_dev_tools.supervisor_manager import (
 
 @pytest.mark.asyncio
 async def test_list_addons_raises_when_not_supervised(hass: HomeAssistant):
-    """A default test hass has no hassio component set up - Core-only, same as most real installs."""
+    """A default test hass has no hassio set up - Core-only, same as most real installs."""
     with pytest.raises(SupervisorNotAvailableError):
         await list_addons(hass)
 
@@ -79,7 +79,10 @@ async def test_get_addon_logs_returns_lines(hass: HomeAssistant):
 
     result = await get_addon_logs(hass, "core_mosquitto")
 
-    assert result == {"slug": "core_mosquitto", "lines": ["line one", "line two", "line three"]}
+    assert result == {
+        "slug": "core_mosquitto",
+        "lines": ["line one", "line two", "line three"],
+    }
     hass.data[_HASSIO_DATA_KEY].send_command.assert_called_once_with(
         "/addons/core_mosquitto/logs", method="get", return_text=True
     )

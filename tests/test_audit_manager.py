@@ -1,8 +1,8 @@
 """Tests for the automation static-analysis audit (audit_manager.py)."""
+
 from pathlib import Path
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 
 from custom_components.ha_dev_tools.audit_manager import audit_automations

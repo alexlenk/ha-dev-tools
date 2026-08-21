@@ -1,9 +1,12 @@
 """Tests for template render/validate (template_manager.py), against real Jinja2/HA templating."""
-import pytest
 
+import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.ha_dev_tools.template_manager import render_template, validate_template
+from custom_components.ha_dev_tools.template_manager import (
+    render_template,
+    validate_template,
+)
 
 
 @pytest.mark.asyncio
@@ -56,7 +59,9 @@ async def test_validate_template_valid_known_entity(hass: HomeAssistant):
 async def test_validate_template_flags_unknown_entity(hass: HomeAssistant):
     result = await validate_template(hass, "{{ states('sensor.does_not_exist') }}")
 
-    assert result["valid"] is True  # renders fine - states() on a missing entity just returns "unknown"
+    assert (
+        result["valid"] is True
+    )  # renders fine - states() on a missing entity just returns "unknown"
     assert result["referenced_entities"] == ["sensor.does_not_exist"]
     assert result["unknown_entities"] == ["sensor.does_not_exist"]
 
@@ -65,9 +70,7 @@ async def test_validate_template_flags_unknown_entity(hass: HomeAssistant):
 async def test_validate_template_render_error_with_valid_syntax(hass: HomeAssistant):
     hass.states.async_set("sensor.text_value", "not_a_number")
 
-    result = await validate_template(
-        hass, "{{ states('sensor.text_value') | float }}"
-    )
+    result = await validate_template(hass, "{{ states('sensor.text_value') | float }}")
 
     assert result["valid"] is False
     assert "render_error" in result

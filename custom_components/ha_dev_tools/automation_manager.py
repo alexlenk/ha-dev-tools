@@ -21,6 +21,7 @@ Arbitrary custom `!include_dir_merge_list` layouts outside `packages/`
 aren't handled yet - `find_automation` simply won't find automations
 defined that way, which is safer than guessing wrong.
 """
+
 from __future__ import annotations
 
 import logging
@@ -117,7 +118,9 @@ class AutomationManager:
             return None
         return await self.hass.async_add_executor_job(_new_yaml().load, content)
 
-    def _automation_list(self, file_path: str, document: Any) -> CommentedSeq | list | None:
+    def _automation_list(
+        self, file_path: str, document: Any
+    ) -> CommentedSeq | list | None:
         """Return the automation list within a loaded document, or None if it has none.
 
         The default automations.yaml is a plain list at the document root
@@ -130,7 +133,9 @@ class AutomationManager:
             if document is None:
                 return CommentedSeq()
             if not isinstance(document, list):
-                raise ValueError(f"{file_path} does not contain a YAML list at its root")
+                raise ValueError(
+                    f"{file_path} does not contain a YAML list at its root"
+                )
             return document
 
         if document is None or "automation" not in document:
@@ -139,7 +144,9 @@ class AutomationManager:
         if isinstance(automations, dict):
             return CommentedSeq([automations])
         if not isinstance(automations, list):
-            raise ValueError(f"{file_path}'s 'automation:' key is not a list or mapping")
+            raise ValueError(
+                f"{file_path}'s 'automation:' key is not a list or mapping"
+            )
         return automations
 
     async def find_all_locations(self, automation_id: str) -> list[AutomationLocation]:
@@ -155,7 +162,9 @@ class AutomationManager:
             if not automations:
                 continue
             for entry in automations:
-                if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
+                if isinstance(entry, dict) and str(entry.get("id")) == str(
+                    automation_id
+                ):
                     locations.append(
                         AutomationLocation(
                             file_path=file_path,
@@ -174,7 +183,9 @@ class AutomationManager:
         """
         locations = await self.find_all_locations(automation_id)
         if not locations:
-            raise AutomationNotFoundError(f"No automation with id '{automation_id}' found")
+            raise AutomationNotFoundError(
+                f"No automation with id '{automation_id}' found"
+            )
         if len(locations) > 1:
             raise DuplicateAutomationIdError(automation_id, locations)
         return locations[0]
@@ -199,11 +210,17 @@ class AutomationManager:
                     results.append((location, dict(entry)))
         return results
 
-    async def get_automation(self, automation_id: str) -> tuple[AutomationLocation, dict[str, Any]]:
+    async def get_automation(
+        self, automation_id: str
+    ) -> tuple[AutomationLocation, dict[str, Any]]:
         """Return the location and config dict for an automation id."""
         location = await self.find_automation(automation_id)
         document = await self._load_document(location.file_path)
-        automations = self._automation_list(location.file_path, document)
+        # find_automation() already confirmed this id lives in this file, so
+        # None here would mean the file changed underneath us since that
+        # read - fall back to an empty list so that's a clean
+        # AutomationNotFoundError below, not a raw TypeError on `for`.
+        automations = self._automation_list(location.file_path, document) or []
         for entry in automations:
             if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
                 return location, dict(entry)
@@ -250,7 +267,9 @@ class AutomationManager:
                 )
             location = AutomationLocation(file_path=file_path, is_package=True)
         else:
-            location = AutomationLocation(file_path=DEFAULT_AUTOMATIONS_FILE, is_package=False)
+            location = AutomationLocation(
+                file_path=DEFAULT_AUTOMATIONS_FILE, is_package=False
+            )
 
         document = await self._load_document(location.file_path)
         content = await self.hass.async_add_executor_job(
@@ -269,9 +288,7 @@ class AutomationManager:
             validate_before_write=True,
         )
 
-        await self.hass.services.async_call(
-            "automation", "reload", blocking=True
-        )
+        await self.hass.services.async_call("automation", "reload", blocking=True)
         _LOGGER.info(
             "Wrote automation '%s' to %s and reloaded automations",
             automation_id,

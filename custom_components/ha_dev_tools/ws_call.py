@@ -16,6 +16,7 @@ real command lookup, schema validation, admin-checking, and dispatch
 logic (`ActiveConnection.async_handle`), faking only the transport, which
 is the one part we genuinely don't have (or need) a real socket for.
 """
+
 from __future__ import annotations
 
 import asyncio

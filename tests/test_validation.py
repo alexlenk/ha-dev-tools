@@ -1,7 +1,11 @@
 """Unit tests for the ValidationManager."""
+
 import pytest
 
-from custom_components.ha_dev_tools.validation import ValidationManager, ValidationResult
+from custom_components.ha_dev_tools.validation import (
+    ValidationManager,
+    ValidationResult,
+)
 
 
 class TestValidationManager:
@@ -23,7 +27,7 @@ class TestValidationManager:
   time_zone: America/Los_Angeles
 """
         result = validation_manager.validate_yaml(valid_yaml, "configuration.yaml")
-        
+
         assert result.is_valid is True
         assert len(result.errors) == 0
         assert len(result.warnings) == 0
@@ -35,7 +39,7 @@ class TestValidationManager:
   [invalid: yaml: syntax
 """
         result = validation_manager.validate_yaml(invalid_yaml, "configuration.yaml")
-        
+
         assert result.is_valid is False
         assert len(result.errors) > 0
         assert "YAML syntax error" in result.errors[0]
@@ -49,7 +53,7 @@ class TestValidationManager:
       platform: state
 """
         result = validation_manager.validate_yaml(yaml_without_ha, "configuration.yaml")
-        
+
         # Should be valid but with a warning
         assert result.is_valid is True
         assert len(result.warnings) > 0
@@ -62,7 +66,7 @@ class TestValidationManager:
 - item3
 """
         result = validation_manager.validate_yaml(yaml_list, "configuration.yaml")
-        
+
         assert result.is_valid is False
         assert len(result.errors) > 0
         assert "dictionary" in result.errors[0].lower()
@@ -71,7 +75,7 @@ class TestValidationManager:
         """Test YAML validation with empty content."""
         empty_yaml = ""
         result = validation_manager.validate_yaml(empty_yaml, "configuration.yaml")
-        
+
         # Empty YAML is valid (parses to None)
         assert result.is_valid is False
         assert len(result.errors) > 0
@@ -84,7 +88,7 @@ class TestValidationManager:
     entity_id: light.living_room
 """
         result = validation_manager.validate_yaml(valid_yaml, "automations.yaml")
-        
+
         # Should be valid, no homeassistant section required
         assert result.is_valid is True
         assert len(result.errors) == 0
@@ -93,7 +97,7 @@ class TestValidationManager:
         """Test JSON validation with valid content."""
         valid_json = '{"key": "value", "number": 42, "array": [1, 2, 3]}'
         result = validation_manager.validate_json(valid_json, "test.json")
-        
+
         assert result.is_valid is True
         assert len(result.errors) == 0
 
@@ -101,16 +105,16 @@ class TestValidationManager:
         """Test JSON validation with invalid syntax."""
         invalid_json = '{"key": "value", "invalid": }'
         result = validation_manager.validate_json(invalid_json, "test.json")
-        
+
         assert result.is_valid is False
         assert len(result.errors) > 0
         assert "JSON syntax error" in result.errors[0]
 
     def test_validate_json_malformed(self, validation_manager):
         """Test JSON validation with malformed content."""
-        malformed_json = '{key: value}'  # Missing quotes
+        malformed_json = "{key: value}"  # Missing quotes
         result = validation_manager.validate_json(malformed_json, "test.json")
-        
+
         assert result.is_valid is False
         assert len(result.errors) > 0
 
@@ -120,7 +124,7 @@ class TestValidationManager:
   name: Test
 """
         result = validation_manager.validate_content(valid_yaml, "configuration.yaml")
-        
+
         assert result.is_valid is True
         assert len(result.errors) == 0
 
@@ -130,7 +134,7 @@ class TestValidationManager:
   key: value
 """
         result = validation_manager.validate_content(valid_yaml, "test.yml")
-        
+
         assert result.is_valid is True
         assert len(result.errors) == 0
 
@@ -138,7 +142,7 @@ class TestValidationManager:
         """Test validate_content with JSON file extension."""
         valid_json = '{"test": "value"}'
         result = validation_manager.validate_content(valid_json, "test.json")
-        
+
         assert result.is_valid is True
         assert len(result.errors) == 0
 
@@ -146,7 +150,7 @@ class TestValidationManager:
         """Test validate_content with non-YAML/JSON file."""
         text_content = "This is plain text content"
         result = validation_manager.validate_content(text_content, "test.txt")
-        
+
         # Other file types should pass validation
         assert result.is_valid is True
         assert len(result.errors) == 0
@@ -154,16 +158,20 @@ class TestValidationManager:
     def test_validate_storage_file_valid(self, validation_manager):
         """Test storage file validation with valid content."""
         valid_storage = '{"version": 1, "data": {"key": "value"}}'
-        result = validation_manager.validate_storage_file(valid_storage, "entity_registry")
-        
+        result = validation_manager.validate_storage_file(
+            valid_storage, "entity_registry"
+        )
+
         assert result.is_valid is True
         assert len(result.errors) == 0
 
     def test_validate_storage_file_missing_version(self, validation_manager):
         """Test storage file validation with missing version."""
         storage_no_version = '{"data": {"key": "value"}}'
-        result = validation_manager.validate_storage_file(storage_no_version, "entity_registry")
-        
+        result = validation_manager.validate_storage_file(
+            storage_no_version, "entity_registry"
+        )
+
         # Should be valid but with warning
         assert result.is_valid is True
         assert len(result.warnings) > 0
@@ -171,9 +179,11 @@ class TestValidationManager:
 
     def test_validate_storage_file_not_dict(self, validation_manager):
         """Test storage file validation when content is not a dict."""
-        storage_array = '[1, 2, 3]'
-        result = validation_manager.validate_storage_file(storage_array, "entity_registry")
-        
+        storage_array = "[1, 2, 3]"
+        result = validation_manager.validate_storage_file(
+            storage_array, "entity_registry"
+        )
+
         assert result.is_valid is False
         assert len(result.errors) > 0
         assert "object" in result.errors[0].lower()
@@ -181,20 +191,22 @@ class TestValidationManager:
     def test_validate_storage_file_invalid_json(self, validation_manager):
         """Test storage file validation with invalid JSON."""
         invalid_storage = '{"version": 1, invalid}'
-        result = validation_manager.validate_storage_file(invalid_storage, "entity_registry")
-        
+        result = validation_manager.validate_storage_file(
+            invalid_storage, "entity_registry"
+        )
+
         assert result.is_valid is False
         assert len(result.errors) > 0
 
     def test_validation_result_structure(self, validation_manager):
         """Test that ValidationResult has correct structure."""
         result = validation_manager.validate_yaml("test: value", "test.yaml")
-        
+
         assert isinstance(result, ValidationResult)
-        assert hasattr(result, 'is_valid')
-        assert hasattr(result, 'errors')
-        assert hasattr(result, 'warnings')
-        assert hasattr(result, 'line_numbers')
+        assert hasattr(result, "is_valid")
+        assert hasattr(result, "errors")
+        assert hasattr(result, "warnings")
+        assert hasattr(result, "line_numbers")
         assert isinstance(result.errors, list)
         assert isinstance(result.warnings, list)
         assert isinstance(result.line_numbers, list)

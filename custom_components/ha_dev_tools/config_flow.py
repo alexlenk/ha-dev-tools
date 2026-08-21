@@ -4,6 +4,7 @@ No user input needed at setup time - the security path allowlist has sane
 defaults (see const.py), and there's no configuration.yaml import path (see
 CHANGELOG's Removed entry for why that was dropped rather than fixed).
 """
+
 from __future__ import annotations
 
 from homeassistant import config_entries
@@ -12,7 +13,11 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import DOMAIN
 
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+# mypy doesn't know HA's ConfigFlow.__init_subclass__ accepts `domain=` -
+# that needs Home Assistant's own mypy plugin, not available to custom
+# integrations; this exact pattern is standard across the entire HA
+# ecosystem, not a real error.
+class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle a config flow for HA Dev Tools."""
 
     VERSION = 1

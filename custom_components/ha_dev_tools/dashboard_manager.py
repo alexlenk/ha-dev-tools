@@ -8,6 +8,7 @@ dashboards hard-reject `lovelace/config/save` at the HA level ("Not
 supported") - that needs raw `ui-lovelace.yaml` file access instead, same
 as the automation-YAML case, and isn't implemented yet.
 """
+
 from __future__ import annotations
 
 from typing import Any

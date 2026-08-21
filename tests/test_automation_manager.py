@@ -5,12 +5,12 @@ safety rule" from docs/ARCHITECTURE.md actually holds in code - a
 package-defined automation is found and edited through its real file, never
 silently duplicated into automations.yaml or missed entirely.
 """
+
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 import yaml as pyyaml
-
 from homeassistant.core import HomeAssistant
 
 from custom_components.ha_dev_tools.automation_manager import (
@@ -98,7 +98,9 @@ async def test_find_automation_not_found_raises(automation_manager, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_find_automation_duplicate_across_files_raises(automation_manager, tmp_path):
+async def test_find_automation_duplicate_across_files_raises(
+    automation_manager, tmp_path
+):
     _write(tmp_path, "automations.yaml", "- id: dup\n  trigger: []\n  action: []\n")
     _write(
         tmp_path,
@@ -212,7 +214,9 @@ async def test_write_automation_missing_package_raises(automation_manager, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_write_automation_duplicate_id_refuses_to_guess(automation_manager, tmp_path):
+async def test_write_automation_duplicate_id_refuses_to_guess(
+    automation_manager, tmp_path
+):
     _write(tmp_path, "automations.yaml", "- id: dup\n  trigger: []\n  action: []\n")
     _write(
         tmp_path,

@@ -1,13 +1,16 @@
 """Tests for area/domain-scoped entity lookup (entity_manager.py)."""
-import pytest
 
+import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_dev_tools.entity_manager import entity_health_report, find_entities
+from custom_components.ha_dev_tools.entity_manager import (
+    entity_health_report,
+    find_entities,
+)
 
 
 @pytest.fixture
@@ -109,7 +112,9 @@ async def test_find_entities_excludes_disabled_by_default(hass: HomeAssistant):
     with_disabled = find_entities(hass, domain="light", include_disabled=True)
     entity_ids = {e["entity_id"] for e in with_disabled["entities"]}
     assert entity_ids == {"light.broken", "light.working"}
-    broken = next(e for e in with_disabled["entities"] if e["entity_id"] == "light.broken")
+    broken = next(
+        e for e in with_disabled["entities"] if e["entity_id"] == "light.broken"
+    )
     assert broken["disabled"] is True
 
 
@@ -134,7 +139,9 @@ async def test_find_entities_truncates_and_flags_it(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
-async def test_entity_health_report_buckets_by_integration_and_status(hass: HomeAssistant):
+async def test_entity_health_report_buckets_by_integration_and_status(
+    hass: HomeAssistant,
+):
     _register_entity(hass, "light.hue_ok", platform="hue", state="on")
     _register_entity(hass, "light.hue_broken", platform="hue", state="unavailable")
     _register_entity(hass, "sensor.zwave_unknown", platform="zwave_js", state="unknown")
@@ -157,7 +164,8 @@ async def test_entity_health_report_buckets_by_integration_and_status(hass: Home
 
 @pytest.mark.asyncio
 async def test_entity_health_report_missing_state_vs_unavailable(hass: HomeAssistant):
-    """An enabled entity with no state at all (integration not loaded) is 'missing', not 'unavailable'."""
+    """An enabled entity with no state at all (integration not loaded) is 'missing', not
+    'unavailable'."""
     _register_entity(hass, "light.no_state_yet", platform="hue", state=None)
 
     report = entity_health_report(hass)
@@ -167,8 +175,12 @@ async def test_entity_health_report_missing_state_vs_unavailable(hass: HomeAssis
 
 
 @pytest.mark.asyncio
-async def test_entity_health_report_disabled_entities_counted_and_flagged(hass: HomeAssistant):
-    _register_entity(hass, "light.disabled_one", platform="hue", disabled=True, state=None)
+async def test_entity_health_report_disabled_entities_counted_and_flagged(
+    hass: HomeAssistant,
+):
+    _register_entity(
+        hass, "light.disabled_one", platform="hue", disabled=True, state=None
+    )
 
     report = entity_health_report(hass)
 
@@ -191,7 +203,11 @@ async def test_entity_health_report_filters_by_area(
     hass: HomeAssistant, bedroom_area, bedroom_device
 ):
     _register_entity(
-        hass, "light.in_bedroom", platform="hue", device_id=bedroom_device.id, state="unavailable"
+        hass,
+        "light.in_bedroom",
+        platform="hue",
+        device_id=bedroom_device.id,
+        state="unavailable",
     )
     _register_entity(hass, "light.elsewhere", platform="hue", state="unavailable")
 

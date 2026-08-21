@@ -13,6 +13,7 @@ instead of a wall of text - it reports problem entities (disabled,
 unavailable, unknown, or registered with no state at all) rather than
 listing everything.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -80,7 +81,11 @@ def find_entities(
     if area:
         area_id = resolve_area_id(area_reg, area)
         if area_id is None:
-            return {"entities": [], "truncated": False, "error": f"No area matching '{area}'"}
+            return {
+                "entities": [],
+                "truncated": False,
+                "error": f"No area matching '{area}'",
+            }
 
     matches: list[dict[str, Any]] = []
     truncated = False
@@ -208,4 +213,8 @@ def entity_health_report(
                     }
                 )
 
-    return {"by_integration": by_integration, "problem_entities": problems, "truncated": truncated}
+    return {
+        "by_integration": by_integration,
+        "problem_entities": problems,
+        "truncated": truncated,
+    }

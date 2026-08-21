@@ -7,6 +7,7 @@ re-render" loop the restart plan calls out as the core of the author/
 iterate workflow (see docs/ARCHITECTURE.md) - the agent should never need
 to ask the user to paste a template into the Developer Tools UI.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -38,7 +39,9 @@ async def render_template(
     """Render a template against live state. Never raises - errors come back in the result."""
     tpl = Template(template_str, hass)
     try:
-        result = await _maybe_await(tpl.async_render(variables=variables, parse_result=True))
+        result = await _maybe_await(
+            tpl.async_render(variables=variables, parse_result=True)
+        )
     except TemplateError as err:
         return {"success": False, "error": str(err)}
     return {"success": True, "result": result}
