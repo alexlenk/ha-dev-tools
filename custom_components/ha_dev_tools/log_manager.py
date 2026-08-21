@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from homeassistant.core import HomeAssistant
@@ -12,6 +11,14 @@ from homeassistant.core import HomeAssistant
 from .security import SecurityManager
 
 _LOGGER = logging.getLogger(__name__)
+
+# The system_log integration's own DOMAIN constant - hardcoded rather than
+# imported (`from homeassistant.components.system_log import DOMAIN`) to
+# avoid pulling in that submodule's own import chain here. The string is
+# part of system_log's stable public surface already relied on elsewhere
+# (the `system_log:` YAML config key, the frontend's `system_log/list`
+# websocket command), so it isn't expected to change.
+_SYSTEM_LOG_DOMAIN = "system_log"
 
 
 class LogEntry:
@@ -73,13 +80,21 @@ class LogManager:
         """Initialize the log manager."""
         self.hass = hass
         self.security_manager = security_manager
-        self.config_dir = Path(hass.config.config_dir)
 
         _LOGGER.info("LogManager initialized")
 
     async def get_core_logs(self, filters: LogFilters) -> List[LogEntry]:
         """
         Retrieve Home Assistant core logs with filtering.
+
+        Reads from the `system_log` integration's in-memory WARNING+ record
+        buffer (`hass.data["system_log"].records`) - the same source that
+        backs the native Settings -> System -> Logs page - rather than a
+        static log file, which may not exist, may be rotated, or may not be
+        the file the running instance is actually writing to. `system_log`
+        is set up unconditionally during HA's startup (it's part of
+        bootstrap's always-on `LOGGING_AND_HTTP_DEPS_INTEGRATIONS`), so its
+        buffer is present on every real instance.
 
         Args:
             filters: Log filtering parameters
@@ -88,128 +103,46 @@ class LogManager:
             List of log entries
 
         Raises:
-            PermissionError: If access is denied
             RuntimeError: If log retrieval fails
         """
         try:
-            log_file_path = self.config_dir / "home-assistant.log"
-
-            # Check if log file exists
-            if not log_file_path.exists():
-                _LOGGER.warning("Core log file not found: %s", log_file_path)
+            handler = self.hass.data.get(_SYSTEM_LOG_DOMAIN)
+            if handler is None:
+                _LOGGER.warning(
+                    "system_log integration not loaded - no log buffer to read from"
+                )
                 return []
 
-            # Read log file
-            log_content = await self.hass.async_add_executor_job(
-                self._read_log_file_sync, log_file_path
-            )
+            log_entries = [
+                self._to_log_entry(record) for record in handler.records.to_list()
+            ]
 
-            # Parse log entries
-            log_entries = self._parse_log_content(log_content, "core")
-
-            # Apply filters
             filtered_entries = self._apply_filters(log_entries, filters)
 
             _LOGGER.debug("Retrieved %d core log entries", len(filtered_entries))
             return filtered_entries
 
-        except PermissionError:
-            _LOGGER.error("Permission denied reading core logs")
-            raise PermissionError("Permission denied reading core logs")
         except Exception as e:
             _LOGGER.error("Error retrieving core logs: %s", e)
             raise RuntimeError(f"Error retrieving logs: {str(e)}")
 
-    def _read_log_file_sync(self, log_file_path: Path) -> str:
+    @staticmethod
+    def _to_log_entry(record: Dict[str, Any]) -> LogEntry:
         """
-        Synchronous log file reading helper.
+        Convert one system_log record dict into a LogEntry.
 
-        Args:
-            log_file_path: Path to log file
-
-        Returns:
-            Log file contents
+        system_log dedupes repeated identical log lines and keeps up to the
+        last 5 distinct messages per (logger, source, root_cause) key - the
+        newest one (record["message"][-1]) is what to surface here.
         """
-        with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-
-    def _parse_log_content(self, content: str, source: str) -> List[LogEntry]:
-        """
-        Parse log content into LogEntry objects.
-
-        Args:
-            content: Raw log content
-            source: Log source identifier
-
-        Returns:
-            List of parsed log entries
-        """
-        entries = []
-        lines = content.strip().split("\n")
-
-        for line in lines:
-            if not line.strip():
-                continue
-
-            try:
-                # Basic log parsing - this is a simplified version
-                # Real implementation would need more sophisticated parsing
-                # for Home Assistant's log format
-
-                # Try to extract timestamp, level, and message
-                parts = line.split(" ", 3)
-                if len(parts) >= 4:
-                    # Simplified parsing - assumes "YYYY-MM-DD HH:MM:SS LEVEL component: message"
-                    date_part = parts[0]
-                    time_part = parts[1]
-                    level = parts[2]
-                    message = parts[3] if len(parts) > 3 else ""
-
-                    try:
-                        timestamp = datetime.fromisoformat(f"{date_part} {time_part}")
-                    except ValueError:
-                        # If timestamp parsing fails, use current time
-                        timestamp = datetime.now()
-
-                    # Extract component if present
-                    component = ""
-                    if ":" in message:
-                        component_part, message = message.split(":", 1)
-                        component = component_part.strip()
-                        message = message.strip()
-
-                    entry = LogEntry(
-                        timestamp=timestamp,
-                        level=level.upper(),
-                        source=source,
-                        message=message,
-                        component=component,
-                    )
-                    entries.append(entry)
-                else:
-                    # If parsing fails, create a basic entry
-                    entry = LogEntry(
-                        timestamp=datetime.now(),
-                        level="INFO",
-                        source=source,
-                        message=line,
-                        component="",
-                    )
-                    entries.append(entry)
-
-            except Exception as e:
-                _LOGGER.debug("Failed to parse log line: %s - %s", line, e)
-                # Create a basic entry for unparseable lines
-                entry = LogEntry(
-                    timestamp=datetime.now(),
-                    level="INFO",
-                    source=source,
-                    message=line,
-                    component="",
-                )
-                entries.append(entry)
-
-        return entries
+        messages = record.get("message") or [""]
+        return LogEntry(
+            timestamp=datetime.fromtimestamp(record["timestamp"]),
+            level=record["level"],
+            source="core",
+            message=messages[-1],
+            component=record.get("name", ""),
+        )
 
     def _apply_filters(
         self, entries: List[LogEntry], filters: LogFilters
