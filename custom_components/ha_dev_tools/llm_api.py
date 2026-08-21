@@ -18,7 +18,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
 
-from . import audit_manager, config_tools, dashboard_manager, entity_manager, helper_manager
+from . import (
+    audit_manager,
+    config_tools,
+    dashboard_manager,
+    entity_manager,
+    helper_manager,
+    supervisor_manager,
+    template_manager,
+)
 from .automation_manager import (
     AutomationManager,
     AutomationNotFoundError,
@@ -32,6 +40,7 @@ from .helper_manager import (
     UnresolvedUserError,
 )
 from .log_manager import LogFilters, LogManager
+from .supervisor_manager import SupervisorNotAvailableError
 from .ws_call import WebSocketCommandError
 
 API_ID = "dev_tools"
@@ -138,6 +147,62 @@ class EntityHealthReportTool(llm.Tool):
         return entity_manager.entity_health_report(hass, **tool_input.tool_args)
 
 
+class RenderTemplateTool(llm.Tool):
+    """Render a Jinja2 template against live state - the core author/iterate loop primitive."""
+
+    name = "render_template"
+    description = (
+        "Render a Jinja2 template against this instance's live state. "
+        "Never raises - a render failure comes back as {'success': false, "
+        "'error': ...} so you can iterate without a tool-call error "
+        "interrupting the loop. Always prefer this over asking the user "
+        "to paste a template into the Developer Tools UI."
+    )
+    parameters = vol.Schema(
+        {vol.Required("template"): str, vol.Optional("variables"): dict}
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Render the template."""
+        args = tool_input.tool_args
+        return await template_manager.render_template(
+            hass, args["template"], variables=args.get("variables")
+        )
+
+
+class ValidateTemplateTool(llm.Tool):
+    """Check template syntax and referenced entities without necessarily needing a full render."""
+
+    name = "validate_template"
+    description = (
+        "Validate a template's syntax and report which entities it "
+        "references, distinguishing a syntax error (never rendered) from "
+        "a render error (valid syntax, failed against live state) from "
+        "success. 'unknown_entities' flags referenced entity_ids that "
+        "don't currently exist - a template can render 'successfully' "
+        "while silently treating a typo'd entity_id as always-unavailable, "
+        "which this surfaces explicitly. Use this before write_automation "
+        "when a template's correctness matters, not just render_template."
+    )
+    parameters = vol.Schema({vol.Required("template"): str})
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Validate the template."""
+        return await template_manager.validate_template(hass, tool_input.tool_args["template"])
+
+
 class GetLogsTool(llm.Tool):
     """Tail/filter/search the core Home Assistant log - never an unbounded raw dump."""
 
@@ -180,6 +245,67 @@ class GetLogsTool(llm.Tool):
         )
         entries = await self._log_manager.get_core_logs(filters)
         return {"entries": [e.to_dict() for e in entries], "count": len(entries)}
+
+
+class ListAddonsTool(llm.Tool):
+    """List installed Supervisor add-ons - Home Assistant OS/Supervised only."""
+
+    name = "list_addons"
+    description = (
+        "List installed Home Assistant add-ons (name, slug, state, "
+        "version). Only available on Home Assistant OS or Supervised "
+        "installs - returns a clear error on Core-only installs rather "
+        "than an unrelated failure."
+    )
+    parameters = vol.Schema({})
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List add-ons."""
+        try:
+            addons = await supervisor_manager.list_addons(hass)
+        except SupervisorNotAvailableError as exc:
+            return _tool_error(exc)
+        return {"addons": addons}
+
+
+class GetAddonLogsTool(llm.Tool):
+    """Tail a Supervisor add-on's logs - Home Assistant OS/Supervised only."""
+
+    name = "get_addon_logs"
+    description = (
+        "Read a Home Assistant add-on's log output by slug (see "
+        "list_addons for slugs). Separate log source from get_logs - "
+        "add-ons run outside HA core and have their own logs. Only "
+        "available on Home Assistant OS or Supervised installs."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("slug"): str,
+            vol.Optional("lines", default=100): vol.All(int, vol.Range(min=1, max=1000)),
+        }
+    )
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Get add-on logs."""
+        args = tool_input.tool_args
+        try:
+            return await supervisor_manager.get_addon_logs(
+                hass, args["slug"], lines=args.get("lines")
+            )
+        except SupervisorNotAvailableError as exc:
+            return _tool_error(exc)
 
 
 class CheckConfigTool(llm.Tool):
@@ -558,7 +684,11 @@ class DevToolsAPI(llm.API):
                 DevToolsPingTool(),
                 FindEntitiesTool(),
                 EntityHealthReportTool(),
+                RenderTemplateTool(),
+                ValidateTemplateTool(),
                 GetLogsTool(self.log_manager),
+                ListAddonsTool(),
+                GetAddonLogsTool(),
                 CheckConfigTool(),
                 ReloadDomainTool(),
                 GetAutomationTool(self.automation_manager),
