@@ -1,13 +1,13 @@
 # Home Assistant Integration Test Dependencies
-# Requires Python 3.12+ for optimal compatibility
+# Requires Python 3.14+ - see the homeassistant pin below for why.
 
 # Core testing framework
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 pytest-cov>=4.0.0
 
-# Official Home Assistant testing framework
-pytest-homeassistant-custom-component>=0.13.0
+# Official Home Assistant testing framework - exact pin below, see that
+# comment for why (pins the homeassistant version transitively).
 
 # Property-based testing
 hypothesis>=6.0.0
@@ -29,31 +29,27 @@ ruamel.yaml>=0.18.0
 # than the top-level package's install_requires) but gets imported
 # unconditionally the moment llm_api.py imports `llm`. Pinned exactly to
 # match homeassistant/components/conversation/manifest.json's own
-# requirements for the homeassistant version this resolves to - a floor
-# constraint (hassil>=2.0.0) let pip pick a newer hassil release (3.11.0)
-# that removed the hassil.fuzzy submodule this HA version's default_agent.py
-# still imports. The manifest's own exact pin (hassil==2.1.0) turned out to
-# be wrong too - default_agent.py also imports `Group` from
-# hassil.expression, which 2.1.0 doesn't have (added later than 2.1.0,
-# hassil.fuzzy removed by 3.0.0 - 3.2.0 is the first version confirmed to
-# have both, checked directly rather than assumed). If the resolved
-# `homeassistant` version above ever changes, re-verify against a real
-# install rather than trusting either the manifest pin or this range.
-hassil==3.2.0
-home-assistant-intents==2025.1.1
+# requirements at the homeassistant version pinned below (confirmed by
+# reading that manifest at the matching git tag, not assumed) - re-verify
+# the same way if the homeassistant pin below ever changes.
+hassil==3.11.0
+home-assistant-intents==2026.7.30
 
-# Home Assistant core (required for integration testing)
-# NOTE: hacs.json declares a 2026.8.2 minimum (when mcp_server, which serves
-# the dev_tools llm.API over MCP, was added on home-assistant/core's dev
-# branch - confirmed by directly reading that source). BUT: as of this
-# writing, both this sandbox's mirror AND a real GitHub Actions runner (real
-# internet access, not this sandbox's proxy) resolve homeassistant==2025.1.4
-# as the latest release actually published to PyPI - mcp_server apparently
-# hasn't reached a stable release yet. Left unpinned here (not >=2026.8.2) so
-# CI can actually install something; tests in tests/test_llm_api.py use
-# version-tolerant fallbacks for API surface that changed since 2025.1.4
-# (e.g. llm.LLMContext's fields, whether llm.async_register_api returns an
-# unsub). This means CI cannot yet validate the mcp_server-serving path
-# end-to-end either - that needs a real HA instance already running a
-# version with mcp_server, or a future PyPI release that includes it.
-homeassistant>=2024.1.0
+# Home Assistant core (required for integration testing).
+# Pinned via pytest-homeassistant-custom-component's own exact pin (below)
+# rather than a floor on `homeassistant` directly, because HA's own
+# Requires-Python has climbed release over release (>=3.12.0 through
+# 2025.1.x, >=3.13.0 for 2025.2-2025.4, >=3.13.2 for 2025.5-2026.2,
+# >=3.14.2 from 2026.3 on - checked directly against PyPI, not assumed).
+# An earlier version of this comment claimed mcp_server (which serves the
+# dev_tools llm.API over MCP, added in homeassistant/core's dev branch)
+# "hadn't reached a stable release yet" - that was wrong. It shipped in
+# 2026.3+; homeassistant==2026.8.2 has it. What was actually happening:
+# CI's Python 3.12/3.13 matrix couldn't install anything past 2025.1.4 (the
+# last release still supporting <3.14), so a bare `homeassistant>=2024.1.0`
+# floor silently resolved to the newest Python-3.12-compatible release
+# instead of erroring - it looked like "not on PyPI" but was really "not
+# installable on this interpreter". Fixed by moving the CI matrix to Python
+# 3.14 (see test.yml) and pinning here to a pytest-homeassistant-custom-
+# component release whose own exact homeassistant pin includes mcp_server.
+pytest-homeassistant-custom-component==0.13.356
