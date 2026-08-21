@@ -12,10 +12,11 @@ import time
 import pytest
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
-from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
+from custom_components.ha_dev_tools.const import DOMAIN, OPT_DRY_RUN
 from custom_components.ha_dev_tools.ws_call import UnresolvedUserError
 
 
@@ -151,6 +152,37 @@ async def test_require_admin_raises_for_non_admin(hass: HomeAssistant, non_admin
 async def test_require_admin_raises_for_unresolvable_user(hass: HomeAssistant):
     with pytest.raises(UnresolvedUserError):
         await access_control.require_admin(hass, _llm_context(None))
+
+
+# --- is_dry_run -------------------------------------------------------------
+
+
+def test_is_dry_run_false_with_no_config_entry(hass: HomeAssistant):
+    assert access_control.is_dry_run(hass) is False
+
+
+def test_is_dry_run_false_by_default(hass: HomeAssistant):
+    MockConfigEntry(domain=DOMAIN, options={}).add_to_hass(hass)
+
+    assert access_control.is_dry_run(hass) is False
+
+
+def test_is_dry_run_true_when_option_enabled(hass: HomeAssistant):
+    MockConfigEntry(domain=DOMAIN, options={OPT_DRY_RUN: True}).add_to_hass(hass)
+
+    assert access_control.is_dry_run(hass) is True
+
+
+def test_is_dry_run_reflects_live_option_updates(hass: HomeAssistant):
+    """No reload needed - toggling the option takes effect immediately,
+    since is_dry_run() always re-reads the live config entry."""
+    entry = MockConfigEntry(domain=DOMAIN, options={OPT_DRY_RUN: False})
+    entry.add_to_hass(hass)
+    assert access_control.is_dry_run(hass) is False
+
+    hass.config_entries.async_update_entry(entry, options={OPT_DRY_RUN: True})
+
+    assert access_control.is_dry_run(hass) is True
 
 
 # --- cleanup ---------------------------------------------------------------

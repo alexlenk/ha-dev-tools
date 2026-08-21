@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-21
+
+### Added
+- Dry-run mode, toggleable at any time from this integration's Configure page (no restart needed - `access_control.is_dry_run()` re-reads the config entry's options fresh on every call, the same "never cache" approach `check_armed()` uses for the arm file). When enabled, every write tool (`write_automation`, `create_helper`/`update_helper`/`delete_helper`, `write_dashboard`) is blocked at the gate before any of its own logic runs - the tool call's own validated input is returned to the agent as a `would_apply` preview instead of being applied. This is a policy block, not a simulation: it doesn't verify the write would have succeeded, only that it didn't happen. Implemented as a new `WriteGatedTool` base class (extends `GatedTool`) so every write tool gets this centrally rather than each one needing its own check. `reload_domain`/`check_config` and every read-only tool are unaffected either way.
+- `strings.json`'s `options` section and this integration's first options flow (`options_flow.py`) - previously this integration had no options at all, config-entry-only with a single confirm step.
+
 ## [2.0.2] - 2026-08-21
 
 The integration wasn't showing up in Home Assistant's "+ Add Integration" search at all after installing via HACS, despite `config_flow: true` and a clean startup log (confirmed via a real install: HA found and parsed the manifest fine, no exceptions anywhere, requirements installed without issue - so this wasn't a HACS placement problem or a Python error).

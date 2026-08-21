@@ -62,6 +62,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.event import async_track_time_interval
 
+from .const import DOMAIN, OPT_DRY_RUN
 from .ws_call import resolve_user
 
 _LOGGER = logging.getLogger(__name__)
@@ -159,6 +160,20 @@ async def require_admin(hass: HomeAssistant, llm_context: llm.LLMContext) -> Non
             f"User '{user.name}' is not a Home Assistant admin - dev_tools "
             "requires admin access."
         )
+
+
+def is_dry_run(hass: HomeAssistant) -> bool:
+    """True if this integration's dry-run option is currently enabled.
+
+    Read fresh from the config entry's options on every call, the same
+    "always re-derive, never cache" approach check_armed() uses for the
+    arm file - toggling the option in the integration's Configure dialog
+    takes effect on the very next tool call, no reload needed.
+    """
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return False
+    return bool(entries[0].options.get(OPT_DRY_RUN, False))
 
 
 def _cleanup_if_expired(hass: HomeAssistant) -> None:
