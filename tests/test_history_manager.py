@@ -6,10 +6,17 @@ Uses a real recorder against a real `hass` instance (per CONTRIBUTING.md's
 pieces of Home Assistant's own query machinery this module exists to
 reuse correctly, so a mock would only prove this module calls a mock the
 way it was told to, not that it calls the real thing correctly.
+
+`recorder_mock` is applied via `@pytest.mark.usefixtures(...)`, never as a
+second test-function parameter alongside `hass` - pytest-homeassistant-
+custom-component's own `recorder_db_url` fixture must run *before* `hass`
+is instantiated, and listing `hass` as an explicit parameter puts it ahead
+of `recorder_mock` in fixture resolution order, tripping that fixture's
+own ordering assertion. Same pattern `ha-concierge-mcp`'s working
+`get_history` tests use for the identical reason.
 """
 
 import pytest
-from homeassistant.components.recorder import Recorder
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -53,18 +60,16 @@ async def test_get_logbook_entries_raises_when_recorder_not_set_up(hass: HomeAss
 
 
 @pytest.mark.asyncio
-async def test_get_logbook_entries_raises_when_logbook_not_set_up(
-    hass: HomeAssistant, recorder_mock: Recorder
-):
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_logbook_entries_raises_when_logbook_not_set_up(hass: HomeAssistant):
     """Recorder alone isn't enough - logbook is a separate component that depends on it."""
     with pytest.raises(RecorderNotAvailableError):
         await get_logbook_entries(hass, start_time=dt_util.utcnow())
 
 
 @pytest.mark.asyncio
-async def test_get_entity_history_returns_recorded_states(
-    hass: HomeAssistant, recorder_mock: Recorder
-):
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_entity_history_returns_recorded_states(hass: HomeAssistant):
     start_time = dt_util.utcnow()
 
     hass.states.async_set("input_boolean.cleaning", "on")
@@ -86,8 +91,9 @@ async def test_get_entity_history_returns_recorded_states(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
 async def test_get_entity_history_includes_unrecorded_entity_id_as_empty(
-    hass: HomeAssistant, recorder_mock: Recorder
+    hass: HomeAssistant,
 ):
     """A requested entity_id with no rows in the window still comes back explicitly.
 
@@ -107,9 +113,8 @@ async def test_get_entity_history_includes_unrecorded_entity_id_as_empty(
 
 
 @pytest.mark.asyncio
-async def test_get_entity_history_truncates_to_limit(
-    hass: HomeAssistant, recorder_mock: Recorder
-):
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_entity_history_truncates_to_limit(hass: HomeAssistant):
     start_time = dt_util.utcnow()
 
     for i in range(5):
@@ -133,9 +138,8 @@ async def test_get_entity_history_truncates_to_limit(
 
 
 @pytest.mark.asyncio
-async def test_get_logbook_entries_includes_state_change(
-    hass: HomeAssistant, recorder_mock: Recorder
-):
+@pytest.mark.usefixtures("recorder_mock")
+async def test_get_logbook_entries_includes_state_change(hass: HomeAssistant):
     assert await async_setup_component(hass, "logbook", {})
     await hass.async_block_till_done()
 
