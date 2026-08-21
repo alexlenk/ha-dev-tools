@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Real brand assets (`icon.png`/`icon@2x.png`/`logo.png`/`logo@2x.png`, plus the `icon.svg`/`logo.svg` source) under `custom_components/ha_dev_tools/brand/`, replacing the old pre-restart placeholder (a broken 256x128 purple hexagon graphic with its own title text running off the edge of the canvas). Embedded at the top of `README.md`.
+
 ## [2.0.0] - 2026-08-21
 
 This is an architectural restart: `ha_dev_tools` moves from a standalone
