@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up HA Dev Tools",
-        "description": "Registers a `dev_tools` LLM API for Home Assistant's native `mcp_server` integration to serve. No configuration is needed here - tools stay disarmed until you create the arm file described in the documentation, and every tool call is checked against the calling user's admin status. See the documentation link on this integration's page for the arm-file setup step."
+        "description": "Registers a `dev_tools` LLM API for Home Assistant's native `mcp_server` integration to serve. No configuration is needed here - tools stay disarmed until you run this on the Home Assistant host (via SSH or the Terminal add-on):\n\n`date +%s > /config/.storage/ha_dev_tools.armed`\n\nThat arms it for up to 4 hours (extended by 30 minutes on each use, idle windows beyond 30 minutes expire it). Every tool call is also checked against the calling user's admin status - see the documentation link on this integration's page for why both gates exist."
       }
     },
     "abort": {

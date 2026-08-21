@@ -127,10 +127,11 @@ def check_armed(hass: HomeAssistant) -> None:
     path = _arm_file_path(hass)
     if _is_expired(path):
         raise NotArmedError(
-            f"dev_tools is not armed. Create {path} (e.g. via SSH or the "
-            "Terminal add-on) with the current unix timestamp as its "
-            "content to enable it for up to 4 hours (extended by 30 "
-            "minutes on each use, idle windows beyond 30 minutes expire it)."
+            "dev_tools is not armed. Run this on the Home Assistant host "
+            "(e.g. via SSH or the Terminal add-on), exactly as written:\n\n"
+            f"    date +%s > {path}\n\n"
+            "That enables it for up to 4 hours (extended by 30 minutes on "
+            "each use, idle windows beyond 30 minutes expire it)."
         )
 
 
