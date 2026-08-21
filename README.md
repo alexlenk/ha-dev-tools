@@ -1,6 +1,6 @@
-# HA Dev Tools
+<img src="custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools logo">
 
-![HA Dev Tools logo](custom_components/ha_dev_tools/brand/logo.png)
+# HA Dev Tools
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
