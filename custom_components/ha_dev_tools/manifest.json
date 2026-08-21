@@ -1,7 +1,7 @@
 {
   "domain": "ha_dev_tools",
   "name": "HA Dev Tools",
-  "after_dependencies": ["http"],
+  "after_dependencies": ["hassio", "http"],
   "codeowners": ["@alexlenk"],
   "config_flow": true,
   "dependencies": [],
