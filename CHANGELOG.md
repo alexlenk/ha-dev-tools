@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-08-22
+
+### Fixed
+- **Security:** `FileManager.write_file`/`delete_file` validated their target path as a read operation instead of a write - `SecurityManager.validate_file_path`'s default is `OPERATION_READ`, and neither call site passed `operation=OPERATION_WRITE`. Since the read check (`is_allowlisted`, covering both `read_paths` and `write_paths`) is a superset of the write check (`is_writable`, `write_paths` only), this meant any path this integration considers read-only - `configuration.yaml`, `scripts.yaml`, `scenes.yaml`, and every `.storage/*` snapshot in `DEFAULT_READ_ONLY_PATHS` - was actually writable and deletable through `FileManager`, contradicting the documented security model (see `docs/SECURITY.md`/`security.py`). Confirmed directly: `write_file("configuration.yaml", ...)` succeeded against the real default security config before this fix. `SecurityManager.validate_file_path` itself was already correct and already tested in isolation with the right operation passed explicitly - the gap was only in these two integration points never actually passing it through. No tool currently exposes raw `delete_file`, and `write_automation` (the only existing `write_file` caller) only ever targets `automations.yaml`/`packages/*.yaml`, both of which are write-permitted - so this fix changes no currently-reachable behavior, only closes the gap for future callers (starting with the in-progress derived-sensor/template YAML work in #13).
+
 ## [2.3.0] - 2026-08-22
 
 ### Added
