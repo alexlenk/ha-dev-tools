@@ -853,12 +853,15 @@ class ListDerivedSensorsTool(GatedTool):
     name = "list_derived_sensors"
     description = (
         "List calculated/derived sensor helpers - Min/Max, Utility Meter, "
-        "Integration (Riemann sum), Statistics, Threshold, Derivative, and "
-        "Filter - a second helper family alongside list_helpers' nine "
-        "domains, implemented as config entries rather than storage items. "
-        "Omit domain to list across all seven. Does not cover Template "
-        "helpers or YAML-defined template: sensors - not yet supported by "
-        "any tool here."
+        "Integration (Riemann sum), Statistics, Threshold, Derivative, "
+        "Filter - plus the general-purpose Template helper (can create an "
+        "entity in almost any domain: sensor, switch, light, cover, ...; "
+        "picking which one is that domain's own first, menu-driven step). "
+        "A second helper family alongside list_helpers' nine domains, "
+        "implemented as config entries rather than storage items. Omit "
+        "domain to list across all eight. Does not cover YAML-defined "
+        "template: sensors living in configuration.yaml/packages - use "
+        "list_template_entities for those instead."
     )
     parameters = vol.Schema({vol.Optional("domain"): _derived_sensor_domain_schema()})
 
@@ -908,13 +911,16 @@ class GetDerivedSensorTool(GatedTool):
 _DERIVED_SENSOR_STEPS_DESCRIPTION = (
     "Home Assistant drives creating/editing one of these through a real "
     "config/options flow, not a flat field dict - some (statistics) are a "
-    "fixed multi-step sequence, and others (filter) branch into a "
-    "different step depending on an earlier answer. Call with steps={} (or "
-    "omitted) first: the response comes back with needs_input=true, the "
-    "current step_id, and that step's field schema. Fill those fields in "
-    "under steps[step_id] and call again - repeat, accumulating entries in "
-    "steps, until the call returns the created/updated entry instead of "
-    "needs_input."
+    "fixed multi-step sequence, others (filter) branch into a different "
+    "step depending on an earlier answer, and template's very first "
+    "create step is a menu (its single field, next_step_id, picks which "
+    "entity domain - sensor, switch, light, ... - to create). Call with "
+    "steps={} (or omitted) first: the response comes back with "
+    "needs_input=true, the current step_id, and that step's field schema "
+    "(a menu's schema is just its list of valid next_step_id choices). "
+    "Fill those fields in under steps[step_id] and call again - repeat, "
+    "accumulating entries in steps, until the call returns the "
+    "created/updated entry instead of needs_input."
 )
 
 
@@ -925,8 +931,9 @@ class CreateDerivedSensorTool(WriteGatedTool):
     description = (
         "Create a new calculated/derived sensor helper (min_max, "
         "utility_meter, integration [Riemann sum], statistics, threshold, "
-        "derivative, or filter) via the same config flow the UI's Add "
-        "Helper wizard uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
+        "derivative, or filter), or a Template helper (any entity domain, "
+        "not just sensors) via the same config flow the UI's Add Helper "
+        "wizard uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
     )
     parameters = vol.Schema(
         {
