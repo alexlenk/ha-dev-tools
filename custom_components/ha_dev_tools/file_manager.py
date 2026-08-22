@@ -11,7 +11,12 @@ from typing import Any, Dict, Optional, Tuple
 
 from homeassistant.core import HomeAssistant
 
-from .const import ERROR_BLACKLISTED_FILE, ERROR_FILE_NOT_FOUND
+from .const import (
+    ERROR_BLACKLISTED_FILE,
+    ERROR_FILE_NOT_FOUND,
+    ERROR_WRITE_NOT_PERMITTED,
+    OPERATION_WRITE,
+)
 from .security import SecurityManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -124,11 +129,22 @@ class FileManager:
             PermissionError: If access is denied
             ValueError: If path validation fails, content is invalid, or hash conflict detected
         """
-        # Validate file path security
-        is_valid, error = self.security_manager.validate_file_path(file_path)
+        # Validate file path security - explicitly as a write, not the
+        # OPERATION_READ default: a read-only-only path (configuration.yaml,
+        # scripts.yaml, scenes.yaml, .storage/* snapshots, ...) must be
+        # rejected here, not silently accepted the way an unqualified read
+        # check would (see security.py's OPERATION_READ vs OPERATION_WRITE
+        # branches - is_allowlisted() for reads is a superset of
+        # is_writable(), so omitting operation here would pass anything
+        # merely readable straight through to write).
+        is_valid, error = self.security_manager.validate_file_path(
+            file_path, operation=OPERATION_WRITE
+        )
         if not is_valid:
             if error == ERROR_BLACKLISTED_FILE:
                 raise PermissionError(f"Access to blacklisted file denied: {file_path}")
+            elif error == ERROR_WRITE_NOT_PERMITTED:
+                raise PermissionError(f"Write access to file denied: {file_path}")
             else:
                 raise ValueError(f"Invalid file path: {error}")
 
@@ -371,11 +387,17 @@ class FileManager:
             PermissionError: If access is denied
             ValueError: If path validation fails
         """
-        # Validate file path security
-        is_valid, error = self.security_manager.validate_file_path(file_path)
+        # Validate file path security - explicitly as a write (deletion is
+        # destructive) - see write_file's identical comment for why the
+        # operation kwarg can't be omitted here.
+        is_valid, error = self.security_manager.validate_file_path(
+            file_path, operation=OPERATION_WRITE
+        )
         if not is_valid:
             if error == ERROR_BLACKLISTED_FILE:
                 raise PermissionError(f"Access to blacklisted file denied: {file_path}")
+            elif error == ERROR_WRITE_NOT_PERMITTED:
+                raise PermissionError(f"Write access to file denied: {file_path}")
             else:
                 raise ValueError(f"Invalid file path: {error}")
 

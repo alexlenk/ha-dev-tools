@@ -236,3 +236,98 @@ test:
     read_content = await file_manager.read_file("test_roundtrip.yaml")
 
     assert read_content == original_content
+
+
+# --- write_file/delete_file honoring read-only-only paths --------------------
+#
+# The fixtures above use a deliberately permissive SecurityManager config
+# (identical read_paths/write_paths globs), so none of the tests above ever
+# exercise a path that's readable but NOT writable - the exact case that
+# matters here. These use the real default SecurityManager config instead
+# (DEFAULT_READ_ONLY_PATHS vs DEFAULT_WRITE_PATHS - see const.py), which is
+# what a real install actually runs with.
+
+
+@pytest.fixture
+def default_file_manager(hass: HomeAssistant):
+    """FileManager backed by the real default (non-permissive) security config."""
+    return FileManager(hass, SecurityManager(hass))
+
+
+async def test_write_file_denied_on_read_only_only_path(
+    hass: HomeAssistant, default_file_manager
+):
+    """configuration.yaml is in DEFAULT_READ_ONLY_PATHS but not DEFAULT_WRITE_PATHS.
+
+    Regression test: write_file's validate_file_path call previously omitted
+    operation=OPERATION_WRITE, silently defaulting to the read check - which
+    is a superset of the write check - so this write incorrectly succeeded.
+    """
+    with pytest.raises(PermissionError, match="Write access to file denied"):
+        await default_file_manager.write_file(
+            "configuration.yaml", "homeassistant: {}\n", validate_before_write=False
+        )
+
+
+async def test_read_file_still_allowed_on_read_only_only_path(
+    hass: HomeAssistant, default_file_manager
+):
+    """The fix must not also break reading a legitimately read-only path."""
+    config_file = Path(hass.config.config_dir) / "configuration.yaml"
+    config_file.write_text("homeassistant: {}\n")
+
+    content = await default_file_manager.read_file("configuration.yaml")
+
+    assert content == "homeassistant: {}\n"
+
+
+async def test_delete_file_denied_on_read_only_only_path(
+    hass: HomeAssistant, default_file_manager
+):
+    """scripts.yaml is in DEFAULT_READ_ONLY_PATHS but not DEFAULT_WRITE_PATHS.
+
+    Same regression as write_file's test above, for delete_file's identical
+    missing operation=OPERATION_WRITE.
+    """
+    scripts_file = Path(hass.config.config_dir) / "scripts.yaml"
+    scripts_file.write_text("{}\n")
+    try:
+        with pytest.raises(PermissionError, match="Write access to file denied"):
+            await default_file_manager.delete_file("scripts.yaml")
+
+        assert scripts_file.exists()
+    finally:
+        # testing_config is a shared, non-per-test directory - clean up so a
+        # second suite run doesn't see a stale file (see
+        # test_read_directory_as_file's identical reasoning above).
+        scripts_file.unlink(missing_ok=True)
+
+
+async def test_write_file_still_allowed_on_write_permitted_path(
+    hass: HomeAssistant, default_file_manager
+):
+    """packages/**/*.yaml is in DEFAULT_WRITE_PATHS - the fix must not over-block."""
+    package_file = Path(hass.config.config_dir) / "packages" / "test.yaml"
+    try:
+        result = await default_file_manager.write_file(
+            "packages/test.yaml", "sensor: []\n", validate_before_write=False
+        )
+
+        assert isinstance(result, dict)
+        assert result.get("accessible") is True
+    finally:
+        package_file.unlink(missing_ok=True)
+
+
+async def test_delete_file_still_allowed_on_write_permitted_path(
+    hass: HomeAssistant, default_file_manager
+):
+    """Same as above, for delete_file."""
+    package_file = Path(hass.config.config_dir) / "packages" / "test_delete.yaml"
+    package_file.parent.mkdir(parents=True, exist_ok=True)
+    package_file.write_text("sensor: []\n")
+
+    deleted = await default_file_manager.delete_file("packages/test_delete.yaml")
+
+    assert deleted is True
+    assert not package_file.exists()
