@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-08-22
+
+### Added
+- `list_derived_sensors`/`create_derived_sensor`/`update_derived_sensor` now also cover the config-entry-based **Template** helper - the last piece of issue #13. Template's config flow branches through a real `FlowResultType.MENU` (pick an entity domain - sensor, switch, light, cover, ...) rather than a form; it needed no new machinery, `_drive_flow`'s existing generic step-driver just needed to accept `MENU` results the same way it already accepts `FORM` ones (HA represents the menu choice as a `next_step_id` field in the menu's own schema, discovered and supplied exactly like any other step's fields).
+
+### Fixed
+- `_drive_flow` (`derived_sensor_manager.py`, backing `create_derived_sensor`/`update_derived_sensor`) hung indefinitely when a step's `validate_user_input` rejected the supplied input - Home Assistant re-shows the identical step with `errors` set rather than aborting, and the driver kept resubmitting the same rejected input forever. Confirmed directly building this release's Template support (had to force-kill the test process past two minutes on `statistics`'s validated `options` step, an existing domain from 2.3.0 - not something new to Template). A second visit to an already-attempted step now raises `FlowStepRequiredError` with the fresh error instead of looping.
+- Same function also let a raw schema/type mismatch - a bad `MENU` `next_step_id`, or a validator raising plain `vol.Invalid` instead of `SchemaFlowError` (Template's own sensor validator does this for a device_class/unit-of-measurement mismatch, and `_async_form_step` only catches the latter) - escape as an HA-internal `InvalidData`/`vol.Invalid` exception instead of a clean, catchable error. Now caught and re-raised as `FlowAbortedError`, already handled by every tool built on this module.
+
 ## [2.4.0] - 2026-08-22
 
 ### Added

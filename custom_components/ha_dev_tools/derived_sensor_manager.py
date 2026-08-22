@@ -1,24 +1,31 @@
-"""CRUD for calculated/derived sensor "helpers" implemented as config entries.
+"""CRUD for config-entry-based "helpers" - calculated sensors, and Template.
 
 Home Assistant exposes a second family of "helpers" alongside the flat
 storage-collection domains `helper_manager.py` covers (`input_boolean`,
 `counter`, `timer`, ...): Min/Max, Utility Meter, Integration (Riemann
-sum, domain `integration`), Statistics, Threshold, Derivative, and
-Filter. Each of these is a full config-entry integration driven by
+sum, domain `integration`), Statistics, Threshold, Derivative, Filter,
+and Template. Each of these is a full config-entry integration driven by
 `homeassistant.helpers.schema_config_entry_flow.SchemaConfigFlowHandler`
 - confirmed by reading every one of these domains' own `config_flow.py`
 at this repo's pinned HA version (2026.8.2) - not the simple
 `<domain>/{list,create,update,delete}` WebSocket commands the nine
-`helper_manager.py` domains use.
+`helper_manager.py` domains use. "Derived sensor" is a slight misnomer
+for Template specifically - unlike the other seven, it can create
+entities across many domains (light, switch, cover, fan, lock, ...), not
+just calculated sensors - kept in this module anyway rather than a
+separate one because it needs none of its own machinery, see below.
 
 Their config/options flows aren't all single-step either: `statistics`
 is a fixed three-step flow ("user" -> "state_characteristic" ->
-"options"), and `filter` branches into a different type-specific step
+"options"); `filter` branches into a different type-specific step
 ("lowpass"/"outlier"/"range"/...) depending on which filter type is
-picked in its "user"/"init" step. So rather than hardcoding each
-domain's schema here, this module drives the real flow machinery
-generically: it steps `async_configure` in a loop, handing each step
-the caller-supplied input for that step's id, and raises
+picked in its "user" step; `template`'s very first step is a real MENU
+(pick an entity platform - sensor, switch, light, ...) rather than a
+form, branching the same way filter does but through
+`FlowResultType.MENU` instead of a selector field. So rather than
+hardcoding each domain's schema here, this module drives the real flow
+machinery generically: it steps `async_configure` in a loop, handing
+each step the caller-supplied input for that step's id, and raises
 `FlowStepRequiredError` (carrying the step's own schema, serialized the
 same way `homeassistant.helpers.data_entry_flow`'s HTTP view does -
 `voluptuous_serialize.convert(..., custom_serializer=cv.custom_serializer)`)
@@ -26,14 +33,22 @@ when the caller hasn't supplied input for the step the flow is
 currently on. A caller (the LLM) can therefore discover each step's
 fields by calling with no/partial `steps` first, then retry with them
 filled in - the same one-step-at-a-time shape a human fills out the
-real "Add Helper" wizard with.
+real "Add Helper" wizard with. A MENU step needs no special handling
+beyond accepting that result type into the same loop - HA represents the
+choice as a `next_step_id` field in the menu's own `data_schema`
+(confirmed by reading `data_entry_flow.py`'s `async_show_menu`), so it's
+discovered and supplied exactly like any other step's fields.
 
-Template is deliberately out of scope here - its `config_flow.py` alone
-is ~900 lines covering many different entity platforms (sensor,
-binary_sensor, number, select, switch, button, image, ...), enough to
-warrant its own dedicated module. See issue #13.
+`_drive_flow` also guards against a step that comes back around because
+its own `validate_user_input` rejected what was supplied (HA re-shows
+the identical step_id with `errors` set, rather than aborting) -
+confirmed directly that the unguarded version of this loop actually
+hangs on repeated invalid input, not just a theoretical concern. A
+second visit to an already-attempted step_id raises FlowStepRequiredError
+with the fresh error instead of resubmitting the same rejected input
+forever.
 
-Every one of these seven domains sets `options_flow_reloads = True` on
+Every one of these eight domains sets `options_flow_reloads = True` on
 its `ConfigFlowHandler` (confirmed the same way) - update_derived_sensor
 does not need to separately call `async_reload` after a successful
 options flow, `OptionsFlowManager.async_finish_flow` already schedules
@@ -52,6 +67,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_validation as cv
+from voluptuous import Invalid as VoluptuousInvalid
 
 __all__ = [
     "DERIVED_SENSOR_DOMAINS",
@@ -75,6 +91,7 @@ DERIVED_SENSOR_DOMAINS = (
     "threshold",
     "derivative",
     "filter",
+    "template",  # "Template" in the UI - creates entities across many domains, not just sensors
 )
 
 
@@ -158,20 +175,50 @@ async def _drive_flow(
     """Step a config/options flow to completion using caller-supplied per-step input.
 
     Generic across single-step (min_max, utility_meter, integration,
-    threshold, derivative), fixed multi-step (statistics), and branching
-    (filter) flows alike - it only ever looks at the current step's id,
-    never assumes a fixed sequence.
+    threshold, derivative), fixed multi-step (statistics), branching
+    (filter, template) - a MENU result is driven the same way as a FORM
+    one: HA represents the choice as a `next_step_id` field in the menu's
+    own `data_schema` (confirmed by reading data_entry_flow.py's
+    `async_show_menu` - `vol.Schema({"next_step_id": vol.In(menu_options)})`),
+    so it needs no special-casing beyond accepting FlowResultType.MENU
+    into the same loop - and top-level-menu (template) flows alike. It
+    only ever looks at the current step's id, never assumes a fixed
+    sequence.
+
+    A step already attempted that comes back around (its own
+    `validate_user_input` rejected what `steps` supplied, so HA re-shows
+    the identical step_id with `errors` populated) raises
+    FlowStepRequiredError with that fresh error rather than resubmitting
+    the same rejected input forever - confirmed directly that the
+    unguarded version of this loop actually hangs (a real HA flow keeps
+    re-showing the same step indefinitely on repeated invalid input, it
+    doesn't abort), not just a theoretical concern.
     """
     result = init_result
-    while result["type"] == FlowResultType.FORM:
+    attempted_steps: set[str] = set()
+    while result["type"] in (FlowResultType.FORM, FlowResultType.MENU):
         step_id = result["step_id"]
-        if step_id not in steps:
+        if step_id not in steps or step_id in attempted_steps:
             raise FlowStepRequiredError(
                 step_id,
                 _serialize_schema(result.get("data_schema")),
                 result.get("errors"),
             )
-        result = await configure(result["flow_id"], steps[step_id])
+        attempted_steps.add(step_id)
+        try:
+            result = await configure(result["flow_id"], steps[step_id])
+        except VoluptuousInvalid as exc:
+            # A raw type/value mismatch (wrong type for a field, an
+            # out-of-range MENU next_step_id, ...) is rejected before HA
+            # ever dispatches to the step handler - data_entry_flow.py's
+            # _async_configure raises InvalidData (a vol.Invalid subclass)
+            # directly rather than re-showing the form with `errors` set,
+            # unlike a validate_user_input rejection. Translate it the same
+            # way as any other malformed-input case instead of letting an
+            # HA-internal exception type leak out of this module.
+            raise FlowAbortedError(
+                f"Invalid input for step '{step_id}': {exc}"
+            ) from exc
     if result["type"] == FlowResultType.ABORT:
         raise FlowAbortedError(f"Flow aborted: {result.get('reason', 'unknown')}")
     if result["type"] != FlowResultType.CREATE_ENTRY:

@@ -46,7 +46,7 @@ the actual source rather than assumed:
 | Dashboards, storage mode | WS `lovelace/config`, `lovelace/config/save` | Fully sufficient |
 | Dashboards, YAML mode | Raw `ui-lovelace.yaml` | `lovelace/config/save` explicitly raises "Not supported" for YAML-mode dashboards - not implemented here, read-only for that case |
 | Helpers (`input_boolean` et al., `counter`, `timer`, `schedule`) | WS `<domain>/{list,create,update,delete}` | Fully API-sufficient, generic across all nine domains |
-| Derived-sensor helpers (Min/Max, Utility Meter, Integration/Riemann sum, Statistics, Threshold, Derivative, Filter) | `hass.config_entries.flow`/`.options` (real config/options flow) | These are config-entry integrations (`SchemaConfigFlowHandler`), not the flat storage-collection pattern above - no single generic WS command covers them. See "Driving config/options flows generically" below |
+| Derived-sensor helpers (Min/Max, Utility Meter, Integration/Riemann sum, Statistics, Threshold, Derivative, Filter), and Template | `hass.config_entries.flow`/`.options` (real config/options flow) | These are config-entry integrations (`SchemaConfigFlowHandler`), not the flat storage-collection pattern above - no single generic WS command covers them. See "Driving config/options flows generically" below |
 | YAML `template:` entities, default file | Direct YAML file read/write (`configuration.yaml`) + `template.reload` | No REST/WS API scoped to individual template entities exists; unlike automations, `configuration.yaml` is this integration's own read-only default, so only reads land here |
 | YAML `template:` entities, packages layout | Direct YAML file read/write (`packages/*.yaml`) + `template.reload` | Same file-layout-resolution problem `write_automation` solves, applied to `template:` blocks - see "Layout-aware YAML template: entities" below |
 | Blueprints | WS `blueprint/{list,import,save,delete,substitute}` | Has a real API - not yet implemented here (`get_automation` currently returns `use_blueprint:` references unexpanded) |
@@ -95,18 +95,27 @@ admin enforcement, faking only the transport. `resolve_user()` resolves the
 real calling user from the MCP request's `LLMContext`, never a synthetic
 admin bypass, so admin-gated WS commands enforce against the real caller.
 
-## Driving config/options flows generically (derived-sensor helpers)
+## Driving config/options flows generically (derived-sensor helpers, and Template)
 
 Min/Max, Utility Meter, Integration (Riemann sum), Statistics, Threshold,
-Derivative, and Filter are each a real config-entry integration built on
-`homeassistant.helpers.schema_config_entry_flow.SchemaConfigFlowHandler` -
-confirmed by reading every one of these domains' own `config_flow.py` at
-this repo's pinned HA version. Their flows aren't uniformly single-step
-either: `statistics` is a fixed three-step sequence
-(`user` -> `state_characteristic` -> `options`), and `filter` branches into
-a different step (`lowpass`/`outlier`/`range`/...) depending on which
-filter type is chosen in its first step - the same shape a human fills out
-the real "Add Helper"/"Configure" wizard with, one step at a time.
+Derivative, Filter, and Template are each a real config-entry integration
+built on `homeassistant.helpers.schema_config_entry_flow.
+SchemaConfigFlowHandler` - confirmed by reading every one of these
+domains' own `config_flow.py` at this repo's pinned HA version. "Derived
+sensor" is a slight misnomer for Template specifically - unlike the other
+seven, it can create an entity in almost any domain (light, switch, cover,
+fan, lock, ...), not just calculated sensors - kept in
+`derived_sensor_manager.py` anyway since it needs none of its own
+machinery (see below), rather than a separate module.
+
+Their flows aren't uniformly single-step either: `statistics` is a fixed
+three-step sequence (`user` -> `state_characteristic` -> `options`);
+`filter` branches into a different step (`lowpass`/`outlier`/`range`/...)
+depending on which filter type is chosen in its first step; `template`'s
+very first step is a real `FlowResultType.MENU` (pick an entity domain -
+sensor, switch, light, ...) rather than a form - the same shape a human
+fills out the real "Add Helper"/"Configure" wizard with, one step at a
+time.
 
 `derived_sensor_manager.py` drives this generically rather than hardcoding
 each domain's schema: it calls `hass.config_entries.flow.async_init`/
@@ -118,27 +127,49 @@ own schema - serialized the same way HA's own `config_entries` HTTP view
 does (`voluptuous_serialize.convert(schema, custom_serializer=
 cv.custom_serializer)`) - so a caller (the LLM) can discover each step's
 fields and retry, accumulating a `steps` dict keyed by step id until the
-flow finishes. This generalizes correctly across single-step, fixed
-multi-step, and branching flows alike without this integration needing to
-know any domain's fields in advance - see
-`tests/test_derived_sensor_manager.py` for all seven confirmed working
-this way (six directly; `filter` needs a real recorder as a dependency, so
-it's `tests/test_derived_sensor_manager_recorder.py` instead).
+flow finishes. A `MENU` result needs no special-casing beyond accepting
+that result type into the same loop as `FORM` - HA represents the choice
+as a `next_step_id` field in the menu's own `data_schema` (confirmed by
+reading `data_entry_flow.py`'s `async_show_menu`), discovered and supplied
+exactly like any other step's fields. This generalizes correctly across
+single-step, fixed multi-step, and branching (selector- or menu-driven)
+flows alike without this integration needing to know any domain's fields
+in advance - see `tests/test_derived_sensor_manager.py` for all eight
+confirmed working this way (seven directly; `filter` needs a real recorder
+as a dependency, so it's `tests/test_derived_sensor_manager_recorder.py`
+instead).
 
-All seven of these domains set `options_flow_reloads = True` on their
+Two failure modes needed explicit handling, both found by actually
+exercising them rather than assumed away:
+
+- **A step's `validate_user_input` rejects what was supplied.** HA
+  re-shows the identical step_id with `errors` set, rather than aborting -
+  confirmed directly that the unguarded first version of `_drive_flow`
+  actually hangs, resubmitting the same rejected input forever, not just a
+  theoretical concern (had to be force-killed past two minutes on
+  `statistics`'s validated `options` step). A second visit to an
+  already-attempted step_id now raises `FlowStepRequiredError` with the
+  fresh error instead of looping.
+- **Raw schema/type mismatches** (a bad `MENU` `next_step_id`, or - as
+  Template's own sensor validator does for a device_class/unit-of-measurement
+  mismatch - a validator raising plain `vol.Invalid` instead of
+  `SchemaFlowError`, which HA's `_async_form_step` only catches the latter
+  of) surface as `homeassistant.data_entry_flow.InvalidData`/`vol.Invalid`
+  raised directly out of `async_configure`, never as a re-shown form.
+  `_drive_flow` catches `voluptuous.Invalid` around each `configure()` call
+  and re-raises as `FlowAbortedError` instead of letting an HA-internal
+  exception type escape this module.
+
+All eight of these domains set `options_flow_reloads = True` on their
 `ConfigFlowHandler` (also confirmed by reading each one) - Home Assistant's
 own `OptionsFlowManager.async_finish_flow` already applies the new options
 to the entry and schedules a reload on a successful finish, so
 `update_derived_sensor` doesn't need to separately call
-`config_entries.async_reload` after a successful update.
-
-Template is deliberately out of scope for `derived_sensor_manager.py` -
-its `config_flow.py` alone is roughly 900 lines covering many entity
-platforms (sensor, binary_sensor, number, select, switch, button, image,
-...), warranting its own dedicated module rather than folding into this
-one. See "Still open" below - the config-entry-based Template *helper*
-specifically is still unimplemented, but the YAML side is not (see next
-section).
+`config_entries.async_reload` after a successful update. For Template
+specifically, the options flow's own first step ("init") has no schema of
+its own - it reads the entry's already-stored `template_type` and skips
+straight to that domain's options step, so updating an entity never needs
+to redrive the menu the way creating one does.
 
 ## Layout-aware YAML `template:` entities (`template_yaml_manager.py`)
 
@@ -221,9 +252,3 @@ appropriate for a read path that shouldn't leak `secrets.yaml` contents.
   `shell_command` failure detection in `audit_automations` - real checks,
   deliberately deferred pending more careful false-positive analysis rather
   than shipped unreliable.
-- The config-entry-based Template *helper* (UI-created `template:`
-  sensor/binary_sensor/number/select/switch/button/image/... helpers) -
-  the remaining piece of issue #13, deliberately split out of
-  `derived_sensor_manager.py` given the size of `template`'s own config
-  flow (see "Driving config/options flows generically" above). The YAML
-  side of the same ask is done - see `template_yaml_manager.py`.
