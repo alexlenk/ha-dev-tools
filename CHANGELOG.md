@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-08-22
+
+### Added
+- `list_template_entities`, `get_template_entity`, `create_template_entity`, `update_template_entity`, and `delete_template_entity` tools, closing the YAML half of issue #13's ask: entities defined via the modern, trigger-based `template:` YAML syntax were invisible to every tool here, same gap as the derived-sensor helpers added in 2.3.0 but for a mechanism with no config-entry involved at all. Layout-aware and package-safe the same way `get_automation`/`write_automation` are - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file before reading or writing anything, and refuses to guess when a `unique_id` is defined more than once. Reads span both `configuration.yaml` and packages; writes are narrower on purpose - new entities always go into an existing package (`configuration.yaml` itself is read-only under this integration's default security policy), and updating/deleting an entity that lives in `configuration.yaml` fails with a clear permission error rather than attempting it. Every write requires the entity to have its own `unique_id`, since that's the only stable way to address one again afterward. See `template_yaml_manager.py` and docs/ARCHITECTURE.md's new "Layout-aware YAML template: entities" section for the full design. The config-entry-based Template *helper* (the UI-created kind) is still not covered - tracked in ARCHITECTURE.md's "Still open" as the one remaining piece of #13.
+
 ## [2.3.1] - 2026-08-22
 
 ### Fixed

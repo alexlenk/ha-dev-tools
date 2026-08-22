@@ -166,6 +166,11 @@ async def test_dev_tools_real_tools_registered(
         "update_derived_sensor",
         "delete_derived_sensor",
         "reload_derived_sensor",
+        "list_template_entities",
+        "get_template_entity",
+        "create_template_entity",
+        "update_template_entity",
+        "delete_template_entity",
         "get_dashboard",
         "write_dashboard",
     }

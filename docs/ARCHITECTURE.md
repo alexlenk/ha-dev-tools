@@ -47,6 +47,8 @@ the actual source rather than assumed:
 | Dashboards, YAML mode | Raw `ui-lovelace.yaml` | `lovelace/config/save` explicitly raises "Not supported" for YAML-mode dashboards - not implemented here, read-only for that case |
 | Helpers (`input_boolean` et al., `counter`, `timer`, `schedule`) | WS `<domain>/{list,create,update,delete}` | Fully API-sufficient, generic across all nine domains |
 | Derived-sensor helpers (Min/Max, Utility Meter, Integration/Riemann sum, Statistics, Threshold, Derivative, Filter) | `hass.config_entries.flow`/`.options` (real config/options flow) | These are config-entry integrations (`SchemaConfigFlowHandler`), not the flat storage-collection pattern above - no single generic WS command covers them. See "Driving config/options flows generically" below |
+| YAML `template:` entities, default file | Direct YAML file read/write (`configuration.yaml`) + `template.reload` | No REST/WS API scoped to individual template entities exists; unlike automations, `configuration.yaml` is this integration's own read-only default, so only reads land here |
+| YAML `template:` entities, packages layout | Direct YAML file read/write (`packages/*.yaml`) + `template.reload` | Same file-layout-resolution problem `write_automation` solves, applied to `template:` blocks - see "Layout-aware YAML template: entities" below |
 | Blueprints | WS `blueprint/{list,import,save,delete,substitute}` | Has a real API - not yet implemented here (`get_automation` currently returns `use_blueprint:` references unexpanded) |
 
 ## Package provenance: the automation-write safety rule
@@ -134,7 +136,60 @@ Template is deliberately out of scope for `derived_sensor_manager.py` -
 its `config_flow.py` alone is roughly 900 lines covering many entity
 platforms (sensor, binary_sensor, number, select, switch, button, image,
 ...), warranting its own dedicated module rather than folding into this
-one. See "Still open" below.
+one. See "Still open" below - the config-entry-based Template *helper*
+specifically is still unimplemented, but the YAML side is not (see next
+section).
+
+## Layout-aware YAML `template:` entities (`template_yaml_manager.py`)
+
+Issue #13's other ask alongside the derived-sensor helpers: entities
+defined via the modern, trigger-based `template:` YAML syntax (not the
+deprecated `sensor: - platform: template` legacy form, and not the
+config-entry Template *helper* above either). Reuses
+`automation_manager.py`'s provenance-resolution pattern - scan every
+candidate file, resolve exactly one location, refuse to guess on
+ambiguity - with one structural difference: `template:` entries have no
+default include-file convention the way `automation: !include
+automations.yaml` does, so `configuration.yaml` itself is always a read
+candidate, not just `packages/*.yaml`.
+
+Reads and writes are scoped differently on purpose. `configuration.yaml`
+is in `DEFAULT_READ_ONLY_PATHS`, not `DEFAULT_WRITE_PATHS` - so an entity
+defined directly in `configuration.yaml` can be listed/read same as any
+other, but `create_entity` always targets an existing `packages/*.yaml`
+file (`package` is a required argument, no default-file fallback the way
+`write_automation` has one), and `update_entity`/`delete_entity` on an
+entity that resolves to `configuration.yaml` fails with `FileManager`'s
+own `PermissionError` - the correct, intended outcome. This split only
+actually holds because `FileManager.write_file`/`delete_file` correctly
+enforce `OPERATION_WRITE` - building this module is what surfaced that
+they previously didn't (see CHANGELOG's `2.3.1` entry).
+
+Individual template entities have no HA-tracked identity the way an
+automation's `id:` does unless they set their own `unique_id:` -
+`create_entity`/`update_entity`/`delete_entity` all require one (`config`
+must include it for create; update/delete take it as the lookup key).
+Entities without a `unique_id` still show up in `list_entities`/`get_entity`
+reads, just aren't addressable for writes - the same "refuse to guess"
+philosophy as `DuplicateAutomationIdError`, applied to "which entity"
+instead of "which file" (`DuplicateTemplateUniqueIdError` is its
+counterpart here). `create_entity` always creates a brand new `template:`
+block for the entity being created rather than trying to merge into an
+existing block that might share triggers/conditions/variables with
+unrelated entities - simpler and unambiguous, at some cost to YAML
+compactness versus a human hand-authoring several entities under one
+shared trigger block.
+
+Custom HA YAML tags (`!secret`, `!include`, ...) can legitimately appear
+inside a template entity's own config (e.g. an availability template built
+from a `!secret` value) - `ruamel.yaml`'s round-trip loader parses these
+into `TaggedScalar` objects rather than erroring, confirmed directly
+against a realistic `configuration.yaml` fixture containing
+`automation: !include automations.yaml` alongside a `template:` block.
+`_to_plain()` converts any such tag into a plain, JSON-safe string (its
+tag name plus literal argument, e.g. `"!secret my_secret_template"`) for
+list/get responses - it never resolves what the tag actually points to,
+appropriate for a read path that shouldn't leak `secrets.yaml` contents.
 
 ## What was deliberately not built
 
@@ -166,11 +221,9 @@ one. See "Still open" below.
   `shell_command` failure detection in `audit_automations` - real checks,
   deliberately deferred pending more careful false-positive analysis rather
   than shipped unreliable.
-- Template helpers (config-entry-based `template:` sensor/binary_sensor/
-  number/select/switch/button/image/... helpers) and YAML-defined
-  `template:` entries in `configuration.yaml`/`packages/*.yaml` - issue
-  #13's other big ask, deliberately split out of `derived_sensor_manager.py`
-  given the size of `template`'s own config flow (see "Driving config/
-  options flows generically" above). The YAML side would reuse
-  `automation_manager.py`'s provenance-resolution pattern rather than
-  needing new machinery of its own.
+- The config-entry-based Template *helper* (UI-created `template:`
+  sensor/binary_sensor/number/select/switch/button/image/... helpers) -
+  the remaining piece of issue #13, deliberately split out of
+  `derived_sensor_manager.py` given the size of `template`'s own config
+  flow (see "Driving config/options flows generically" above). The YAML
+  side of the same ask is done - see `template_yaml_manager.py`.

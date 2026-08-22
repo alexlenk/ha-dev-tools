@@ -54,6 +54,11 @@ from .helper_manager import (
 from .history_manager import RecorderNotAvailableError
 from .log_manager import LogFilters, LogManager
 from .supervisor_manager import SupervisorNotAvailableError
+from .template_yaml_manager import (
+    DuplicateTemplateUniqueIdError,
+    TemplateEntityNotFoundError,
+    TemplateYamlManager,
+)
 from .ws_call import WebSocketCommandError
 
 API_ID = "dev_tools"
@@ -1036,6 +1041,225 @@ class ReloadDerivedSensorTool(GatedTool):
             return _tool_error(exc)
 
 
+class ListTemplateEntitiesTool(GatedTool):
+    """List YAML `template:` entities across configuration.yaml and packages."""
+
+    name = "list_template_entities"
+    description = (
+        "List every entity defined via YAML `template:` blocks (the "
+        "modern, trigger-based syntax), across configuration.yaml and "
+        "every packages/*.yaml file - the other half of issue #13's ask "
+        "alongside list_derived_sensors, for Template sensors/binary_sensors/"
+        "etc. specifically. Covers all template-supported platforms "
+        "(sensor, binary_sensor, number, switch, ...). Entities without "
+        "their own unique_id are listed here too, but note they aren't "
+        "addressable by create/update/delete_template_entity - only ones "
+        "with a unique_id are. Does not cover the config-entry-based "
+        "Template *helper* (UI-created) - not yet supported by any tool "
+        "here."
+    )
+    parameters = vol.Schema({})
+
+    def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
+        """Init with the TemplateYamlManager backing this tool."""
+        self._manager = template_yaml_manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List every template: entity."""
+        return {"items": await self._manager.list_entities()}
+
+
+class GetTemplateEntityTool(GatedTool):
+    """Read one YAML template: entity's config by unique_id."""
+
+    name = "get_template_entity"
+    description = (
+        "Read a YAML `template:` entity's current config by its unique_id "
+        "(from list_template_entities)."
+    )
+    parameters = vol.Schema({vol.Required("unique_id"): str})
+
+    def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
+        """Init with the TemplateYamlManager backing this tool."""
+        self._manager = template_yaml_manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Read the template entity."""
+        try:
+            location, config = await self._manager.get_entity(
+                tool_input.tool_args["unique_id"]
+            )
+        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
+            return _tool_error(exc)
+        return {
+            "file_path": location.file_path,
+            "is_package": location.is_package,
+            "platform": location.platform,
+            "config": config,
+        }
+
+
+class CreateTemplateEntityTool(WriteGatedTool):
+    """Create a new YAML template: entity in its own new template: block."""
+
+    name = "create_template_entity"
+    description = (
+        "Create a new YAML `template:` entity (sensor, binary_sensor, "
+        "number, switch, ...) - always in a brand new template: block, "
+        "never merged into an existing one (see get_template_entity's "
+        "sibling entities if you want to hand-craft a shared trigger "
+        "block instead). 'config' must include a 'unique_id' - required "
+        "for every write this tool family does, since a template entity "
+        "otherwise has no way to be addressed again by update/"
+        "delete_template_entity. 'package' must name an existing "
+        "packages/*.yaml file (relative to packages/) - required, no "
+        "default-file fallback: configuration.yaml itself is read-only "
+        "under this integration's default security policy, so new "
+        "entities can only be created in a package. 'triggers' is "
+        "optional (a list of trigger dicts) for the new block."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("platform"): str,
+            vol.Required("config"): dict,
+            vol.Required("package"): str,
+            vol.Optional("triggers"): list,
+        }
+    )
+
+    def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
+        """Init with the TemplateYamlManager backing this tool."""
+        self._manager = template_yaml_manager
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Create the template entity."""
+        args = tool_input.tool_args
+        try:
+            location, reloaded = await self._manager.create_entity(
+                args["platform"],
+                args["config"],
+                package=args["package"],
+                triggers=args.get("triggers"),
+            )
+        except (
+            ValueError,
+            DuplicateTemplateUniqueIdError,
+            TemplateEntityNotFoundError,
+        ) as exc:
+            return _tool_error(exc)
+        return {
+            "file_path": location.file_path,
+            "platform": location.platform,
+            "reloaded": reloaded,
+        }
+
+
+class UpdateTemplateEntityTool(WriteGatedTool):
+    """Update an existing YAML template: entity's config in place."""
+
+    name = "update_template_entity"
+    description = (
+        "Update an existing YAML `template:` entity's config by its "
+        "unique_id (from list_template_entities). Only that entity's own "
+        "dict is replaced - sibling entities and the block's triggers/"
+        "conditions/variables are left untouched. To change an entity's "
+        "unique_id, use delete_template_entity + create_template_entity "
+        "instead (a rename is really two operations, not supported "
+        "directly here). Fails with a permission error if the entity "
+        "lives in configuration.yaml itself, which is read-only under "
+        "this integration's default security policy - only "
+        "package-defined entities can be updated this way."
+    )
+    parameters = vol.Schema(
+        {vol.Required("unique_id"): str, vol.Required("config"): dict}
+    )
+
+    def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
+        """Init with the TemplateYamlManager backing this tool."""
+        self._manager = template_yaml_manager
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Update the template entity."""
+        args = tool_input.tool_args
+        try:
+            location, reloaded = await self._manager.update_entity(
+                args["unique_id"], args["config"]
+            )
+        except (
+            ValueError,
+            TemplateEntityNotFoundError,
+            DuplicateTemplateUniqueIdError,
+        ) as exc:
+            return _tool_error(exc)
+        return {
+            "file_path": location.file_path,
+            "platform": location.platform,
+            "reloaded": reloaded,
+        }
+
+
+class DeleteTemplateEntityTool(WriteGatedTool):
+    """Delete a YAML template: entity by unique_id."""
+
+    name = "delete_template_entity"
+    description = (
+        "Delete a YAML `template:` entity by its unique_id. Cleans up "
+        "after itself - removes the platform key if that empties it, and "
+        "the whole template: block if that empties it too. Same "
+        "read-only-configuration.yaml restriction as "
+        "update_template_entity."
+    )
+    parameters = vol.Schema({vol.Required("unique_id"): str})
+
+    def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
+        """Init with the TemplateYamlManager backing this tool."""
+        self._manager = template_yaml_manager
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete the template entity."""
+        try:
+            location, reloaded = await self._manager.delete_entity(
+                tool_input.tool_args["unique_id"]
+            )
+        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
+            return _tool_error(exc)
+        return {
+            "file_path": location.file_path,
+            "platform": location.platform,
+            "reloaded": reloaded,
+        }
+
+
 class GetDashboardTool(GatedTool):
     """Read a dashboard's config - works in both storage and YAML mode."""
 
@@ -1139,6 +1363,7 @@ class DevToolsAPI(llm.API):
 
     log_manager: LogManager
     automation_manager: AutomationManager
+    template_yaml_manager: TemplateYamlManager
 
     @override
     async def async_get_api_instance(
@@ -1175,6 +1400,11 @@ class DevToolsAPI(llm.API):
                 UpdateDerivedSensorTool(),
                 DeleteDerivedSensorTool(),
                 ReloadDerivedSensorTool(),
+                ListTemplateEntitiesTool(self.template_yaml_manager),
+                GetTemplateEntityTool(self.template_yaml_manager),
+                CreateTemplateEntityTool(self.template_yaml_manager),
+                UpdateTemplateEntityTool(self.template_yaml_manager),
+                DeleteTemplateEntityTool(self.template_yaml_manager),
                 GetDashboardTool(),
                 WriteDashboardTool(),
             ],
@@ -1186,6 +1416,7 @@ def async_register(
     *,
     log_manager: LogManager,
     automation_manager: AutomationManager,
+    template_yaml_manager: TemplateYamlManager,
 ) -> Any:
     """Register the dev_tools API and return its unsubscribe callable."""
     return llm.async_register_api(
@@ -1196,5 +1427,6 @@ def async_register(
             name=API_NAME,
             log_manager=log_manager,
             automation_manager=automation_manager,
+            template_yaml_manager=template_yaml_manager,
         ),
     )
