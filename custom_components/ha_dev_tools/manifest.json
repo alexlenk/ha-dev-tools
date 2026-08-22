@@ -15,5 +15,5 @@
     "ruamel.yaml>=0.18.0"
   ],
   "single_config_entry": true,
-  "version": "2.2.2"
+  "version": "2.3.0"
 }

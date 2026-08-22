@@ -25,6 +25,7 @@ from . import (
     audit_manager,
     config_tools,
     dashboard_manager,
+    derived_sensor_manager,
     entity_manager,
     helper_manager,
     history_manager,
@@ -38,6 +39,13 @@ from .automation_manager import (
 )
 from .const import DOMAIN
 from .dashboard_manager import YamlModeDashboardError
+from .derived_sensor_manager import (
+    DERIVED_SENSOR_DOMAINS,
+    DerivedSensorNotFoundError,
+    FlowAbortedError,
+    FlowStepRequiredError,
+    InvalidDerivedSensorDomainError,
+)
 from .helper_manager import (
     HELPER_DOMAINS,
     InvalidHelperDomainError,
@@ -61,6 +69,27 @@ API_PROMPT = (
 def _tool_error(exc: Exception) -> JsonObjectType:
     """Uniform error payload for tool responses - never let a raw exception escape a Tool."""
     return {"error": str(exc), "error_type": type(exc).__name__}
+
+
+def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
+    """Structured (not error) payload for a config/options flow step needing input.
+
+    Deliberately not routed through _tool_error - that would collapse
+    exc.step_id/exc.schema into a plain string and lose exactly the
+    information a caller needs to retry correctly.
+    """
+    return {
+        "needs_input": True,
+        "step_id": exc.step_id,
+        "schema": exc.schema,
+        "errors": exc.errors,
+        "note": (
+            f"Supply this step's fields under steps['{exc.step_id}'] (merged "
+            "with any steps already supplied) and retry. Some domains have "
+            "more than one step - this may repeat with a different step_id "
+            "until the flow finishes."
+        ),
+    }
 
 
 def _parse_datetime(value: str, *, field: str) -> Any:
@@ -809,6 +838,204 @@ class DeleteHelperTool(WriteGatedTool):
         return {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
 
 
+def _derived_sensor_domain_schema() -> vol.Schema:
+    return vol.In(DERIVED_SENSOR_DOMAINS)
+
+
+class ListDerivedSensorsTool(GatedTool):
+    """List config-entry-based derived/calculated sensor helpers."""
+
+    name = "list_derived_sensors"
+    description = (
+        "List calculated/derived sensor helpers - Min/Max, Utility Meter, "
+        "Integration (Riemann sum), Statistics, Threshold, Derivative, and "
+        "Filter - a second helper family alongside list_helpers' nine "
+        "domains, implemented as config entries rather than storage items. "
+        "Omit domain to list across all seven. Does not cover Template "
+        "helpers or YAML-defined template: sensors - not yet supported by "
+        "any tool here."
+    )
+    parameters = vol.Schema({vol.Optional("domain"): _derived_sensor_domain_schema()})
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List derived-sensor entries, optionally scoped to one domain."""
+        try:
+            items = derived_sensor_manager.list_derived_sensors(
+                hass, tool_input.tool_args.get("domain")
+            )
+        except InvalidDerivedSensorDomainError as exc:
+            return _tool_error(exc)
+        return {"items": items}
+
+
+class GetDerivedSensorTool(GatedTool):
+    """Read one derived-sensor config entry's current config by id."""
+
+    name = "get_derived_sensor"
+    description = (
+        "Read a calculated/derived sensor helper's current config by its "
+        "config entry id (from list_derived_sensors)."
+    )
+    parameters = vol.Schema({vol.Required("entry_id"): str})
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Read the derived-sensor entry."""
+        try:
+            return derived_sensor_manager.get_derived_sensor(
+                hass, tool_input.tool_args["entry_id"]
+            )
+        except DerivedSensorNotFoundError as exc:
+            return _tool_error(exc)
+
+
+_DERIVED_SENSOR_STEPS_DESCRIPTION = (
+    "Home Assistant drives creating/editing one of these through a real "
+    "config/options flow, not a flat field dict - some (statistics) are a "
+    "fixed multi-step sequence, and others (filter) branch into a "
+    "different step depending on an earlier answer. Call with steps={} (or "
+    "omitted) first: the response comes back with needs_input=true, the "
+    "current step_id, and that step's field schema. Fill those fields in "
+    "under steps[step_id] and call again - repeat, accumulating entries in "
+    "steps, until the call returns the created/updated entry instead of "
+    "needs_input."
+)
+
+
+class CreateDerivedSensorTool(WriteGatedTool):
+    """Create a new derived-sensor config entry by driving its real config flow."""
+
+    name = "create_derived_sensor"
+    description = (
+        "Create a new calculated/derived sensor helper (min_max, "
+        "utility_meter, integration [Riemann sum], statistics, threshold, "
+        "derivative, or filter) via the same config flow the UI's Add "
+        "Helper wizard uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("domain"): _derived_sensor_domain_schema(),
+            vol.Optional("steps"): dict,
+        }
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Drive the config flow forward with the given steps."""
+        args = tool_input.tool_args
+        try:
+            return await derived_sensor_manager.create_derived_sensor(
+                hass, args["domain"], args.get("steps") or {}
+            )
+        except FlowStepRequiredError as exc:
+            return _flow_step_required_payload(exc)
+        except (InvalidDerivedSensorDomainError, FlowAbortedError) as exc:
+            return _tool_error(exc)
+
+
+class UpdateDerivedSensorTool(WriteGatedTool):
+    """Update an existing derived-sensor entry by driving its real options flow."""
+
+    name = "update_derived_sensor"
+    description = (
+        "Update an existing calculated/derived sensor helper's config by "
+        "its entry id (from list_derived_sensors), via the same options "
+        "flow the UI's helper edit page uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("entry_id"): str,
+            vol.Optional("steps"): dict,
+        }
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Drive the options flow forward with the given steps."""
+        args = tool_input.tool_args
+        try:
+            return await derived_sensor_manager.update_derived_sensor(
+                hass, args["entry_id"], args.get("steps") or {}
+            )
+        except FlowStepRequiredError as exc:
+            return _flow_step_required_payload(exc)
+        except (DerivedSensorNotFoundError, FlowAbortedError) as exc:
+            return _tool_error(exc)
+
+
+class DeleteDerivedSensorTool(WriteGatedTool):
+    """Delete a derived-sensor config entry by id."""
+
+    name = "delete_derived_sensor"
+    description = "Delete a calculated/derived sensor helper by its entry id."
+    parameters = vol.Schema({vol.Required("entry_id"): str})
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete the derived-sensor entry."""
+        try:
+            return await derived_sensor_manager.delete_derived_sensor(
+                hass, tool_input.tool_args["entry_id"]
+            )
+        except DerivedSensorNotFoundError as exc:
+            return _tool_error(exc)
+
+
+class ReloadDerivedSensorTool(GatedTool):
+    """Force a derived-sensor entry to recompute without changing its options."""
+
+    name = "reload_derived_sensor"
+    description = (
+        "Reload a calculated/derived sensor helper by its entry id, without "
+        "changing any of its options - e.g. after an entity it reads from "
+        "was reconfigured elsewhere. update_derived_sensor already reloads "
+        "automatically when it changes options; use this only when nothing "
+        "about the helper itself needs to change."
+    )
+    parameters = vol.Schema({vol.Required("entry_id"): str})
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Reload the derived-sensor entry."""
+        try:
+            return await derived_sensor_manager.reload_derived_sensor(
+                hass, tool_input.tool_args["entry_id"]
+            )
+        except DerivedSensorNotFoundError as exc:
+            return _tool_error(exc)
+
+
 class GetDashboardTool(GatedTool):
     """Read a dashboard's config - works in both storage and YAML mode."""
 
@@ -942,6 +1169,12 @@ class DevToolsAPI(llm.API):
                 CreateHelperTool(),
                 UpdateHelperTool(),
                 DeleteHelperTool(),
+                ListDerivedSensorsTool(),
+                GetDerivedSensorTool(),
+                CreateDerivedSensorTool(),
+                UpdateDerivedSensorTool(),
+                DeleteDerivedSensorTool(),
+                ReloadDerivedSensorTool(),
                 GetDashboardTool(),
                 WriteDashboardTool(),
             ],

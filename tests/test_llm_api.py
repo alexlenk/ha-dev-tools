@@ -43,14 +43,25 @@ from pytest_homeassistant_custom_component.common import MockUser
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.const import OPT_DRY_RUN
+from custom_components.ha_dev_tools.derived_sensor_manager import (
+    DerivedSensorNotFoundError,
+    FlowStepRequiredError,
+    InvalidDerivedSensorDomainError,
+)
 from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
+    CreateDerivedSensorTool,
+    DeleteDerivedSensorTool,
     DevToolsPingTool,
     FindEntitiesTool,
+    GetDerivedSensorTool,
     GetEntityHistoryTool,
     GetLogbookTool,
+    ListDerivedSensorsTool,
+    ReloadDerivedSensorTool,
+    UpdateDerivedSensorTool,
     WriteGatedTool,
 )
 
@@ -149,6 +160,12 @@ async def test_dev_tools_real_tools_registered(
         "create_helper",
         "update_helper",
         "delete_helper",
+        "list_derived_sensors",
+        "get_derived_sensor",
+        "create_derived_sensor",
+        "update_derived_sensor",
+        "delete_derived_sensor",
+        "reload_derived_sensor",
         "get_dashboard",
         "write_dashboard",
     }
@@ -419,3 +436,211 @@ async def test_get_logbook_tool_rejects_invalid_end_time(hass: HomeAssistant):
     )
 
     assert result["error_type"] == "ValueError"
+
+
+# --- Derived-sensor tools -----------------------------------------------
+#
+# The real config/options-flow driving is already covered end to end by
+# test_derived_sensor_manager.py (and test_derived_sensor_manager_recorder.py
+# for the one domain that needs a real recorder) against real HA components.
+# What's specific to these Tool classes and not covered there is the thin
+# adapter layer: argument plumbing, and turning FlowStepRequiredError into
+# the needs_input payload (not a _tool_error) versus the other exceptions
+# into a _tool_error.
+
+
+@pytest.mark.asyncio
+async def test_list_derived_sensors_tool_calls_manager(hass: HomeAssistant):
+    tool = ListDerivedSensorsTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.list_derived_sensors",
+        return_value=[{"entry_id": "abc", "domain": "min_max"}],
+    ) as mock_list:
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="list_derived_sensors", tool_args={"domain": "min_max"}
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"items": [{"entry_id": "abc", "domain": "min_max"}]}
+    mock_list.assert_called_once_with(hass, "min_max")
+
+
+@pytest.mark.asyncio
+async def test_list_derived_sensors_tool_rejects_invalid_domain(hass: HomeAssistant):
+    tool = ListDerivedSensorsTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.list_derived_sensors",
+        side_effect=InvalidDerivedSensorDomainError("bad domain"),
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="list_derived_sensors", tool_args={"domain": "min_max"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "InvalidDerivedSensorDomainError"
+
+
+@pytest.mark.asyncio
+async def test_get_derived_sensor_tool_calls_manager(hass: HomeAssistant):
+    tool = GetDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.get_derived_sensor",
+        return_value={"entry_id": "abc"},
+    ) as mock_get:
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"entry_id": "abc"}
+    mock_get.assert_called_once_with(hass, "abc")
+
+
+@pytest.mark.asyncio
+async def test_get_derived_sensor_tool_surfaces_not_found(hass: HomeAssistant):
+    tool = GetDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.get_derived_sensor",
+        side_effect=DerivedSensorNotFoundError("nope"),
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "DerivedSensorNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_create_derived_sensor_tool_calls_manager(hass: HomeAssistant):
+    tool = CreateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.create_derived_sensor",
+        AsyncMock(return_value={"entry_id": "abc", "domain": "min_max"}),
+    ) as mock_create:
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="create_derived_sensor",
+                tool_args={"domain": "min_max", "steps": {"user": {"name": "x"}}},
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"entry_id": "abc", "domain": "min_max"}
+    mock_create.assert_called_once_with(hass, "min_max", {"user": {"name": "x"}})
+
+
+@pytest.mark.asyncio
+async def test_create_derived_sensor_tool_needs_input_payload(hass: HomeAssistant):
+    """A FlowStepRequiredError becomes a structured needs_input payload, not a _tool_error."""
+    tool = CreateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.create_derived_sensor",
+        AsyncMock(
+            side_effect=FlowStepRequiredError(
+                "user", [{"name": "entity_id", "type": "string"}], None
+            )
+        ),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="create_derived_sensor", tool_args={"domain": "min_max"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["needs_input"] is True
+    assert result["step_id"] == "user"
+    assert result["schema"] == [{"name": "entity_id", "type": "string"}]
+    assert result["errors"] == {}
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_derived_sensor_tool_calls_manager(hass: HomeAssistant):
+    tool = UpdateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.update_derived_sensor",
+        AsyncMock(return_value={"entry_id": "abc"}),
+    ) as mock_update:
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_derived_sensor",
+                tool_args={"entry_id": "abc", "steps": {"init": {"type": "min"}}},
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"entry_id": "abc"}
+    mock_update.assert_called_once_with(hass, "abc", {"init": {"type": "min"}})
+
+
+@pytest.mark.asyncio
+async def test_update_derived_sensor_tool_surfaces_not_found(hass: HomeAssistant):
+    tool = UpdateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.update_derived_sensor",
+        AsyncMock(side_effect=DerivedSensorNotFoundError("nope")),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "DerivedSensorNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_delete_derived_sensor_tool_calls_manager(hass: HomeAssistant):
+    tool = DeleteDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.delete_derived_sensor",
+        AsyncMock(return_value={"deleted": True, "entry_id": "abc"}),
+    ) as mock_delete:
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"deleted": True, "entry_id": "abc"}
+    mock_delete.assert_called_once_with(hass, "abc")
+
+
+@pytest.mark.asyncio
+async def test_reload_derived_sensor_tool_calls_manager(hass: HomeAssistant):
+    tool = ReloadDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.reload_derived_sensor",
+        AsyncMock(return_value={"reloaded": True, "entry_id": "abc"}),
+    ) as mock_reload:
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="reload_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"reloaded": True, "entry_id": "abc"}
+    mock_reload.assert_called_once_with(hass, "abc")

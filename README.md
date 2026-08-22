@@ -69,11 +69,13 @@ repository.
 5. **Optional: turn on dry-run mode.** From this integration's card in
    Settings → Devices & Services, click **Configure** and enable dry-run.
    Every write tool (`write_automation`, `create_helper`/`update_helper`/
-   `delete_helper`, `write_dashboard`) then returns the exact input it would
-   have applied instead of actually applying it, so an agent's proposed
-   changes can be reviewed before you turn dry-run back off. Takes effect
-   immediately, no restart needed. Read-only tools and
-   `reload_domain`/`check_config` are unaffected either way.
+   `delete_helper`, `create_derived_sensor`/`update_derived_sensor`/
+   `delete_derived_sensor`, `write_dashboard`) then returns the exact input
+   it would have applied instead of actually applying it, so an agent's
+   proposed changes can be reviewed before you turn dry-run back off. Takes
+   effect immediately, no restart needed. Read-only tools and
+   `reload_domain`/`reload_derived_sensor`/`check_config` are unaffected
+   either way.
 
 ## Tools
 
@@ -92,6 +94,7 @@ repository.
 | Tool | What it does |
 |---|---|
 | `list_helpers` / `create_helper` / `update_helper` / `delete_helper` | CRUD for storage-defined helpers (`input_boolean`, `counter`, `timer`, ...) |
+| `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step. Template helpers and YAML `template:` sensors aren't covered yet |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction) |
 
 **Diagnose**
