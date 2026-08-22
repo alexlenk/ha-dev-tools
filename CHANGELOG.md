@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-22
+
+### Added
+- `list_derived_sensors`, `get_derived_sensor`, `create_derived_sensor`, `update_derived_sensor`, `delete_derived_sensor`, and `reload_derived_sensor` tools, covering the biggest gap flagged in issue #13: `list_helpers`/`create_helper`/`update_helper`/`delete_helper` only ever covered the nine flat storage-collection helper domains (`input_boolean`, `counter`, `timer`, ...) - a second, equally common helper family (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) was completely opaque to inspect or fix, despite showing up constantly in real configs as calculated/derived sensors. These are config-entry integrations, not storage items, so create/update drive the real config/options flow step by step rather than taking a flat config dict - call with no/partial `steps` first to discover the current step's fields from a `needs_input` response, then retry with them filled in, repeating for domains with more than one step (`statistics` is a fixed 3-step flow; `filter` branches into a different step depending on the filter type chosen). See `derived_sensor_manager.py` and docs/ARCHITECTURE.md's "Driving config/options flows generically" for the full design. Template helpers and YAML `template:` sensors - issue #13's other ask - are deliberately not covered yet, given the size of `template`'s own config flow; tracked in ARCHITECTURE.md's "Still open".
+
 ## [2.2.2] - 2026-08-21
 
 ### Fixed

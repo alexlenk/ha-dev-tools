@@ -46,6 +46,7 @@ the actual source rather than assumed:
 | Dashboards, storage mode | WS `lovelace/config`, `lovelace/config/save` | Fully sufficient |
 | Dashboards, YAML mode | Raw `ui-lovelace.yaml` | `lovelace/config/save` explicitly raises "Not supported" for YAML-mode dashboards - not implemented here, read-only for that case |
 | Helpers (`input_boolean` et al., `counter`, `timer`, `schedule`) | WS `<domain>/{list,create,update,delete}` | Fully API-sufficient, generic across all nine domains |
+| Derived-sensor helpers (Min/Max, Utility Meter, Integration/Riemann sum, Statistics, Threshold, Derivative, Filter) | `hass.config_entries.flow`/`.options` (real config/options flow) | These are config-entry integrations (`SchemaConfigFlowHandler`), not the flat storage-collection pattern above - no single generic WS command covers them. See "Driving config/options flows generically" below |
 | Blueprints | WS `blueprint/{list,import,save,delete,substitute}` | Has a real API - not yet implemented here (`get_automation` currently returns `use_blueprint:` references unexpanded) |
 
 ## Package provenance: the automation-write safety rule
@@ -92,6 +93,49 @@ admin enforcement, faking only the transport. `resolve_user()` resolves the
 real calling user from the MCP request's `LLMContext`, never a synthetic
 admin bypass, so admin-gated WS commands enforce against the real caller.
 
+## Driving config/options flows generically (derived-sensor helpers)
+
+Min/Max, Utility Meter, Integration (Riemann sum), Statistics, Threshold,
+Derivative, and Filter are each a real config-entry integration built on
+`homeassistant.helpers.schema_config_entry_flow.SchemaConfigFlowHandler` -
+confirmed by reading every one of these domains' own `config_flow.py` at
+this repo's pinned HA version. Their flows aren't uniformly single-step
+either: `statistics` is a fixed three-step sequence
+(`user` -> `state_characteristic` -> `options`), and `filter` branches into
+a different step (`lowpass`/`outlier`/`range`/...) depending on which
+filter type is chosen in its first step - the same shape a human fills out
+the real "Add Helper"/"Configure" wizard with, one step at a time.
+
+`derived_sensor_manager.py` drives this generically rather than hardcoding
+each domain's schema: it calls `hass.config_entries.flow.async_init`/
+`async_configure` (config flow, for create) or `.options.async_init`/
+`async_configure` (options flow, for update) in a loop, looking only at
+whatever step id the flow is currently on. When the caller hasn't supplied
+input for that step, it raises `FlowStepRequiredError` carrying the step's
+own schema - serialized the same way HA's own `config_entries` HTTP view
+does (`voluptuous_serialize.convert(schema, custom_serializer=
+cv.custom_serializer)`) - so a caller (the LLM) can discover each step's
+fields and retry, accumulating a `steps` dict keyed by step id until the
+flow finishes. This generalizes correctly across single-step, fixed
+multi-step, and branching flows alike without this integration needing to
+know any domain's fields in advance - see
+`tests/test_derived_sensor_manager.py` for all seven confirmed working
+this way (six directly; `filter` needs a real recorder as a dependency, so
+it's `tests/test_derived_sensor_manager_recorder.py` instead).
+
+All seven of these domains set `options_flow_reloads = True` on their
+`ConfigFlowHandler` (also confirmed by reading each one) - Home Assistant's
+own `OptionsFlowManager.async_finish_flow` already applies the new options
+to the entry and schedules a reload on a successful finish, so
+`update_derived_sensor` doesn't need to separately call
+`config_entries.async_reload` after a successful update.
+
+Template is deliberately out of scope for `derived_sensor_manager.py` -
+its `config_flow.py` alone is roughly 900 lines covering many entity
+platforms (sensor, binary_sensor, number, select, switch, button, image,
+...), warranting its own dedicated module rather than folding into this
+one. See "Still open" below.
+
 ## What was deliberately not built
 
 - **No custom transport, session, or auth code.** `mcp_server` provides
@@ -122,3 +166,11 @@ admin bypass, so admin-gated WS commands enforce against the real caller.
   `shell_command` failure detection in `audit_automations` - real checks,
   deliberately deferred pending more careful false-positive analysis rather
   than shipped unreliable.
+- Template helpers (config-entry-based `template:` sensor/binary_sensor/
+  number/select/switch/button/image/... helpers) and YAML-defined
+  `template:` entries in `configuration.yaml`/`packages/*.yaml` - issue
+  #13's other big ask, deliberately split out of `derived_sensor_manager.py`
+  given the size of `template`'s own config flow (see "Driving config/
+  options flows generically" above). The YAML side would reuse
+  `automation_manager.py`'s provenance-resolution pattern rather than
+  needing new machinery of its own.
