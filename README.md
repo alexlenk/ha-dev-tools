@@ -62,10 +62,10 @@ repository.
    minutes. See [docs/SECURITY.md](docs/SECURITY.md) for why this exists and
    exactly how it works - it's the single most important thing to understand
    before pointing an MCP client at this integration.
-4. **Connect an MCP client** (Claude Code, Claude Desktop, or any other MCP
-   client that supports Streamable HTTP) to
-   `https://<your-ha-instance>/api/mcp/dev_tools`, authenticated with a
-   normal Home Assistant admin long-lived access token as a Bearer token.
+4. **Connect an MCP client** to `https://<your-ha-instance>/api/mcp/dev_tools`,
+   authenticated with a normal Home Assistant admin long-lived access token as
+   a Bearer token - see [Connecting an MCP client](#connecting-an-mcp-client)
+   below for exactly how to do that in Claude Code and Claude Desktop.
 5. **Optional: turn on dry-run mode.** From this integration's card in
    Settings → Devices & Services, click **Configure** and enable dry-run.
    Every write tool (`write_automation`, `create_helper`/`update_helper`/
@@ -77,6 +77,54 @@ repository.
    effect immediately, no restart needed. Read-only tools and
    `reload_domain`/`reload_derived_sensor`/`check_config` are unaffected
    either way.
+
+## Connecting an MCP client
+
+This integration is a **remote** MCP server - Home Assistant's own `mcp_server`
+integration serves it over Streamable HTTP at
+`https://<your-ha-instance>/api/mcp/dev_tools`, authenticated with a Bearer
+token (a normal Home Assistant admin long-lived access token, created under
+your HA profile's **Security** tab). It is not a local/stdio server, so it
+doesn't go through `claude_desktop_config.json`-style local server setup, and
+it doesn't use OAuth - which changes what "add an MCP server" means in each
+client:
+
+- **Claude Code** (CLI) supports remote HTTP servers with custom headers
+  directly, so a Bearer token works as-is:
+
+  ```bash
+  claude mcp add --transport http ha-dev-tools \
+    https://<your-ha-instance>/api/mcp/dev_tools \
+    --header "Authorization: Bearer <your-long-lived-access-token>" \
+    --scope user
+  ```
+
+  `--scope user` makes it available in every project rather than just the
+  current one. Run `claude mcp list` afterward to confirm it shows as
+  connected.
+
+- **Claude Desktop and claude.ai** connect to remote servers only through
+  **Settings → Connectors → Add custom connector**, which has two problems
+  for a typical home HA setup, not just one:
+  - That flow is built around OAuth - there's no field in it for a static
+    Bearer token or API key for an individual account. (An org-admin
+    `static_headers` connector option exists on some plans and can carry a
+    fixed `Authorization` header instead, but that's not available to a
+    regular Pro account.)
+  - Separately, the connector doesn't connect from your Desktop app's own
+    network the way a local/stdio server would - it's opened from Anthropic's
+    cloud infrastructure. So the URL also has to be reachable on the public
+    internet over HTTPS with a valid (non-self-signed) certificate. A plain
+    LAN address or `homeassistant.local` won't work even with auth solved;
+    it would need to already be exposed publicly, e.g. via Nabu Casa's
+    remote UI or your own reverse proxy with a real certificate.
+
+  Between those two, Claude Desktop generally can't be pointed at this
+  integration directly - use Claude Code instead.
+
+- Any other MCP client that supports Streamable HTTP with custom request
+  headers (not just OAuth) can connect the same way as Claude Code: point it
+  at the URL above and set an `Authorization: Bearer <token>` header.
 
 ## Tools
 
