@@ -92,7 +92,16 @@ alongside it, for web-based clients that require it. That advertisement
 matters for setup, covered below.
 
 - **Claude Code** (CLI) supports remote HTTP servers with custom headers
-  directly, so in principle a Bearer token works as-is:
+  directly, so a Bearer token works as-is - **on a reasonably current
+  version**. `mcp_server`'s RFC 9728 metadata means Claude Code sees this
+  server advertising OAuth, and older Claude Code releases had a bug where
+  that caused the client to ignore a configured `--header` and try to
+  auto-negotiate OAuth instead, failing with `Incompatible auth server: does
+  not support dynamic client registration`. If you hit that error, run
+  `claude update` first and retry - versions this was tested against
+  (2.1.x-era) use the configured header and only report a clean connection
+  failure if the server itself rejects it, rather than falling back to
+  OAuth. Then add the server:
 
   ```bash
   claude mcp add --transport http ha-dev-tools \
@@ -101,15 +110,13 @@ matters for setup, covered below.
     --scope user
   ```
 
-  In practice, as of mid-2026 this often fails with `Incompatible auth
-  server: does not support dynamic client registration` - an
-  [open Claude Code bug](https://github.com/anthropics/claude-code/issues/38102)
-  where the client ignores your `--header` and tries to auto-negotiate OAuth
-  whenever a server advertises it, which `mcp_server`'s RFC 9728 metadata
-  does even though the token is all it actually needs. If you hit that error,
-  route through the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote)
-  proxy instead, which sends the header directly rather than following OAuth
-  discovery - add this to `.mcp.json` (or the equivalent user-scoped config):
+  Run `claude mcp list` afterward to confirm it shows as connected.
+
+  If updating doesn't fix it, fall back to routing through the
+  [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) proxy, which sends
+  the header directly instead of going through Claude Code's own OAuth
+  discovery - add this to `.mcp.json` (or the equivalent user-scoped config)
+  instead of using `claude mcp add`:
 
   ```json
   {
@@ -126,10 +133,6 @@ matters for setup, covered below.
     }
   }
   ```
-
-  Run `claude mcp list` afterward to confirm it shows as connected. Once the
-  upstream Claude Code bug is fixed, the plain `claude mcp add --header`
-  command above should work without the proxy.
 
 - **Claude Desktop and claude.ai** connect to remote servers only through
   **Settings → Connectors → Add custom connector**, which has two problems
