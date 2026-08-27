@@ -104,13 +104,23 @@ client:
   connected.
 
 - **Claude Desktop and claude.ai** connect to remote servers only through
-  **Settings → Connectors → Add custom connector**, and that flow is built
-  around OAuth - there's no field in it for a static Bearer token or API key
-  for an individual account. Since `mcp_server` only supports Bearer-token
-  auth, Claude Desktop generally can't be pointed at this integration
-  directly. If your organization is on a plan with the `static_headers`
-  connector option, that can carry a fixed `Authorization` header instead -
-  otherwise, use Claude Code.
+  **Settings → Connectors → Add custom connector**, which has two problems
+  for a typical home HA setup, not just one:
+  - That flow is built around OAuth - there's no field in it for a static
+    Bearer token or API key for an individual account. (An org-admin
+    `static_headers` connector option exists on some plans and can carry a
+    fixed `Authorization` header instead, but that's not available to a
+    regular Pro account.)
+  - Separately, the connector doesn't connect from your Desktop app's own
+    network the way a local/stdio server would - it's opened from Anthropic's
+    cloud infrastructure. So the URL also has to be reachable on the public
+    internet over HTTPS with a valid (non-self-signed) certificate. A plain
+    LAN address or `homeassistant.local` won't work even with auth solved;
+    it would need to already be exposed publicly, e.g. via Nabu Casa's
+    remote UI or your own reverse proxy with a real certificate.
+
+  Between those two, Claude Desktop generally can't be pointed at this
+  integration directly - use Claude Code instead.
 
 - Any other MCP client that supports Streamable HTTP with custom request
   headers (not just OAuth) can connect the same way as Claude Code: point it
