@@ -25,6 +25,9 @@ repository.
   Python 3.14.2+.
 - The `mcp_server` integration, configured to expose the `dev_tools` API (see
   Setup below).
+- If connecting with Claude Code, **Claude Code 2.1 or newer** - it's the
+  release line that correctly prioritizes a configured Bearer token over
+  `mcp_server`'s OAuth discovery metadata. Run `claude update` if unsure.
 
 ## Installation
 
@@ -91,17 +94,8 @@ even though `mcp_server` also *advertises* OAuth discovery metadata (RFC 9728)
 alongside it, for web-based clients that require it. That advertisement
 matters for setup, covered below.
 
-- **Claude Code** (CLI) supports remote HTTP servers with custom headers
-  directly, so a Bearer token works as-is - **on a reasonably current
-  version**. `mcp_server`'s RFC 9728 metadata means Claude Code sees this
-  server advertising OAuth, and older Claude Code releases had a bug where
-  that caused the client to ignore a configured `--header` and try to
-  auto-negotiate OAuth instead, failing with `Incompatible auth server: does
-  not support dynamic client registration`. If you hit that error, run
-  `claude update` first and retry - versions this was tested against
-  (2.1.x-era) use the configured header and only report a clean connection
-  failure if the server itself rejects it, rather than falling back to
-  OAuth. Then add the server:
+- **Claude Code** (CLI, 2.1+ - see Requirements) supports remote HTTP
+  servers with custom headers directly, so a Bearer token works as-is:
 
   ```bash
   claude mcp add --transport http ha-dev-tools \
@@ -111,28 +105,6 @@ matters for setup, covered below.
   ```
 
   Run `claude mcp list` afterward to confirm it shows as connected.
-
-  If updating doesn't fix it, fall back to routing through the
-  [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) proxy, which sends
-  the header directly instead of going through Claude Code's own OAuth
-  discovery - add this to `.mcp.json` (or the equivalent user-scoped config)
-  instead of using `claude mcp add`:
-
-  ```json
-  {
-    "mcpServers": {
-      "ha-dev-tools": {
-        "command": "npx",
-        "args": [
-          "-y", "mcp-remote",
-          "https://<your-ha-instance>/api/mcp/dev_tools",
-          "--header", "Authorization:${AUTH_HEADER}"
-        ],
-        "env": { "AUTH_HEADER": "Bearer <your-long-lived-access-token>" }
-      }
-    }
-  }
-  ```
 
 - **Claude Desktop and claude.ai** connect to remote servers only through
   **Settings → Connectors → Add custom connector**, which has two problems
