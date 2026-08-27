@@ -85,12 +85,14 @@ integration serves it over Streamable HTTP at
 `https://<your-ha-instance>/api/mcp/dev_tools`, authenticated with a Bearer
 token (a normal Home Assistant admin long-lived access token, created under
 your HA profile's **Security** tab). It is not a local/stdio server, so it
-doesn't go through `claude_desktop_config.json`-style local server setup, and
-it doesn't use OAuth - which changes what "add an MCP server" means in each
-client:
+doesn't go through `claude_desktop_config.json`-style local server setup - and
+the token, not OAuth, is the auth mechanism actually meant to be used here,
+even though `mcp_server` also *advertises* OAuth discovery metadata (RFC 9728)
+alongside it, for web-based clients that require it. That advertisement
+matters for setup, covered below.
 
 - **Claude Code** (CLI) supports remote HTTP servers with custom headers
-  directly, so a Bearer token works as-is:
+  directly, so in principle a Bearer token works as-is:
 
   ```bash
   claude mcp add --transport http ha-dev-tools \
@@ -99,9 +101,35 @@ client:
     --scope user
   ```
 
-  `--scope user` makes it available in every project rather than just the
-  current one. Run `claude mcp list` afterward to confirm it shows as
-  connected.
+  In practice, as of mid-2026 this often fails with `Incompatible auth
+  server: does not support dynamic client registration` - an
+  [open Claude Code bug](https://github.com/anthropics/claude-code/issues/38102)
+  where the client ignores your `--header` and tries to auto-negotiate OAuth
+  whenever a server advertises it, which `mcp_server`'s RFC 9728 metadata
+  does even though the token is all it actually needs. If you hit that error,
+  route through the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote)
+  proxy instead, which sends the header directly rather than following OAuth
+  discovery - add this to `.mcp.json` (or the equivalent user-scoped config):
+
+  ```json
+  {
+    "mcpServers": {
+      "ha-dev-tools": {
+        "command": "npx",
+        "args": [
+          "-y", "mcp-remote",
+          "https://<your-ha-instance>/api/mcp/dev_tools",
+          "--header", "Authorization:${AUTH_HEADER}"
+        ],
+        "env": { "AUTH_HEADER": "Bearer <your-long-lived-access-token>" }
+      }
+    }
+  }
+  ```
+
+  Run `claude mcp list` afterward to confirm it shows as connected. Once the
+  upstream Claude Code bug is fixed, the plain `claude mcp add --header`
+  command above should work without the proxy.
 
 - **Claude Desktop and claude.ai** connect to remote servers only through
   **Settings → Connectors → Add custom connector**, which has two problems
