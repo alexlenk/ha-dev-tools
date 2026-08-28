@@ -51,7 +51,14 @@ repository.
    yet.
 2. **Settings → Devices & Services → Add Integration → Model Context Protocol
    Server** (Home Assistant's own built-in integration, not part of this
-   repo). In its setup, add `dev_tools` to the exposed APIs.
+   repo). In its setup, add `dev_tools` to the exposed APIs. Skipping this
+   step is the single most common way to end up stuck: HA Dev Tools' card
+   shows healthy with no log errors either way, since it only registers the
+   `dev_tools` API into HA's internal tool registry and has no HTTP
+   transport of its own - `mcp_server` is what actually serves it, so
+   without this step an MCP client just gets a bare 404. If you skip it (or
+   later remove `mcp_server` or un-expose `dev_tools` from it), a **Settings
+   → System → Repairs** issue will say so.
 3. **Arm it.** Every tool except a diagnostic ping refuses to run until you
    prove real filesystem access - the same kind SSH or the Terminal add-on
    already requires - by creating a file:

@@ -21,6 +21,7 @@ from .const import DOMAIN
 from .file_manager import FileManager
 from .llm_api import async_register as async_register_llm_api
 from .log_manager import LogManager
+from .mcp_repair import async_setup_repair as async_setup_mcp_repair
 from .security import SecurityManager
 from .template_yaml_manager import TemplateYamlManager
 
@@ -51,10 +52,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # for security, every gated tool call re-checks the file directly.
     unsub_arm_cleanup = await access_control.async_setup_cleanup(hass)
 
+    # Repair issue (Settings -> System -> Repairs) that flags when HA's
+    # native mcp_server integration isn't actually exposing dev_tools -
+    # see mcp_repair.py's module docstring for why this can't just be a
+    # config-flow blocker.
+    unsub_mcp_repair = async_setup_mcp_repair(hass)
+
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["security_manager"] = security_manager
     hass.data[DOMAIN]["unsub_llm_api"] = unsub_llm_api
     hass.data[DOMAIN]["unsub_arm_cleanup"] = unsub_arm_cleanup
+    hass.data[DOMAIN]["unsub_mcp_repair"] = unsub_mcp_repair
 
     _LOGGER.info("HA Dev Tools set up")
     return True
@@ -70,6 +78,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub_arm_cleanup = hass.data[DOMAIN].get("unsub_arm_cleanup")
         if unsub_arm_cleanup:
             unsub_arm_cleanup()
+
+        unsub_mcp_repair = hass.data[DOMAIN].get("unsub_mcp_repair")
+        if unsub_mcp_repair:
+            unsub_mcp_repair()
 
         hass.data.pop(DOMAIN)
 

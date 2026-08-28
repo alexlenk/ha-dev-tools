@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-27
+
+### Added
+- A Settings → System → Repairs issue (`mcp_server_not_exposing_dev_tools`) that fires when Home Assistant's native `mcp_server` integration isn't loaded, or is loaded but doesn't have `dev_tools` in its exposed APIs. Found by debugging a real install: HA Dev Tools registers `dev_tools` into HA's internal LLM API registry and has no HTTP transport of its own (see docs/ARCHITECTURE.md), so it shows up as a healthy integration with zero log errors even when `mcp_server` was never installed at all - the only visible symptom was an MCP client getting a bare 404 from `/api/mcp/dev_tools`, with nothing in this integration's own logs pointing at why. Deliberately not a config-flow blocker: the documented setup order (README) installs HA Dev Tools before `mcp_server`, so refusing setup until `mcp_server` already exists would contradict those instructions. The issue is fully self-clearing instead - it reacts to `mcp_server`'s config entries being added, removed, or reconfigured (via `SIGNAL_CONFIG_ENTRY_CHANGED`), with no restart needed either way. See `mcp_repair.py`.
+
 ## [2.5.1] - 2026-08-27
 
 ### Fixed

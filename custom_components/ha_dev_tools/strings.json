@@ -22,5 +22,11 @@
         }
       }
     }
+  },
+  "issues": {
+    "mcp_server_not_exposing_dev_tools": {
+      "title": "dev_tools isn't reachable over MCP yet",
+      "description": "HA Dev Tools registers the `dev_tools` LLM API, but Home Assistant's own **Model Context Protocol Server** integration isn't loaded or isn't configured to expose it - so an MCP client currently gets a plain 404 instead of reaching any tool here.\n\nTo fix: **Settings → Devices & Services → Add Integration → Model Context Protocol Server** (if not already added), then add `dev_tools` to its exposed APIs. This issue clears itself automatically once that's done - no restart needed."
+    }
   }
 }
