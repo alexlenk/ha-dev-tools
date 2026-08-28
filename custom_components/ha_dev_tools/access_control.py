@@ -117,33 +117,44 @@ def _is_expired(path: Path, *, now: float | None = None) -> bool:
     return False
 
 
-def check_armed(hass: HomeAssistant) -> None:
+def _armed_error_message(path: Path) -> str | None:
+    """Synchronous check, run only via the executor - see check_armed()."""
+    if not _is_expired(path):
+        return None
+    return (
+        "dev_tools is not armed. Run this on the Home Assistant host "
+        "(e.g. via SSH or the Terminal add-on), exactly as written:\n\n"
+        f"    date +%s > {path}\n\n"
+        "That enables it for up to 4 hours (extended by 30 minutes on "
+        "each use, idle windows beyond 30 minutes expire it)."
+    )
+
+
+async def check_armed(hass: HomeAssistant) -> None:
     """Raise NotArmedError unless a human has armed dev_tools recently.
 
     Reads the arm file directly via pathlib - never through FileManager/
     SecurityManager's general read path - so this check can never be
     weakened by a bug or future change in that generalized machinery.
+    The file I/O runs in the executor so this never blocks the event loop.
     """
     path = _arm_file_path(hass)
-    if _is_expired(path):
-        raise NotArmedError(
-            "dev_tools is not armed. Run this on the Home Assistant host "
-            "(e.g. via SSH or the Terminal add-on), exactly as written:\n\n"
-            f"    date +%s > {path}\n\n"
-            "That enables it for up to 4 hours (extended by 30 minutes on "
-            "each use, idle windows beyond 30 minutes expire it)."
-        )
+    message = await hass.async_add_executor_job(_armed_error_message, path)
+    if message is not None:
+        raise NotArmedError(message)
 
 
-def touch_armed(hass: HomeAssistant) -> None:
+async def touch_armed(hass: HomeAssistant) -> None:
     """Extend the idle window by bumping the arm file's mtime only.
 
     Best-effort: called after a successful tool call, and a failure here
-    must never break the call that triggered it.
+    must never break the call that triggered it. Runs in the executor so
+    this never blocks the event loop.
     """
     path = _arm_file_path(hass)
     try:
-        os.utime(path, None)  # None -> both atime and mtime set to now
+        # None -> both atime and mtime set to now
+        await hass.async_add_executor_job(os.utime, path, None)
     except OSError as err:
         _LOGGER.debug("Could not extend dev_tools arm file: %s", err)
 
@@ -189,18 +200,21 @@ def _cleanup_if_expired(hass: HomeAssistant) -> None:
             _LOGGER.debug("Could not remove expired dev_tools arm file: %s", err)
 
 
-def async_setup_cleanup(hass: HomeAssistant) -> Callable[[], None]:
+async def async_setup_cleanup(hass: HomeAssistant) -> Callable[[], None]:
     """Start best-effort periodic cleanup of an expired arm file.
 
     Not load-bearing for security (see module docstring) - runs once
     immediately so a Home Assistant restart doesn't leave an
     already-long-expired file sitting around just because a scheduled
-    tick hadn't fired yet, then on CLEANUP_INTERVAL after that.
+    tick hadn't fired yet, then on CLEANUP_INTERVAL after that. All file
+    I/O runs in the executor so this never blocks the event loop.
     """
-    _cleanup_if_expired(hass)
+    await hass.async_add_executor_job(_cleanup_if_expired, hass)
 
     @callback
     def _tick(_now: object) -> None:
-        _cleanup_if_expired(hass)
+        # Fire-and-forget: async_add_executor_job tracks the resulting
+        # future itself, so this callback doesn't need to await it.
+        hass.async_add_executor_job(_cleanup_if_expired, hass)
 
     return async_track_time_interval(hass, _tick, CLEANUP_INTERVAL)

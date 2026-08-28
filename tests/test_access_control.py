@@ -74,22 +74,25 @@ async def non_admin_user(hass: HomeAssistant):
 # --- check_armed --------------------------------------------------------
 
 
-def test_check_armed_raises_when_file_missing(hass: HomeAssistant):
+@pytest.mark.asyncio
+async def test_check_armed_raises_when_file_missing(hass: HomeAssistant):
     with pytest.raises(NotArmedError):
-        access_control.check_armed(hass)
+        await access_control.check_armed(hass)
 
 
-def test_check_armed_raises_when_idle_expired(hass: HomeAssistant):
+@pytest.mark.asyncio
+async def test_check_armed_raises_when_idle_expired(hass: HomeAssistant):
     now = time.time()
     _write_arm_file(
         hass, armed_at=now, mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1
     )
 
     with pytest.raises(NotArmedError):
-        access_control.check_armed(hass)
+        await access_control.check_armed(hass)
 
 
-def test_check_armed_raises_when_hard_cap_exceeded(hass: HomeAssistant):
+@pytest.mark.asyncio
+async def test_check_armed_raises_when_hard_cap_exceeded(hass: HomeAssistant):
     now = time.time()
     # mtime is fresh (just used), but the original arm time is past the cap.
     _write_arm_file(
@@ -97,41 +100,45 @@ def test_check_armed_raises_when_hard_cap_exceeded(hass: HomeAssistant):
     )
 
     with pytest.raises(NotArmedError):
-        access_control.check_armed(hass)
+        await access_control.check_armed(hass)
 
 
-def test_check_armed_raises_when_content_unparseable(hass: HomeAssistant):
+@pytest.mark.asyncio
+async def test_check_armed_raises_when_content_unparseable(hass: HomeAssistant):
     path = _arm_path(hass)
     path.write_text("not a timestamp")
 
     with pytest.raises(NotArmedError):
-        access_control.check_armed(hass)
+        await access_control.check_armed(hass)
 
 
-def test_check_armed_passes_when_fresh_and_within_cap(hass: HomeAssistant):
+@pytest.mark.asyncio
+async def test_check_armed_passes_when_fresh_and_within_cap(hass: HomeAssistant):
     now = time.time()
     _write_arm_file(hass, armed_at=now, mtime=now)
 
-    access_control.check_armed(hass)  # does not raise
+    await access_control.check_armed(hass)  # does not raise
 
 
 # --- touch_armed ---------------------------------------------------------
 
 
-def test_touch_armed_bumps_mtime_not_content(hass: HomeAssistant):
+@pytest.mark.asyncio
+async def test_touch_armed_bumps_mtime_not_content(hass: HomeAssistant):
     now = time.time()
     original_armed_at = now - 60
     _write_arm_file(hass, armed_at=original_armed_at, mtime=now - 60)
 
-    access_control.touch_armed(hass)
+    await access_control.touch_armed(hass)
 
     path = access_control._arm_file_path(hass)
     assert access_control._read_armed_at(path) == original_armed_at
     assert path.stat().st_mtime == pytest.approx(time.time(), abs=5)
 
 
-def test_touch_armed_is_best_effort_when_file_missing(hass: HomeAssistant):
-    access_control.touch_armed(hass)  # does not raise, just logs
+@pytest.mark.asyncio
+async def test_touch_armed_is_best_effort_when_file_missing(hass: HomeAssistant):
+    await access_control.touch_armed(hass)  # does not raise, just logs
 
 
 # --- require_admin ---------------------------------------------------------
@@ -197,7 +204,7 @@ async def test_cleanup_removes_expired_file(hass: HomeAssistant):
     path = access_control._arm_file_path(hass)
     assert path.exists()
 
-    unsub = access_control.async_setup_cleanup(hass)
+    unsub = await access_control.async_setup_cleanup(hass)
     try:
         assert not path.exists()
     finally:
@@ -210,7 +217,7 @@ async def test_cleanup_leaves_valid_file_alone(hass: HomeAssistant):
     _write_arm_file(hass, armed_at=now, mtime=now)
     path = access_control._arm_file_path(hass)
 
-    unsub = access_control.async_setup_cleanup(hass)
+    unsub = await access_control.async_setup_cleanup(hass)
     try:
         assert path.exists()
     finally:

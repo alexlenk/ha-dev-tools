@@ -49,7 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Best-effort periodic cleanup of an expired access-control arm file
     # (custom_components/ha_dev_tools/access_control.py) - not load-bearing
     # for security, every gated tool call re-checks the file directly.
-    unsub_arm_cleanup = access_control.async_setup_cleanup(hass)
+    unsub_arm_cleanup = await access_control.async_setup_cleanup(hass)
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["security_manager"] = security_manager
