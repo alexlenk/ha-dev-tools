@@ -9,10 +9,15 @@ are pure comparisons against time.time() and don't need a frozen clock.
 
 import time
 
+import homeassistant.util.dt as dt_util
 import pytest
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    MockUser,
+    async_fire_time_changed,
+)
 
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
@@ -220,5 +225,35 @@ async def test_cleanup_leaves_valid_file_alone(hass: HomeAssistant):
     unsub = await access_control.async_setup_cleanup(hass)
     try:
         assert path.exists()
+    finally:
+        unsub()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_tick_removes_expired_file(hass: HomeAssistant):
+    """The periodic tick (not just the initial cleanup run at setup) also
+    runs the cleanup - covers the fire-and-forget executor job in _tick."""
+    path = access_control._arm_file_path(hass)
+
+    unsub = await access_control.async_setup_cleanup(hass)
+    try:
+        # Nothing to clean up yet - write an expired file only after setup,
+        # so the assertion below can only pass via the periodic tick.
+        now = time.time()
+        _write_arm_file(
+            hass,
+            armed_at=now,
+            mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1,
+        )
+        assert path.exists()
+
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + access_control.CLEANUP_INTERVAL
+        )
+        # The tick's executor job is fire-and-forget from a @callback, so
+        # it lands in hass's background tasks, not its tracked tasks.
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+        assert not path.exists()
     finally:
         unsub()
