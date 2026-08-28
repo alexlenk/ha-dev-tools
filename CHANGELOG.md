@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-08-27
+
+### Fixed
+- `access_control.py`'s arm-file checks (`check_armed`, `touch_armed`, and the periodic/startup cleanup task) ran synchronous file I/O (`Path.read_text`/`stat`/`unlink`, `os.utime`) directly on the event loop. Home Assistant's blocking-call detector flagged `path.read_text()` in `_read_armed_at` at integration setup, and the same functions ran on every single gated tool call via `check_armed`/`touch_armed` - not just at startup. All three entry points now do their file I/O via `hass.async_add_executor_job`, matching the pattern already used everywhere else in this codebase (`file_manager.py`, `automation_manager.py`, etc.); `check_armed`/`touch_armed`/`async_setup_cleanup` are now `async def` and callers updated accordingly. No behavior change to the arming/expiry logic itself.
+
 ## [2.5.0] - 2026-08-22
 
 ### Added

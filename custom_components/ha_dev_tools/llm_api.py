@@ -128,10 +128,10 @@ class GatedTool(llm.Tool):
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """Check both gates, run the tool, then extend the idle window."""
-        access_control.check_armed(hass)
+        await access_control.check_armed(hass)
         await access_control.require_admin(hass, llm_context)
         result = await self._run(hass, tool_input, llm_context)
-        access_control.touch_armed(hass)
+        await access_control.touch_armed(hass)
         return result
 
     async def _run(
