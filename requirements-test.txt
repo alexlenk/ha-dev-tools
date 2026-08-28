@@ -35,6 +35,17 @@ ruamel.yaml>=0.18.0
 hassil==3.11.0
 home-assistant-intents==2026.7.30
 
+# Transitive deps of homeassistant.components.mcp_server (its own
+# manifest.json requirements, confirmed by reading it at the pinned
+# homeassistant version below) - not installed automatically by
+# pytest-homeassistant-custom-component. Needed because test_mcp_repair.py
+# adds a real (Mock)ConfigEntry for the mcp_server domain, which HA's own
+# hass fixture then imports and unloads at test teardown like any other
+# loaded component.
+mcp==1.26.0
+aiohttp_sse==2.2.0
+anyio==4.13.0
+
 # Home Assistant core (required for integration testing).
 # Pinned via pytest-homeassistant-custom-component's own exact pin (below)
 # rather than a floor on `homeassistant` directly, because HA's own

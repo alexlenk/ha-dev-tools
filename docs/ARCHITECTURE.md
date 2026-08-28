@@ -24,6 +24,19 @@ runs against). There is no fallback transport for older installs, by
 design - building one would mean re-implementing exactly the thing
 `mcp_server` already does correctly.
 
+A sharper consequence: `async_setup_entry` succeeding tells you nothing
+about whether `dev_tools` is actually reachable from outside Home
+Assistant - that depends entirely on `mcp_server` being installed *and*
+configured with `dev_tools` in its exposed APIs, neither of which this
+integration controls or can detect at setup time (it may not even exist
+yet - `mcp_server` is meant to be added *after* this integration, per
+README's Setup section). `mcp_repair.py` closes that visibility gap with a
+Repairs issue rather than a config-flow check: it inspects `mcp_server`'s
+config entries directly (`hass.config_entries.async_entries("mcp_server")`,
+checking each loaded entry's `data[CONF_LLM_HASS_API]`) and reacts to
+`SIGNAL_CONFIG_ENTRY_CHANGED` so the issue appears/clears live as
+`mcp_server` is added, removed, or reconfigured.
+
 ## File access vs. Home Assistant's own APIs
 
 Home Assistant's registries, WebSocket API, and REST endpoints are the
