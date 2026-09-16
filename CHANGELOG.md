@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-09-16
+
+### Fixed
+- `derived_sensor_manager.py` imports `voluptuous_serialize` directly but never declared it in `manifest.json`'s `requirements`. It usually worked anyway since Home Assistant core itself depends on `voluptuous-serialize`, but that's an implicit transitive dependency, not a guarantee - on at least one real install it was missing, breaking setup for the whole integration with `ModuleNotFoundError: No module named 'voluptuous_serialize'` (every other module in `__init__.py`'s import chain, including unrelated tools, failed alongside it). Now declared explicitly as `voluptuous-serialize>=2.6.0`.
+
 ## [2.6.0] - 2026-08-27
 
 ### Added
