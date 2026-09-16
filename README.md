@@ -205,6 +205,9 @@ integration are design-stage, not built - see
 scripts for bootstrapping the security hygiene (`.gitignore`, secret
 scanning, config-validation CI) that design assumes onto your own HA
 *config* repo, independent of whether the rest of it ever gets built.
+[scripts/live-state-mirror/](scripts/live-state-mirror/) seeds the
+separate branch that design's live-state mirror would push to - the
+runtime hook itself isn't built yet.
 
 ## Contributing
 

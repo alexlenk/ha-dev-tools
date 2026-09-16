@@ -139,6 +139,77 @@ Each stage, and why it's shaped this way:
   merging the two would put a second, previously-separate credential
   domain behind whatever compromises the MCP server.
 
+## Live-state mirror (push-only audit trail)
+
+A second, distinct piece from the branch+PR promotion flow above, though
+it composes with it: every `write_automation` call also commits the
+specific file it touched to a dedicated branch on the live instance,
+before and after the change, giving a real git history of what the
+instance actually did - independent of whether any of it went through a
+reviewed PR. Motivated by the same gap the rest of this document is
+about: today there is no record at all of what an MCP-driven change was,
+only what it currently is.
+
+**Push-only, never pull, from this mechanism specifically.** That
+one-way property is what makes it meaningfully safer than the branch+PR
+flow's own risk profile: a fully compromised MCP server can write bogus
+history to this branch, but has no path back into the live instance
+through it, because nothing on the instance side ever reads it.
+
+**It must not be the same branch anything else pulls from - regardless
+of intent.** The instinct that this branch should just be `main`,
+because `main` "is" the live instance's true state, is reasonable on its
+own - and would be fine, if the only thing that branch ever received was
+this mechanism's own retroactive mirror of already-applied changes. The
+problem is that a push-capable credential's blast radius is defined by
+what it's technically capable of, not what it's intended for (the same
+point [SECURITY.md](SECURITY.md) makes about HA's own tokens) - if that
+credential is compromised, nothing stops it from pushing a
+forward-looking, non-mirrored change instead of a retroactive one. If the
+Git Pull add-on (or anything else) is watching that same branch, it'll
+deploy that too, and the whole point of "push-only, never pull" being
+safe - that nothing on the instance side reads this branch back - stops
+being true at the system level, even though the MCP server itself still,
+technically, never calls `git pull`. So: mirror to a branch nothing
+auto-deploys from (`live-state`, say); keep whatever branch the Git Pull
+add-on tracks human-merge-only, exactly as in the promotion flow above.
+If you want the live instance's own state to periodically become the new
+deploy baseline, that's a deliberate, reviewed merge from `live-state`
+into the deploy branch - a human decision, not something this mechanism
+does on its own.
+
+**The "before" commit is conditional on detected drift, not
+unconditional.** Immediately before applying a change, compare the
+current on-disk file against what this branch's last commit for that
+file says. If they match, there's nothing new to record - skip straight
+to committing "after". If they differ, something changed the file
+outside `write_automation` since the last recorded state (a UI edit, SSH,
+anything) - commit that drift as its own "before" snapshot first, so it
+doesn't get silently absorbed into the diff that's actually about to
+happen. This is also the answer to whether the MCP server needs to push
+twice every time: only when there's something to record.
+
+**Reading the branch's state to detect that drift is not "pulling".**
+"Never pull" means never merging remote history into the live working
+tree - it says nothing about reading the remote's current content or
+commit log for reference, the same way `template_manager.py`'s
+`render_template` reads live `hass` state without mutating it. A
+read-only GitHub API call (fetch the file's current content at that
+branch's HEAD, or list recent commits) is how the drift check above
+works, and it's also how the MCP server could show a real diff back to
+whoever's driving it, without needing a second local git operation to
+produce one.
+
+**Same credential-scoping rules as the promotion-flow PAT**: this repo
+only, `contents: write`, no `workflow` scope (so even full compromise
+can't touch anything under `.github/workflows/`), no admin, no
+force-push. `write_automation` commits only the specific file
+`automation_manager.py` already resolved for that automation - never a
+broad `git add -A` of the live `/config` tree - and the push is
+best-effort and asynchronous with respect to the actual reload: a failed
+push logs and gets retried, it never blocks or fails the live change
+itself.
+
 ## Blast-radius analysis
 
 Two separate axes matter here, and conflating them is the easiest way to
@@ -177,6 +248,10 @@ HA auth vs. SSH/file access):
   reimplementing anything the Git Pull add-on already does.
 - The MCP server pushing directly to the branch `git-pull` tracks, or any
   "CI green implies auto-merge/auto-deploy" shortcut.
+- The live-state mirror branch being the same branch anything auto-pulls
+  from (Git Pull or otherwise) - collapses back into the same circularity
+  the promotion flow's branch separation exists to prevent, even though
+  the mirror mechanism itself never calls `git pull`.
 
 ## Open questions
 
@@ -188,6 +263,11 @@ HA auth vs. SSH/file access):
 - Whether `lint_automation` ships ahead of tier 2: no blocking dependency
   between them; tier 1 is buildable against this repo's existing code
   today.
+- Live-state mirror: where the scoped push credential is actually read
+  from at runtime (a config-entry option? a restricted-permission secret
+  file?), and the drift-detection + conditional-commit logic in
+  `automation_manager.py` itself - not built. `scripts/live-state-mirror/`
+  only seeds the branch; it doesn't wire up the runtime hook.
 
 ## Sources consulted
 
