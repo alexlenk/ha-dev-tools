@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-09-16
+
+### Fixed
+- `get_automation` and `audit_automations` only ever read `automations.yaml`/`packages/*.yaml` - so whether an automation is actually enabled right now was invisible to both. Toggling an automation via the UI or the `automation.turn_off`/`turn_on` services never touches the YAML `enabled:` key; that state lives purely on the live `automation.*` entity, whose `entity_id` is derived from `alias` (slugified), not from the config `id` - so it can't be guessed, only looked up by scanning `automation.*` entities for a matching `id` attribute. `get_automation` now reports `currently_enabled` (and a note when no matching entity exists yet, e.g. not reloaded since being added); `audit_automations` now reports a `currently_disabled` list and tags every `references_unavailable_entities` finding with `currently_enabled`, since that finding is real but lower-urgency on an automation that's off anyway. New `audit_manager.find_automation_state()` helper backs both. Found via a real case of an agent treating a disabled automation as if it were live.
+
 ## [2.6.2] - 2026-09-16
 
 ### Fixed

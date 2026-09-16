@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 
 from .automation_manager import AutomationManager
 
@@ -46,6 +46,30 @@ def _iter_entity_ids(node: Any) -> list[str]:
     return found
 
 
+def find_automation_state(hass: HomeAssistant, automation_id: str) -> State | None:
+    """Find the live `automation.*` entity for a config `id`, or None.
+
+    The entity_id is derived from the automation's `alias` (slugified,
+    deduped on collision) - not from its `id` - so `automation.<id>` is
+    not a valid lookup. The `id` only shows up as a state attribute
+    (`homeassistant/components/automation` sets it there so the editor/
+    reload logic can match entities back to config), which is why this
+    scans every `automation.*` entity rather than guessing an entity_id.
+
+    This is the only reliable way to answer "is this automation currently
+    on or off" from a config id, and it matters: toggling an automation
+    via the UI or the `automation.turn_off`/`turn_on` services never
+    touches the YAML `enabled:` key, so nothing in the config itself - the
+    only thing `get_automation`/`audit_automations` read otherwise - can
+    tell you whether it's actually active right now. Returns None if no
+    matching entity exists yet (e.g. just added, not reloaded since).
+    """
+    for state in hass.states.async_all("automation"):
+        if str(state.attributes.get("id")) == str(automation_id):
+            return state
+    return None
+
+
 async def audit_automations(
     hass: HomeAssistant, automation_manager: AutomationManager
 ) -> dict[str, Any]:
@@ -53,6 +77,7 @@ async def audit_automations(
     all_automations = await automation_manager.all_automations()
     id_locations: dict[str, list[str]] = {}
     unavailable_findings: list[dict[str, Any]] = []
+    currently_disabled: list[str] = []
 
     for location, entry in all_automations:
         automation_id = entry.get("id")
@@ -60,6 +85,19 @@ async def audit_automations(
             continue
         automation_id = str(automation_id)
         id_locations.setdefault(automation_id, []).append(location.file_path)
+
+        # Whether this automation is actually on right now lives purely in
+        # the automation.* entity's runtime state - toggling it via the UI
+        # or automation.turn_off never touches the YAML, so nothing else
+        # checked here would ever notice. Every finding below is reported
+        # regardless of this, but tagged with it - a duplicate id or an
+        # unavailable-entity reference on an automation that's currently
+        # off is real but lower urgency than the same finding on one
+        # that's actually running.
+        live_state = find_automation_state(hass, automation_id)
+        currently_enabled = None if live_state is None else live_state.state == "on"
+        if currently_enabled is False:
+            currently_disabled.append(automation_id)
 
         referenced = set(_iter_entity_ids(entry))
         unavailable = sorted(
@@ -74,6 +112,7 @@ async def audit_automations(
                     "automation_id": automation_id,
                     "file_path": location.file_path,
                     "unavailable_entities": unavailable,
+                    "currently_enabled": currently_enabled,
                 }
             )
 
@@ -87,6 +126,7 @@ async def audit_automations(
         "automations_checked": len(all_automations),
         "duplicate_ids": duplicate_findings,
         "references_unavailable_entities": unavailable_findings,
+        "currently_disabled": sorted(currently_disabled),
         "note": (
             "Overlapping-trigger race detection and unhandled "
             "rest_command/shell_command failure detection are not "
