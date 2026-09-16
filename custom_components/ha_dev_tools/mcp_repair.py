@@ -25,6 +25,7 @@ import logging
 from typing import Callable
 
 from homeassistant.config_entries import ConfigEntryState, SIGNAL_CONFIG_ENTRY_CHANGED
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -65,10 +66,21 @@ def _async_refresh_issue(hass: HomeAssistant) -> None:
 
 
 def async_setup_repair(hass: HomeAssistant) -> Callable[[], None]:
-    """Create/clear the repair issue now, and again on every config entry
-    change - mcp_server's own config entry can be added, removed, or have
-    its exposed APIs edited independently of ha_dev_tools' lifecycle at any
-    time, so a one-shot check at setup isn't enough.
+    """Create/clear the repair issue now, again on every config entry
+    change, and again once HA finishes starting.
+
+    mcp_server's own config entry can be added, removed, or have its
+    exposed APIs edited independently of ha_dev_tools' lifecycle at any
+    time, so a one-shot check at setup isn't enough on its own - that's
+    what SIGNAL_CONFIG_ENTRY_CHANGED covers. But on a full restart, entry
+    setup order between unrelated domains isn't guaranteed (mcp_server
+    isn't in this integration's after_dependencies), so this setup-time
+    check can run before mcp_server's entry has finished loading and
+    create a false-positive issue. SIGNAL_CONFIG_ENTRY_CHANGED does not
+    fire for that - it only fires on entry add/remove/update, not on a
+    plain successful setup - so without the EVENT_HOMEASSISTANT_STARTED
+    recheck below, that false positive would stick around until something
+    else happened to touch mcp_server's entry.
     """
     _async_refresh_issue(hass)
 
@@ -81,8 +93,17 @@ def async_setup_repair(hass: HomeAssistant) -> Callable[[], None]:
     )
 
     @callback
+    def _on_started(_event: object) -> None:
+        _async_refresh_issue(hass)
+
+    unsub_started = hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STARTED, _on_started
+    )
+
+    @callback
     def _unsub() -> None:
         unsub_dispatcher()
+        unsub_started()
         ir.async_delete_issue(hass, DOMAIN, ISSUE_ID)
 
     return _unsub
