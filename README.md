@@ -198,6 +198,14 @@ package-safety works, what Home Assistant's storage layer will and won't let
 a custom integration do safely - see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+Offline automation testing and a git-based promotion path out of this
+integration are design-stage, not built - see
+[docs/AUTOMATION_TESTING_DESIGN.md](docs/AUTOMATION_TESTING_DESIGN.md).
+[scripts/config-repo-setup/](scripts/config-repo-setup/) has standalone
+scripts for bootstrapping the security hygiene (`.gitignore`, secret
+scanning, config-validation CI) that design assumes onto your own HA
+*config* repo, independent of whether the rest of it ever gets built.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
