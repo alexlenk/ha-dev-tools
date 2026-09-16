@@ -1,0 +1,31 @@
+name: Validate Home Assistant config
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Run yamllint
+        uses: frenck/action-yamllint@v1
+
+  check_config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Run Home Assistant check_config
+        uses: frenck/action-home-assistant@v1
+        with:
+          path: "."
+          # Real secrets.yaml is gitignored and never reaches CI - this is
+          # the placeholder-value file setup-gitignore.sh creates.
+          secrets: "secrets.yaml.example"
+          version: stable
