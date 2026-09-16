@@ -8,6 +8,7 @@ config-flow blocker.
 """
 
 from homeassistant.config_entries import ConfigEntryChange, ConfigEntryState
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -98,6 +99,24 @@ def test_issue_reappears_when_mcp_server_reconfigured_away_from_dev_tools(
     )
 
     assert _issue(hass) is not None
+    unsub()
+
+
+async def test_issue_clears_on_ha_started_after_boot_race(hass: HomeAssistant):
+    """On a real restart, mcp_server's entry can still be loading when this
+    integration's own setup runs the initial check (no after_dependencies
+    ordering between the two) - a false-positive issue with no ADD/REMOVE/
+    UPDATE event to clear it. EVENT_HOMEASSISTANT_STARTED gives it one more
+    chance to recheck once every startup-time integration has had a chance
+    to finish loading."""
+    unsub = mcp_repair.async_setup_repair(hass)
+    assert _issue(hass) is not None
+
+    _add_mcp_server_entry(hass, exposed_apis=[DOMAIN])
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
+
+    assert _issue(hass) is None
     unsub()
 
 

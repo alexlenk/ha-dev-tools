@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-09-16
+
+### Fixed
+- `mcp_repair.py`'s Repairs issue (`mcp_server_not_exposing_dev_tools`) could fire as a false positive on a real restart and then never clear itself. The check only reran on `SIGNAL_CONFIG_ENTRY_CHANGED` (entry added/removed/updated) or at this integration's own setup - but `mcp_server` isn't in this integration's `after_dependencies`, so on a full restart its config entry can still be mid-setup when `ha_dev_tools`' own setup-time check runs, creating the issue even though `mcp_server` finishes loading and exposing `dev_tools` moments later. A plain successful setup completion doesn't fire `SIGNAL_CONFIG_ENTRY_CHANGED` (that's only for add/remove/update), so nothing was left to clear the stale issue. Now also rechecked once on `EVENT_HOMEASSISTANT_STARTED`, by which point every integration that loads at boot has had its chance to.
+
 ## [2.6.1] - 2026-09-16
 
 ### Fixed
