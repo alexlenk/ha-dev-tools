@@ -1536,3 +1536,112 @@ async def test_update_template_entity_tool_dry_run_mirrors_to_proposed_branch(
     raw = (tmp_path / "packages/emhas.yaml").read_text()
     assert "Old" in raw
     assert "New" not in raw
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_tool_dry_run_mirrors_to_proposed_branch(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # _sync_before GET current -> none
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
+            _FakeMirrorResponse(404),  # GET ref/proposed -> doesn't exist
+            _FakeMirrorResponse(201),  # POST create ref
+            _FakeMirrorResponse(404),  # GET current on proposed branch
+            _FakeMirrorResponse(201, {"content": {"sha": "sha-2"}}),  # PUT proposed
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._dry_run_mirror(
+            hass,
+            llm.ToolInput(
+                tool_name="create_template_entity",
+                tool_args={
+                    "platform": "sensor",
+                    "config": {
+                        "name": "New",
+                        "unique_id": "new_one",
+                        "state": "{{ 1 }}",
+                    },
+                    "package": "emhas.yaml",
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result.mirrored is True
+    assert result.branch == "proposed/template_entity-new_one"
+    assert result.commits == ("before", "proposed")
+    # Nothing live actually changed:
+    raw = (tmp_path / "packages/emhas.yaml").read_text()
+    assert "new_one" not in raw
+
+
+@pytest.mark.asyncio
+async def test_delete_template_entity_tool_dry_run_mirrors_to_proposed_branch(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Gone\n"
+        "        unique_id: gone\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # _sync_before GET current -> none
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
+            _FakeMirrorResponse(404),  # GET ref/proposed -> doesn't exist
+            _FakeMirrorResponse(201),  # POST create ref
+            _FakeMirrorResponse(404),  # GET current on proposed branch
+            _FakeMirrorResponse(201, {"content": {"sha": "sha-2"}}),  # PUT proposed
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._dry_run_mirror(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_template_entity", tool_args={"unique_id": "gone"}
+            ),
+            _llm_context(),
+        )
+
+    assert result.mirrored is True
+    assert result.branch == "proposed/template_entity-gone"
+    assert result.commits == ("before", "proposed")
+    # Nothing live actually changed:
+    raw = (tmp_path / "packages/emhas.yaml").read_text()
+    assert "gone" in raw
