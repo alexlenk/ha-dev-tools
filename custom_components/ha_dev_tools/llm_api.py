@@ -199,6 +199,17 @@ def _write_schema(fields: dict) -> vol.Schema:
     return vol.Schema({**fields, vol.Optional("confirm_token"): str})
 
 
+_CONFIRM_TOKEN_NOTE = (
+    " Every call to this tool must happen twice: the first call never "
+    "writes anything - it returns a preview of the change plus a "
+    "confirm_token; call again with the identical arguments plus "
+    "confirm_token set to that exact value to actually apply it. Don't "
+    "guess which other field might hold it (e.g. expected_hash is "
+    "unrelated) - confirm_token is its own field, and may not always be "
+    "visible in this tool's declared schema depending on your MCP client."
+)
+
+
 class GatedTool(llm.Tool):
     """Base for every dev_tools tool except the diagnostic ping.
 
@@ -800,7 +811,7 @@ class WriteAutomationTool(WriteGatedTool):
         "automations.yaml. Always reloads automations afterward - never "
         "requires a restart. Pass expected_hash (from get_file_metadata or "
         "a prior read) to detect concurrent edits."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("automation_id"): str,
@@ -895,7 +906,7 @@ class CreateHelperTool(WriteGatedTool):
         "vary by domain - e.g. input_boolean/counter/timer mainly need "
         "'name'; input_number additionally needs 'min'/'max'; "
         "input_select needs 'options' (a list)."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("domain"): _helper_domain_schema(), vol.Required("config"): dict}
     )
@@ -932,7 +943,7 @@ class UpdateHelperTool(WriteGatedTool):
         "helpers created via the UI/storage, not YAML-defined ones - "
         "list_helpers' results only include the former for exactly this "
         "reason."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("domain"): _helper_domain_schema(),
@@ -968,7 +979,7 @@ class DeleteHelperTool(WriteGatedTool):
     """Delete a helper item by id."""
 
     name = "delete_helper"
-    description = "Delete a storage-defined helper by id."
+    description = "Delete a storage-defined helper by id." + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("domain"): _helper_domain_schema(), vol.Required("item_id"): str}
     )
@@ -1087,7 +1098,7 @@ class CreateDerivedSensorTool(WriteGatedTool):
         "derivative, or filter), or a Template helper (any entity domain, "
         "not just sensors) via the same config flow the UI's Add Helper "
         "wizard uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("domain"): _derived_sensor_domain_schema(),
@@ -1122,7 +1133,7 @@ class UpdateDerivedSensorTool(WriteGatedTool):
         "Update an existing calculated/derived sensor helper's config by "
         "its entry id (from list_derived_sensors), via the same options "
         "flow the UI's helper edit page uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("entry_id"): str,
@@ -1153,7 +1164,9 @@ class DeleteDerivedSensorTool(WriteGatedTool):
     """Delete a derived-sensor config entry by id."""
 
     name = "delete_derived_sensor"
-    description = "Delete a calculated/derived sensor helper by its entry id."
+    description = (
+        "Delete a calculated/derived sensor helper by its entry id."
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema({vol.Required("entry_id"): str})
 
     @override
@@ -1289,7 +1302,7 @@ class CreateTemplateEntityTool(WriteGatedTool):
         "under this integration's default security policy, so new "
         "entities can only be created in a package. 'triggers' is "
         "optional (a list of trigger dicts) for the new block."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("platform"): str,
@@ -1354,7 +1367,7 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         "lives in configuration.yaml itself, which is read-only under "
         "this integration's default security policy - only "
         "package-defined entities can be updated this way."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("unique_id"): str, vol.Required("config"): dict}
     )
@@ -1406,7 +1419,7 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         "the whole template: block if that empties it too. Same "
         "read-only-configuration.yaml restriction as "
         "update_template_entity."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema({vol.Required("unique_id"): str})
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
@@ -1480,7 +1493,7 @@ class WriteDashboardTool(WriteGatedTool):
         "dashboards only - HA hard-rejects saving YAML-mode dashboards "
         "through this path (get_dashboard still works for those, just "
         "not this). Omit url_path for the default dashboard."
-    )
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("config"): dict, vol.Optional("url_path"): str}
     )
