@@ -19,7 +19,17 @@ freezegun>=1.2.0
 # Core dependencies (should match manifest.json requirements)
 pyyaml>=6.0.0
 aiofiles>=23.0.0
-aiohttp>=3.8.0
+# Upper-bounded, not just a floor: aioresponses==0.7.9 (its latest release
+# - confirmed no newer one exists) constructs aiohttp.ClientResponse
+# directly for every mocked call, and aiohttp 3.14.0 added a new required
+# keyword-only stream_writer argument to ClientResponse.__init__ that
+# aioresponses doesn't pass - breaks every aioresponses-mocked call, not
+# just some (get and put alike), confirmed by bisecting exact versions
+# directly: 3.13.0 works, 3.14.0 doesn't. This repo's own test.yml matrix
+# hit this for the first time in mirror.py's tests (tests/test_mirror.py -
+# the first aiohttp-dependent test here), not something aiohttp>=3.8.0 ever
+# guarded against before since nothing exercised it.
+aiohttp>=3.8.0,<3.14.0
 ruamel.yaml>=0.18.0
 
 # Transitive deps of homeassistant.helpers.llm -> homeassistant.components.
