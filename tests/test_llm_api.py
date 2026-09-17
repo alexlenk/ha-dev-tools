@@ -74,6 +74,7 @@ from custom_components.ha_dev_tools.llm_api import (
     ReloadDerivedSensorTool,
     UpdateDerivedSensorTool,
     UpdateTemplateEntityTool,
+    WriteAutomationTool,
     WriteDashboardTool,
     WriteGatedTool,
 )
@@ -1115,6 +1116,12 @@ class _FakeMirrorSession:
     def put(self, url, **kwargs):
         return _FakeMirrorRequestContext(self._responses.pop(0))
 
+    def post(self, url, **kwargs):
+        return _FakeMirrorRequestContext(self._responses.pop(0))
+
+    def patch(self, url, **kwargs):
+        return _FakeMirrorRequestContext(self._responses.pop(0))
+
 
 @pytest.mark.asyncio
 async def test_update_template_entity_tool_mirrors_when_enabled(
@@ -1359,3 +1366,169 @@ async def test_write_dashboard_tool_mirrors_when_enabled(
     # test) - only the after-commit pushes, matching mirror.py's own
     # "content_before is None -> no before-commit" rule.
     assert result["mirror"]["commits"] == ["after"]
+
+
+# --- dry-run + mirroring: proposed/<kind>-<id> branches (issue #35) ---------
+
+
+def _write_automation_manager(hass: HomeAssistant, tmp_path) -> AutomationManager:
+    hass.config.config_dir = str(tmp_path)
+    security_manager = SecurityManager(
+        hass,
+        {
+            "read_paths": ["automations.yaml", "packages/**/*.yaml"],
+            "write_paths": ["automations.yaml", "packages/**/*.yaml"],
+            "denied_paths": [],
+        },
+    )
+    file_manager = FileManager(hass, security_manager)
+    return AutomationManager(hass, file_manager)
+
+
+@pytest.mark.asyncio
+async def test_write_automation_tool_dry_run_mirrors_to_proposed_branch(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    """Dry-run mode + mirroring enabled together push the resolved would-be
+    content to a proposed/automation-<id> branch instead of mirroring
+    nothing at all - the gap this session's earlier code left (issue #35)."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_DRY_RUN: True,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _arm(hass)
+    manager = _write_automation_manager(hass, tmp_path)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  alias: Old\n  trigger: []\n  action: []\n"
+    )
+    tool = WriteAutomationTool(manager)
+    args = {
+        "automation_id": "my_automation",
+        "config": {"alias": "New", "trigger": [], "action": []},
+    }
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="write_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # _sync_before GET current -> none
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
+            _FakeMirrorResponse(404),  # GET ref/proposed -> doesn't exist
+            _FakeMirrorResponse(201),  # POST create ref
+            _FakeMirrorResponse(404),  # GET current on proposed branch
+            _FakeMirrorResponse(201, {"content": {"sha": "sha-2"}}),  # PUT proposed
+        ]
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["dry_run"] is True
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["branch"] == "proposed/automation-my_automation"
+    assert result["mirror"]["commits"] == ["before", "proposed"]
+    # Nothing live actually changed:
+    assert "Old" in (tmp_path / "automations.yaml").read_text()
+    assert "New" not in (tmp_path / "automations.yaml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabled(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    """Dry-run alone (mirroring off) behaves exactly as before this feature -
+    no 'mirror' key at all, not even an attempt."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry, options={OPT_DRY_RUN: True}
+    )
+    _arm(hass)
+    manager = _write_automation_manager(hass, tmp_path)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  trigger: []\n  action: []\n"
+    )
+    tool = WriteAutomationTool(manager)
+    args = {"automation_id": "my_automation", "config": {"trigger": [], "action": []}}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="write_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="write_automation", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["dry_run"] is True
+    assert "mirror" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_template_entity_tool_dry_run_mirrors_to_proposed_branch(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Old\n"
+        "        unique_id: target\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = UpdateTemplateEntityTool(template_yaml_manager)
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # _sync_before GET current -> none
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
+            _FakeMirrorResponse(404),  # GET ref/proposed -> doesn't exist
+            _FakeMirrorResponse(201),  # POST create ref
+            _FakeMirrorResponse(404),  # GET current on proposed branch
+            _FakeMirrorResponse(201, {"content": {"sha": "sha-2"}}),  # PUT proposed
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._dry_run_mirror(
+            hass,
+            llm.ToolInput(
+                tool_name="update_template_entity",
+                tool_args={
+                    "unique_id": "target",
+                    "config": {"name": "New", "state": "{{ 2 }}"},
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result.mirrored is True
+    assert result.branch == "proposed/template_entity-target"
+    assert result.commits == ("before", "proposed")
+    # Nothing live actually changed:
+    raw = (tmp_path / "packages/emhas.yaml").read_text()
+    assert "Old" in raw
+    assert "New" not in raw

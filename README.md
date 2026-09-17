@@ -128,6 +128,16 @@ repository.
    would silently mirror stale content (tracked in issue #43); derived-
    sensor mirroring hasn't been built yet either.
 
+   **With dry-run mode also on:** `write_automation` and the
+   template-entity tools still mirror something even though nothing live
+   changed - the resolved would-be content goes to its own
+   `proposed/<kind>-<id>` branch (e.g. `proposed/automation-my_automation`),
+   freshly branched from `main`'s current tip each time, rather than to
+   `main` itself. That lets you review a dry-run's actual diff on GitHub
+   before ever turning dry-run off. `write_dashboard` has no such
+   compute-without-writing path (the real write is the only way to resolve
+   its storage JSON), so it mirrors nothing while dry-run is on.
+
 ## Connecting an MCP client
 
 This integration is a **remote** MCP server - Home Assistant's own `mcp_server`

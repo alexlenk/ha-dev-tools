@@ -256,6 +256,7 @@ class AutomationManager:
         *,
         package: str | None = None,
         expected_hash: str | None = None,
+        dry_run: bool = False,
     ) -> AutomationWriteResult:
         """Create or update an automation, writing through the correct file.
 
@@ -273,6 +274,13 @@ class AutomationManager:
         location - captured here, not by a caller reading the file again
         afterward, since "before" only exists in the narrow window before
         this method's own write_file() call.
+
+        `dry_run=True` resolves the location and computes content_after
+        exactly the same way, but returns before ever calling
+        file_manager.write_file() or reloading - nothing live changes. For
+        mirroring's dry-run + proposed/* branch support (issue #35): the
+        resolved would-be content is real and correct, it just never
+        touches disk.
         """
         config = dict(config)
         config["id"] = str(automation_id)
@@ -310,6 +318,13 @@ class AutomationManager:
         content_after = await self.hass.async_add_executor_job(
             self._build_content, location, document, automation_id, config
         )
+
+        if dry_run:
+            return AutomationWriteResult(
+                location=location,
+                content_before=content_before,
+                content_after=content_after,
+            )
 
         # Routes through FileManager so this write gets the same treatment
         # as every other write in this integration: security allowlist

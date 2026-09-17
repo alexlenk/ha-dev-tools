@@ -212,6 +212,34 @@ async def test_write_automation_creates_new_with_explicit_package(
 
 
 @pytest.mark.asyncio
+async def test_write_automation_dry_run_computes_content_without_writing(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """dry_run=True resolves the same location and builds the same
+    content_after a real write would, but never touches the file or
+    reloads - the foundation of issue #35's dry-run + mirroring support."""
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: existing\n  alias: Old\n  trigger: []\n  action: []\n",
+    )
+
+    result = await automation_manager.write_automation(
+        "existing",
+        {"alias": "New", "trigger": [], "action": []},
+        dry_run=True,
+    )
+
+    assert result.location.file_path == "automations.yaml"
+    assert "Old" in result.content_before
+    assert "New" in result.content_after
+    # Nothing live actually changed:
+    assert "Old" in (tmp_path / "automations.yaml").read_text()
+    assert "New" not in (tmp_path / "automations.yaml").read_text()
+    mock_reload_service.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_write_automation_missing_package_raises(automation_manager, tmp_path):
     with pytest.raises(AutomationNotFoundError):
         await automation_manager.write_automation(

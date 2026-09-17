@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-17
+
+### Added
+- Dry-run mode + git mirroring, together, now actually push something (issue #35): `write_automation` and the three template-entity write tools resolve their would-be content the same way a real write would, then push it to its own `proposed/<kind>-<id>` branch (e.g. `proposed/automation-my_automation`) - freshly branched from the mirror repo's `main` HEAD on every dry-run, after still syncing `main` to the live-drift-detected "before" state first, matching `docs/AUTOMATION_TESTING_DESIGN.md`'s original design exactly. Before this, dry-run mode pushed nothing at all to the mirror repo, silently - easy to mistake for mirroring simply not being wired up for dry-run. `write_dashboard` has no way to compute its would-be storage JSON without performing the real write, so it's excluded (still mirrors nothing in dry-run); `create_helper`/`update_helper`/`delete_helper` remain excluded from mirroring entirely either way (issue #43).
+- `AutomationManager.write_automation()` and `TemplateYamlManager.create_entity()`/`update_entity()`/`delete_entity()` all gained a `dry_run: bool = False` parameter - resolves location and builds the same content a live write would, but returns before ever calling `file_manager.write_file()` or reloading.
+- `mirror.py` gained `mirror_dry_run()` (the proposed-branch push, with its own before-sync-to-main reuse via a new shared `_sync_before()` helper) and `proposed_branch_name()` (sanitizes an arbitrary automation id/unique_id into a git-ref-safe branch name). `MirrorResult` gained a `branch` field, populated only for a proposed-branch push, so the write tool's response can point at exactly which branch to look at.
+
+### Fixed
+- `mirror_enabled`/`dry_run`'s config option descriptions, corrected twice in one day: 2.8.5 first documented the (accurate at the time) fact that dry-run mode mirrored nothing; this release makes that no longer true for `write_automation`/template entities, so both descriptions - and README's Setup step 7 - are updated again to describe the `proposed/*` branch behavior instead of the now-outdated "nothing is mirrored" claim.
+
 ## [2.8.6] - 2026-09-17
 
 ### Changed

@@ -364,6 +364,7 @@ class TemplateYamlManager:
         package: str,
         triggers: list[dict[str, Any]] | None = None,
         expected_hash: str | None = None,
+        dry_run: bool = False,
     ) -> TemplateWriteResult:
         """Create a new template entity in its own new template: block.
 
@@ -379,6 +380,11 @@ class TemplateYamlManager:
         `config` must include a `unique_id` - required for every write
         this module does (see module docstring) - and must not already be
         in use by another template entity.
+
+        `dry_run=True` resolves everything and computes content_after the
+        same way, but returns before file_manager.write_file()/reloading -
+        see automation_manager.write_automation's identical parameter for
+        why (issue #35's dry-run + mirroring proposed/* branch support).
         """
         config = dict(config)
         unique_id = config.get("unique_id")
@@ -404,6 +410,20 @@ class TemplateYamlManager:
         content_after, block_index = await self.hass.async_add_executor_job(
             self._build_create_content, document, platform, config, triggers
         )
+
+        if dry_run:
+            return TemplateWriteResult(
+                location=TemplateEntityLocation(
+                    file_path=file_path,
+                    is_package=True,
+                    block_index=block_index,
+                    platform=platform,
+                    entity_index=0,
+                ),
+                reloaded=False,
+                content_before=content_before,
+                content_after=content_after,
+            )
 
         # Routes through FileManager for the same reasons write_automation
         # does: security allowlist enforcement (packages/*.yaml is
@@ -476,6 +496,7 @@ class TemplateYamlManager:
         config: dict[str, Any],
         *,
         expected_hash: str | None = None,
+        dry_run: bool = False,
     ) -> TemplateWriteResult:
         """Update an existing template entity's config in place, by unique_id.
 
@@ -488,6 +509,8 @@ class TemplateYamlManager:
 
         See _reload_template for when the result's reloaded can come back
         False despite a successful write.
+
+        `dry_run=True` - see create_entity's identical parameter.
         """
         config = dict(config)
         if config.get("unique_id") not in (None, unique_id):
@@ -504,6 +527,14 @@ class TemplateYamlManager:
         content_after = await self.hass.async_add_executor_job(
             self._build_update_content, document, location, config
         )
+
+        if dry_run:
+            return TemplateWriteResult(
+                location=location,
+                reloaded=False,
+                content_before=content_before,
+                content_after=content_after,
+            )
 
         await self.file_manager.write_file(
             location.file_path,
@@ -540,7 +571,11 @@ class TemplateYamlManager:
         return buffer.getvalue()
 
     async def delete_entity(
-        self, unique_id: str, *, expected_hash: str | None = None
+        self,
+        unique_id: str,
+        *,
+        expected_hash: str | None = None,
+        dry_run: bool = False,
     ) -> TemplateWriteResult:
         """Delete a template entity by unique_id.
 
@@ -551,6 +586,8 @@ class TemplateYamlManager:
 
         See _reload_template for when the result's reloaded can come back
         False despite a successful write.
+
+        `dry_run=True` - see create_entity's identical parameter.
         """
         location = await self.find_entity(unique_id)
         content_before = await self.file_manager.read_file(location.file_path)
@@ -558,6 +595,14 @@ class TemplateYamlManager:
         content_after = await self.hass.async_add_executor_job(
             self._build_delete_content, document, location
         )
+
+        if dry_run:
+            return TemplateWriteResult(
+                location=location,
+                reloaded=False,
+                content_before=content_before,
+                content_after=content_after,
+            )
 
         await self.file_manager.write_file(
             location.file_path,
