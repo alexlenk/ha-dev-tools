@@ -42,18 +42,26 @@ from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
-from custom_components.ha_dev_tools.const import OPT_DRY_RUN
+from custom_components.ha_dev_tools.const import (
+    OPT_DRY_RUN,
+    OPT_MIRROR_ENABLED,
+    OPT_MIRROR_REPO,
+    OPT_MIRROR_TOKEN,
+)
 from custom_components.ha_dev_tools.derived_sensor_manager import (
     DerivedSensorNotFoundError,
     FlowStepRequiredError,
     InvalidDerivedSensorDomainError,
 )
+from custom_components.ha_dev_tools.file_manager import FileManager
 from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
     CreateDerivedSensorTool,
+    CreateTemplateEntityTool,
     DeleteDerivedSensorTool,
+    DeleteTemplateEntityTool,
     DevToolsPingTool,
     FindEntitiesTool,
     GetDerivedSensorTool,
@@ -62,8 +70,11 @@ from custom_components.ha_dev_tools.llm_api import (
     ListDerivedSensorsTool,
     ReloadDerivedSensorTool,
     UpdateDerivedSensorTool,
+    UpdateTemplateEntityTool,
     WriteGatedTool,
 )
+from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.template_yaml_manager import TemplateYamlManager
 
 
 def _llm_context(user_id: str | None = None) -> llm.LLMContext:
@@ -761,3 +772,221 @@ async def test_reload_derived_sensor_tool_calls_manager(hass: HomeAssistant):
 
     assert result == {"reloaded": True, "entry_id": "abc"}
     mock_reload.assert_called_once_with(hass, "abc")
+
+
+# --- Template entity write tools (mirroring wiring) --------------------------
+#
+# These exercise the real llm_api.py <-> template_yaml_manager.py integration
+# (a real TemplateYamlManager against a temp config dir, not a mocked one) -
+# specifically the _mirror_file_write() wiring _write() added, both with
+# mirroring off (the default/common case) and on (to cover the actual push
+# call site, not just mirror.mirror_write() in isolation - see test_mirror.py
+# for that).
+
+
+@pytest.fixture
+def _template_security_manager(hass: HomeAssistant):
+    return SecurityManager(
+        hass,
+        {
+            "read_paths": ["configuration.yaml", "packages/**/*.yaml"],
+            "write_paths": ["configuration.yaml", "packages/**/*.yaml"],
+            "denied_paths": [],
+        },
+    )
+
+
+@pytest.fixture
+def _template_file_manager(hass: HomeAssistant, _template_security_manager, tmp_path):
+    hass.config.config_dir = str(tmp_path)
+    return FileManager(hass, _template_security_manager)
+
+
+@pytest.fixture
+def template_yaml_manager(hass: HomeAssistant, _template_file_manager):
+    return TemplateYamlManager(hass, _template_file_manager)
+
+
+@pytest.fixture(autouse=True)
+def _mock_template_reload_service(hass: HomeAssistant):
+    hass.services.async_register("template", "reload", AsyncMock())
+
+
+def _write_package(tmp_path, rel_path: str, content: str) -> None:
+    full = tmp_path / rel_path
+    full.parent.mkdir(parents=True, exist_ok=True)
+    full.write_text(content)
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_tool_writes_and_reports_location(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="create_template_entity",
+            tool_args={
+                "platform": "sensor",
+                "config": {"name": "New", "unique_id": "new_one", "state": "{{ 1 }}"},
+                "package": "emhas.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["file_path"] == "packages/emhas.yaml"
+    assert result["platform"] == "sensor"
+    assert result["reloaded"] is True
+    assert "mirror" not in result  # mirroring not configured on this entry
+
+
+@pytest.mark.asyncio
+async def test_update_template_entity_tool_writes_and_reports_location(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Old\n"
+        "        unique_id: target\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = UpdateTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="update_template_entity",
+            tool_args={
+                "unique_id": "target",
+                "config": {"name": "New", "state": "{{ 2 }}"},
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["file_path"] == "packages/emhas.yaml"
+    assert result["reloaded"] is True
+    assert "mirror" not in result
+
+
+@pytest.mark.asyncio
+async def test_delete_template_entity_tool_writes_and_reports_location(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Gone\n"
+        "        unique_id: gone\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_template_entity", tool_args={"unique_id": "gone"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["file_path"] == "packages/emhas.yaml"
+    assert result["reloaded"] is True
+    assert "mirror" not in result
+
+
+class _FakeMirrorResponse:
+    def __init__(self, status: int, payload: object = None):
+        self.status = status
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"HTTP {self.status}")
+
+
+class _FakeMirrorRequestContext:
+    def __init__(self, response: _FakeMirrorResponse):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeMirrorSession:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def get(self, url, **kwargs):
+        return _FakeMirrorRequestContext(self._responses.pop(0))
+
+    def put(self, url, **kwargs):
+        return _FakeMirrorRequestContext(self._responses.pop(0))
+
+
+@pytest.mark.asyncio
+async def test_update_template_entity_tool_mirrors_when_enabled(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    """Same write as above, but with mirroring configured - covers _mirror_file_write's
+    actual push call site (mirror.mirror_write's own logic is covered by test_mirror.py).
+    """
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Old\n"
+        "        unique_id: target\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = UpdateTemplateEntityTool(template_yaml_manager)
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-2"}}),  # PUT after
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_template_entity",
+                tool_args={
+                    "unique_id": "target",
+                    "config": {"name": "New", "state": "{{ 2 }}"},
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["before", "after"]
