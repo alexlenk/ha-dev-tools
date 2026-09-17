@@ -304,6 +304,39 @@ async def test_create_entity_dry_run_computes_content_without_writing(
     mock_reload_service.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_create_entity_quotes_ambiguous_scalars(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Same live-tested regression as automation_manager.py's equivalent
+    test: a bare on/off/yes/no value in a trigger/condition dict used to
+    round-trip through ruamel.yaml unquoted, then reload via HA's own
+    (PyYAML-based) loader as a bool instead of a str."""
+    _write(tmp_path, "packages/emhas.yaml", "template: []\n")
+
+    result = await template_manager.create_entity(
+        "binary_sensor",
+        {
+            "name": "Uses state condition",
+            "unique_id": "uses_state_condition",
+            "state": "{{ true }}",
+        },
+        package="emhas.yaml",
+        triggers=[
+            {
+                "trigger": "state",
+                "entity_id": "switch.x",
+                "to": "off",
+            }
+        ],
+    )
+
+    assert 'to: "off"' in result.content_after
+
+    parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
+    assert parsed["template"][-1]["triggers"][0]["to"] == "off"
+
+
 # --- update_entity ---------------------------------------------------------
 
 
