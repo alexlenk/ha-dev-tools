@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-09-17
+
+### Added
+- Every write tool (`write_automation`, `create_helper`/`update_helper`/`delete_helper`, `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`, `create_template_entity`/`update_template_entity`/`delete_template_entity`, `write_dashboard`) now requires two calls: the first ("propose") never writes anything and returns a preview plus a short-lived `confirm_token`; only a second call echoing that exact token back proceeds to the existing dry-run/live behavior. Applies in both dry-run and live mode - see `docs/AUTOMATION_TESTING_DESIGN.md`'s "Per-write confirmation" section for the design and why this is deliberately friction/UX rather than a hard guarantee. A token is bound to its exact tool name and arguments (via `write_confirmation.py`), expires after 10 minutes, and is single-use.
+
+### Changed
+- **Breaking**: every write tool's calling contract - a call that previously wrote (or dry-run-previewed) immediately now requires a first propose call and a second confirming call with `confirm_token` set.
+
 ## [2.6.2] - 2026-09-16
 
 ### Fixed
