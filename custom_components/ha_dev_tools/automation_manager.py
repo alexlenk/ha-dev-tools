@@ -57,6 +57,18 @@ class AutomationLocation:
     is_package: bool
 
 
+@dataclass(frozen=True)
+class AutomationWriteResult:
+    """What write_automation() actually wrote - location plus before/after
+    file content, for mirror.py (docs/AUTOMATION_TESTING_DESIGN.md's
+    "Mirroring" section) to push. content_before is None for a brand new
+    file (nothing existed there to capture)."""
+
+    location: AutomationLocation
+    content_before: str | None
+    content_after: str
+
+
 class AutomationNotFoundError(Exception):
     """Raised when an automation id can't be resolved to any known file."""
 
@@ -234,7 +246,7 @@ class AutomationManager:
         *,
         package: str | None = None,
         expected_hash: str | None = None,
-    ) -> AutomationLocation:
+    ) -> AutomationWriteResult:
         """Create or update an automation, writing through the correct file.
 
         - If the id already exists, it's updated in place in whatever file
@@ -247,7 +259,10 @@ class AutomationManager:
           existing conflict model) before writing.
 
         Always calls `automation.reload` after a successful write - never a
-        full restart.
+        full restart. Returns the file's before/after content alongside its
+        location - captured here, not by a caller reading the file again
+        afterward, since "before" only exists in the narrow window before
+        this method's own write_file() call.
         """
         config = dict(config)
         config["id"] = str(automation_id)
@@ -271,8 +286,18 @@ class AutomationManager:
                 file_path=DEFAULT_AUTOMATIONS_FILE, is_package=False
             )
 
-        document = await self._load_document(location.file_path)
-        content = await self.hass.async_add_executor_job(
+        try:
+            content_before: str | None = await self.file_manager.read_file(
+                location.file_path
+            )
+        except FileNotFoundError:
+            content_before = None
+        document = (
+            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
+            if content_before is not None
+            else None
+        )
+        content_after = await self.hass.async_add_executor_job(
             self._build_content, location, document, automation_id, config
         )
 
@@ -283,7 +308,7 @@ class AutomationManager:
         # Bypassing FileManager here would silently skip all of that.
         await self.file_manager.write_file(
             location.file_path,
-            content,
+            content_after,
             expected_hash=expected_hash,
             validate_before_write=True,
         )
@@ -294,7 +319,11 @@ class AutomationManager:
             automation_id,
             location.file_path,
         )
-        return location
+        return AutomationWriteResult(
+            location=location,
+            content_before=content_before,
+            content_after=content_after,
+        )
 
     def _build_content(
         self,
