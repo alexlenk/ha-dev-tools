@@ -365,11 +365,12 @@ async def test_get_automation_returns_error_for_missing_id(
 
 class _StubWriteTool(WriteGatedTool):
     """Minimal WriteGatedTool subclass so these tests exercise only the
-    dry-run gating itself, decoupled from any specific manager's setup."""
+    confirmation/dry-run gating itself, decoupled from any specific
+    manager's setup."""
 
     name = "stub_write"
     description = "stub"
-    parameters = vol.Schema({})
+    parameters = vol.Schema({vol.Optional("confirm_token"): str})
 
     def __init__(self) -> None:
         self.write_called = False
@@ -379,10 +380,27 @@ class _StubWriteTool(WriteGatedTool):
         return {"wrote": True}
 
 
+async def _confirm(hass, tool, admin_user, args: dict) -> dict:
+    """Drive a WriteGatedTool through its propose call, then confirm with the returned token."""
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name=tool.name, tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    return await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name=tool.name, tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+
 @pytest.mark.asyncio
-async def test_write_gated_tool_performs_write_when_dry_run_disabled(
+async def test_write_gated_tool_first_call_requires_confirmation(
     hass: HomeAssistant, setup_integration_with_entry, admin_user
 ):
+    """The first call to any write tool never writes - it proposes instead."""
     _arm(hass)
     tool = _StubWriteTool()
 
@@ -391,6 +409,22 @@ async def test_write_gated_tool_performs_write_when_dry_run_disabled(
         llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
         _llm_context(admin_user.id),
     )
+
+    assert tool.write_called is False
+    assert result["confirmation_required"] is True
+    assert result["action"] == "stub_write"
+    assert result["would_apply"] == {"foo": "bar"}
+    assert isinstance(result["confirm_token"], str) and result["confirm_token"]
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_performs_write_when_dry_run_disabled(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    _arm(hass)
+    tool = _StubWriteTool()
+
+    result = await _confirm(hass, tool, admin_user, {"foo": "bar"})
 
     assert tool.write_called is True
     assert result == {"wrote": True}
@@ -406,11 +440,7 @@ async def test_write_gated_tool_blocks_write_when_dry_run_enabled(
     _arm(hass)
     tool = _StubWriteTool()
 
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
-        _llm_context(admin_user.id),
-    )
+    result = await _confirm(hass, tool, admin_user, {"foo": "bar"})
 
     assert tool.write_called is False
     assert result["dry_run"] is True
@@ -434,6 +464,88 @@ async def test_write_gated_tool_dry_run_still_requires_armed_and_admin(
             llm.ToolInput(tool_name="stub_write", tool_args={}),
             _llm_context(admin_user.id),
         )
+    assert tool.write_called is False
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_rejects_unknown_token(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """A garbage/unrecognized token is treated as a fresh propose, not an error."""
+    _arm(hass)
+    tool = _StubWriteTool()
+
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="stub_write", tool_args={"foo": "bar", "confirm_token": "nope"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert tool.write_called is False
+    assert result["confirmation_required"] is True
+    assert result["confirm_token"] != "nope"
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_token_does_not_authorize_different_args(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """A token issued for one set of arguments doesn't confirm a call with different ones."""
+    _arm(hass)
+    tool = _StubWriteTool()
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
+        _llm_context(admin_user.id),
+    )
+
+    drifted = await tool.async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="stub_write",
+            tool_args={"foo": "different", "confirm_token": proposal["confirm_token"]},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert tool.write_called is False
+    assert drifted["confirmation_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_token_is_single_use(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """Replaying an already-confirmed token doesn't authorize a second write."""
+    _arm(hass)
+    tool = _StubWriteTool()
+    args = {"foo": "bar"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="stub_write", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+
+    first = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+    assert first == {"wrote": True}
+    assert tool.write_called is True
+
+    tool.write_called = False
+    replay = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+    assert replay["confirmation_required"] is True
     assert tool.write_called is False
 
 

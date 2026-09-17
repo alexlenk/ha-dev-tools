@@ -31,6 +31,7 @@ from . import (
     history_manager,
     supervisor_manager,
     template_manager,
+    write_confirmation,
 )
 from .automation_manager import (
     AutomationManager,
@@ -105,6 +106,16 @@ def _parse_datetime(value: str, *, field: str) -> Any:
     return parsed
 
 
+def _write_schema(fields: dict) -> vol.Schema:
+    """A write tool's own fields, plus the confirm_token every WriteGatedTool needs.
+
+    voluptuous.Schema rejects unknown keys by default, so confirm_token
+    has to be declared explicitly in each write tool's own schema - this
+    is the one place that's done, rather than repeating it 11 times.
+    """
+    return vol.Schema({**fields, vol.Optional("confirm_token"): str})
+
+
 class GatedTool(llm.Tool):
     """Base for every dev_tools tool except the diagnostic ping.
 
@@ -147,13 +158,21 @@ class GatedTool(llm.Tool):
 class WriteGatedTool(GatedTool):
     """Base for every tool that mutates state (create/update/delete/write).
 
-    When this integration's dry-run option is enabled, the underlying
-    write never runs at all - the call's own validated arguments are
-    returned as a "would_apply" preview instead, so the agent can show
-    the user what it was about to do before anything actually changes.
-    This is a policy block, not a simulation: it does not attempt to
-    verify the write would have succeeded (e.g. path/schema checks),
-    only that it didn't happen.
+    Every call is two calls, in both run modes (see
+    docs/AUTOMATION_TESTING_DESIGN.md's "Per-write confirmation"):
+
+    1. Propose - called without a valid confirm_token. Nothing runs; the
+       call's own arguments come back as a preview plus a short-lived
+       token bound to this exact tool + arguments.
+    2. Confirm - the same call again, with confirm_token set to what
+       propose returned. Only then does this fall through to run-mode
+       handling: when this integration's dry-run option is enabled, the
+       underlying write still never runs - the same preview comes back
+       instead, so the agent can show the user what it was about to do.
+       Otherwise the real write happens via _write().
+
+    Neither step is a simulation: propose doesn't verify the write would
+    succeed (e.g. path/schema checks), only that it hasn't happened yet.
     """
 
     @override
@@ -163,12 +182,34 @@ class WriteGatedTool(GatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Short-circuit into a dry-run preview, or hand off to _write()."""
+        """Require a confirmed token, then short-circuit into dry-run or hand off to _write()."""
+        args = tool_input.tool_args
+        token = args.get("confirm_token")
+        preview = {key: value for key, value in args.items() if key != "confirm_token"}
+
+        if not token or not write_confirmation.consume_pending(
+            hass, self.name, args, token
+        ):
+            new_token = write_confirmation.create_pending(hass, self.name, args)
+            minutes = write_confirmation.TOKEN_TTL_SECONDS // 60
+            return {
+                "confirmation_required": True,
+                "action": self.name,
+                "would_apply": preview,
+                "confirm_token": new_token,
+                "note": (
+                    "Show this to the user and ask them to confirm before "
+                    "calling again with the identical arguments plus "
+                    f"confirm_token={new_token!r}. Expires in {minutes} "
+                    "minutes."
+                ),
+            }
+
         if access_control.is_dry_run(hass):
             return {
                 "dry_run": True,
                 "action": self.name,
-                "would_apply": tool_input.tool_args,
+                "would_apply": preview,
                 "note": (
                     "Dry-run mode is enabled for this integration - no "
                     "changes were made. Show this to the user; dry-run can "
@@ -673,7 +714,7 @@ class WriteAutomationTool(WriteGatedTool):
         "requires a restart. Pass expected_hash (from get_file_metadata or "
         "a prior read) to detect concurrent edits."
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {
             vol.Required("automation_id"): str,
             vol.Required("config"): dict,
@@ -758,7 +799,7 @@ class CreateHelperTool(WriteGatedTool):
         "'name'; input_number additionally needs 'min'/'max'; "
         "input_select needs 'options' (a list)."
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {vol.Required("domain"): _helper_domain_schema(), vol.Required("config"): dict}
     )
 
@@ -795,7 +836,7 @@ class UpdateHelperTool(WriteGatedTool):
         "list_helpers' results only include the former for exactly this "
         "reason."
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {
             vol.Required("domain"): _helper_domain_schema(),
             vol.Required("item_id"): str,
@@ -831,7 +872,7 @@ class DeleteHelperTool(WriteGatedTool):
 
     name = "delete_helper"
     description = "Delete a storage-defined helper by id."
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {vol.Required("domain"): _helper_domain_schema(), vol.Required("item_id"): str}
     )
 
@@ -950,7 +991,7 @@ class CreateDerivedSensorTool(WriteGatedTool):
         "not just sensors) via the same config flow the UI's Add Helper "
         "wizard uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {
             vol.Required("domain"): _derived_sensor_domain_schema(),
             vol.Optional("steps"): dict,
@@ -985,7 +1026,7 @@ class UpdateDerivedSensorTool(WriteGatedTool):
         "its entry id (from list_derived_sensors), via the same options "
         "flow the UI's helper edit page uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {
             vol.Required("entry_id"): str,
             vol.Optional("steps"): dict,
@@ -1016,7 +1057,7 @@ class DeleteDerivedSensorTool(WriteGatedTool):
 
     name = "delete_derived_sensor"
     description = "Delete a calculated/derived sensor helper by its entry id."
-    parameters = vol.Schema({vol.Required("entry_id"): str})
+    parameters = _write_schema({vol.Required("entry_id"): str})
 
     @override
     async def _write(
@@ -1152,7 +1193,7 @@ class CreateTemplateEntityTool(WriteGatedTool):
         "entities can only be created in a package. 'triggers' is "
         "optional (a list of trigger dicts) for the new block."
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {
             vol.Required("platform"): str,
             vol.Required("config"): dict,
@@ -1210,7 +1251,7 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         "this integration's default security policy - only "
         "package-defined entities can be updated this way."
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {vol.Required("unique_id"): str, vol.Required("config"): dict}
     )
 
@@ -1255,7 +1296,7 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         "read-only-configuration.yaml restriction as "
         "update_template_entity."
     )
-    parameters = vol.Schema({vol.Required("unique_id"): str})
+    parameters = _write_schema({vol.Required("unique_id"): str})
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
         """Init with the TemplateYamlManager backing this tool."""
@@ -1322,7 +1363,7 @@ class WriteDashboardTool(WriteGatedTool):
         "through this path (get_dashboard still works for those, just "
         "not this). Omit url_path for the default dashboard."
     )
-    parameters = vol.Schema(
+    parameters = _write_schema(
         {vol.Required("config"): dict, vol.Optional("url_path"): str}
     )
 

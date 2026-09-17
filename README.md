@@ -76,17 +76,25 @@ repository.
    authenticated with a normal Home Assistant admin long-lived access token as
    a Bearer token - see [Connecting an MCP client](#connecting-an-mcp-client)
    below for exactly how to do that in Claude Code and Claude Desktop.
-5. **Optional: turn on dry-run mode.** From this integration's card in
+5. **Every write tool now requires two calls, always.** `write_automation`,
+   `create_helper`/`update_helper`/`delete_helper`, `create_derived_sensor`/
+   `update_derived_sensor`/`delete_derived_sensor`, `create_template_entity`/
+   `update_template_entity`/`delete_template_entity`, and `write_dashboard`
+   never write on their first call - they return a preview of what would be
+   applied plus a short-lived `confirm_token`. Only a second call with the
+   identical arguments plus that `confirm_token` actually proceeds. This
+   applies whether dry-run mode (below) is on or off - it's a separate,
+   always-on step meant to give you a chance to review before anything
+   happens, not a substitute for dry-run's stronger guarantee. Read-only
+   tools and `reload_domain`/`reload_derived_sensor`/`check_config` are
+   unaffected.
+6. **Optional: turn on dry-run mode.** From this integration's card in
    Settings → Devices & Services, click **Configure** and enable dry-run.
-   Every write tool (`write_automation`, `create_helper`/`update_helper`/
-   `delete_helper`, `create_derived_sensor`/`update_derived_sensor`/
-   `delete_derived_sensor`, `create_template_entity`/`update_template_entity`/
-   `delete_template_entity`, `write_dashboard`) then returns the exact input
-   it would have applied instead of actually applying it, so an agent's
-   proposed changes can be reviewed before you turn dry-run back off. Takes
-   effect immediately, no restart needed. Read-only tools and
-   `reload_domain`/`reload_derived_sensor`/`check_config` are unaffected
-   either way.
+   Once a write tool's confirm_token is confirmed, its underlying write
+   still never actually happens while dry-run is on - the same preview
+   comes back instead, so an agent's proposed changes can be reviewed
+   before you turn dry-run back off. Takes effect immediately, no restart
+   needed.
 
 ## Connecting an MCP client
 
@@ -198,13 +206,14 @@ package-safety works, what Home Assistant's storage layer will and won't let
 a custom integration do safely - see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Offline automation testing and a git-based promotion path out of this
+Offline automation testing and git mirroring of writes made through this
 integration are design-stage, not built - see
 [docs/AUTOMATION_TESTING_DESIGN.md](docs/AUTOMATION_TESTING_DESIGN.md).
 [scripts/config-repo-setup/](scripts/config-repo-setup/) has standalone
 scripts for bootstrapping the security hygiene (`.gitignore`, secret
 scanning, config-validation CI) that design assumes onto your own HA
-*config* repo, independent of whether the rest of it ever gets built.
+*config* repo - a different repo from the dedicated mirror repo that
+design proposes, independent of whether the rest of it ever gets built.
 
 ## Contributing
 
