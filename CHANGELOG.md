@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.5] - 2026-09-17
+
+### Fixed
+- `write_automation`/`create_template_entity`/`update_template_entity`/`delete_template_entity` did a blocking filesystem scan directly on the event loop - HA's own blocking-call detector caught it live: `Detected blocking call to scandir ... at automation_manager.py, line 46: yaml = YAML(typ="rt")`. Root cause: `hass.async_add_executor_job(_new_yaml().load, content)` evaluates `_new_yaml()` (which constructs a `ruamel.yaml.YAML` instance - its `__init__` does the scan) eagerly on the event loop, before ever handing off to the executor - only the already-bound `.load` method actually ran in a worker thread. New `_load_yaml()` helper builds the `YAML()` instance *inside* the executor job in both `automation_manager.py` and `template_yaml_manager.py` (6 call sites total - 3 of them introduced by 2.8.1's own `TemplateWriteResult` refactor, which had copied the same pattern).
+- Clarified two config option descriptions that were stale/incomplete and caused real confusion during a live dry-run-mirroring test: `mirror_enabled`'s only ever mentioned `write_automation`, missing the template-entity tools and `write_dashboard` it's covered since 2.8.1/2.8.2; neither `dry_run` nor `mirror_enabled` explained that dry-run mode short-circuits before any write happens, so mirroring - which only ever pushes from inside the real write path - never has anything to push while dry-run is on. Not a bug in the mirroring logic itself, just an undocumented interaction between two independently-correct features.
+
 ## [2.8.4] - 2026-09-17
 
 ### Fixed

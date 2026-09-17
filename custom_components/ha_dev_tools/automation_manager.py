@@ -49,6 +49,16 @@ def _new_yaml() -> YAML:
     return yaml
 
 
+def _load_yaml(content: str) -> Any:
+    """Synchronous: build a fresh YAML() and load content with it, for
+    hass.async_add_executor_job() - YAML(typ="rt")'s own __init__ does a
+    blocking scandir (HA's own blocking-call detector caught this: a bare
+    `_new_yaml().load` passed as the executor job's callable only defers
+    load() to the executor, since `_new_yaml()` itself is evaluated eagerly
+    on the event loop before being passed in)."""
+    return _new_yaml().load(content)
+
+
 @dataclass(frozen=True)
 class AutomationLocation:
     """Where a given automation id is defined."""
@@ -128,7 +138,7 @@ class AutomationManager:
             content = await self.file_manager.read_file(file_path)
         except FileNotFoundError:
             return None
-        return await self.hass.async_add_executor_job(_new_yaml().load, content)
+        return await self.hass.async_add_executor_job(_load_yaml, content)
 
     def _automation_list(
         self, file_path: str, document: Any
@@ -293,7 +303,7 @@ class AutomationManager:
         except FileNotFoundError:
             content_before = None
         document = (
-            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
+            await self.hass.async_add_executor_job(_load_yaml, content_before)
             if content_before is not None
             else None
         )
