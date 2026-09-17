@@ -7,10 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.7.1] - 2026-09-17
+## [2.8.1] - 2026-09-17
 
 ### Fixed
 - `get_automation` and `audit_automations` only ever read `automations.yaml`/`packages/*.yaml` - so whether an automation is actually enabled right now was invisible to both. Toggling an automation via the UI or the `automation.turn_off`/`turn_on` services never touches the YAML `enabled:` key; that state lives purely on the live `automation.*` entity, whose `entity_id` is derived from `alias` (slugified), not from the config `id` - so it can't be guessed, only looked up by scanning `automation.*` entities for a matching `id` attribute. `get_automation` now reports `currently_enabled` (and a note when no matching entity exists yet, e.g. not reloaded since being added); `audit_automations` now reports a `currently_disabled` list and tags every `references_unavailable_entities` finding with `currently_enabled`, since that finding is real but lower-urgency on an automation that's off anyway. New `audit_manager.find_automation_state()` helper backs both. Found via a real case of an agent treating a disabled automation as if it were live.
+
+## [2.8.0] - 2026-09-17
+
+### Added
+- Git mirroring for `write_automation`, per `docs/AUTOMATION_TESTING_DESIGN.md`'s "Mirroring" section. New options (integration's Configure dialog): enable mirroring, a dedicated private mirror repository (`owner/repo`), and a scoped access token. When enabled, every confirmed `write_automation` call pushes the touched file's before/after content to that repo's `main` branch - a before-commit only if the file has drifted since the last mirrored write (a no-op otherwise), an after-commit with the new content. Talks to GitHub's REST API directly (`mirror.py`, via Home Assistant's own shared `aiohttp` client) rather than shelling out to git or adding GitPython, keeping this integration's runtime footprint unchanged.
+- Content is scanned for likely credentials before every mirror push (`mirror_secrets.py`) - a credential-shaped key (`password`, `token`, `api_key`, `secret`, ...) holding a literal value rather than a `!secret` reference blocks mirroring for that write entirely (never the underlying write itself) and is reported back in the tool's response so the agent can tell the user which file/key to move into `secrets.yaml`.
+- `AutomationManager.write_automation()` now captures and returns the touched file's content immediately before and after the write (`AutomationWriteResult`), the foundation the above two features are built on - captured inline since that "before" state only exists in the narrow window before the write itself.
 
 ## [2.7.0] - 2026-09-17
 

@@ -5,6 +5,14 @@ DOMAIN = "ha_dev_tools"
 # Options flow key for the dry-run toggle (see access_control.is_dry_run()).
 OPT_DRY_RUN = "dry_run"
 
+# Options flow keys for git mirroring (see mirror.py). mirror_repo is
+# "owner/repo" for a dedicated, private mirror repo - deliberately never
+# the repo any deploy mechanism (e.g. the Git Pull add-on) pulls from, see
+# docs/AUTOMATION_TESTING_DESIGN.md's "Mirroring" section.
+OPT_MIRROR_ENABLED = "mirror_enabled"
+OPT_MIRROR_REPO = "mirror_repo"
+OPT_MIRROR_TOKEN = "mirror_token"
+
 # Operation types
 OPERATION_READ = "read"
 OPERATION_WRITE = "write"

@@ -6,7 +6,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_dev_tools.const import DOMAIN, OPT_DRY_RUN
+from custom_components.ha_dev_tools.const import (
+    DOMAIN,
+    OPT_DRY_RUN,
+    OPT_MIRROR_ENABLED,
+    OPT_MIRROR_REPO,
+    OPT_MIRROR_TOKEN,
+)
 
 
 @pytest.mark.asyncio
@@ -80,3 +86,38 @@ async def test_options_flow_enables_dry_run(hass: HomeAssistant):
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[OPT_DRY_RUN] is True
+
+
+@pytest.mark.asyncio
+async def test_options_flow_mirror_fields_default_unset(hass: HomeAssistant):
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    defaults = result["data_schema"]({})
+    assert defaults[OPT_MIRROR_ENABLED] is False
+    assert defaults[OPT_MIRROR_REPO] == ""
+    assert defaults[OPT_MIRROR_TOKEN] == ""
+
+
+@pytest.mark.asyncio
+async def test_options_flow_configures_mirroring(hass: HomeAssistant):
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            OPT_DRY_RUN: False,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_example",
+        },
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[OPT_MIRROR_ENABLED] is True
+    assert entry.options[OPT_MIRROR_REPO] == "alexlenk/ha-mirror"
+    assert entry.options[OPT_MIRROR_TOKEN] == "ghp_example"

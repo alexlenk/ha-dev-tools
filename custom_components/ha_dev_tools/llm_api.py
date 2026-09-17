@@ -29,6 +29,7 @@ from . import (
     entity_manager,
     helper_manager,
     history_manager,
+    mirror,
     supervisor_manager,
     template_manager,
     write_confirmation,
@@ -75,6 +76,21 @@ API_PROMPT = (
 def _tool_error(exc: Exception) -> JsonObjectType:
     """Uniform error payload for tool responses - never let a raw exception escape a Tool."""
     return {"error": str(exc), "error_type": type(exc).__name__}
+
+
+def _mirror_result_payload(result: mirror.MirrorResult) -> JsonObjectType:
+    """Turn a mirror.MirrorResult into a JSON-safe payload for a write tool's response.
+
+    Always present when mirroring is enabled, whether or not it actually
+    pushed anything - a skip (credential detected, or a push failure) is
+    something the agent should show the user, not silently swallow.
+    """
+    payload: JsonObjectType = {"mirrored": result.mirrored}
+    if result.reason is not None:
+        payload["reason"] = result.reason
+    if result.commits:
+        payload["commits"] = list(result.commits)
+    return payload
 
 
 def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
@@ -737,7 +753,7 @@ class WriteAutomationTool(WriteGatedTool):
         """Write the automation through its correct file and reload."""
         args = tool_input.tool_args
         try:
-            location = await self._manager.write_automation(
+            result = await self._manager.write_automation(
                 args["automation_id"],
                 args["config"],
                 package=args.get("package"),
@@ -745,7 +761,19 @@ class WriteAutomationTool(WriteGatedTool):
             )
         except (AutomationNotFoundError, DuplicateAutomationIdError, ValueError) as exc:
             return _tool_error(exc)
-        return {"file_path": location.file_path, "is_package": location.is_package}
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "is_package": result.location.is_package,
+        }
+        if mirror.is_mirror_enabled(hass):
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=result.location.file_path,
+                content_before=result.content_before,
+                content_after=result.content_after,
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 def _helper_domain_schema() -> vol.Schema:
