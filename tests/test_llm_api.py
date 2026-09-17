@@ -615,6 +615,51 @@ async def test_get_entity_history_tool_rejects_invalid_start_time(hass: HomeAssi
 
 
 @pytest.mark.asyncio
+async def test_get_entity_history_tool_rejects_missing_start_time(
+    hass: HomeAssistant,
+):
+    """A caller omitting start_time gets a clean ValueError, not a raw
+    KeyError - see issue #45: the schema already marks it vol.Required, but
+    that schema is never actually invoked to validate tool_args."""
+    tool = GetEntityHistoryTool()
+
+    result = await tool._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_entity_history",
+            tool_args={"entity_ids": ["sensor.x"]},
+        ),
+        _llm_context(),
+    )
+
+    assert result == {
+        "error": "'start_time' is required",
+        "error_type": "ValueError",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_entity_history_tool_rejects_missing_entity_ids(
+    hass: HomeAssistant,
+):
+    tool = GetEntityHistoryTool()
+
+    result = await tool._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_entity_history",
+            tool_args={"start_time": "2026-08-10T00:00:00+00:00"},
+        ),
+        _llm_context(),
+    )
+
+    assert result == {
+        "error": "'entity_ids' is required",
+        "error_type": "ValueError",
+    }
+
+
+@pytest.mark.asyncio
 async def test_get_entity_history_tool_surfaces_recorder_not_available(
     hass: HomeAssistant,
 ):
@@ -636,6 +681,24 @@ async def test_get_entity_history_tool_surfaces_recorder_not_available(
         )
 
     assert result["error_type"] == "RecorderNotAvailableError"
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_tool_rejects_missing_start_time(hass: HomeAssistant):
+    """Same fix, same crash class as get_entity_history's start_time - see
+    issue #45."""
+    tool = GetLogbookTool()
+
+    result = await tool._run(
+        hass,
+        llm.ToolInput(tool_name="get_logbook", tool_args={}),
+        _llm_context(),
+    )
+
+    assert result == {
+        "error": "'start_time' is required",
+        "error_type": "ValueError",
+    }
 
 
 @pytest.mark.asyncio

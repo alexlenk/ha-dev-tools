@@ -95,6 +95,38 @@ repository.
    comes back instead, so an agent's proposed changes can be reviewed
    before you turn dry-run back off. Takes effect immediately, no restart
    needed.
+7. **Optional: turn on git mirroring.** From the same **Configure** dialog,
+   enable git mirroring, set **Mirror repository** to a dedicated private
+   GitHub repo (`owner/repo` form - separate from your HA config repo, and
+   never the repo any deploy mechanism pulls from - create it first if it
+   doesn't exist yet, private, empty is fine), and paste a **Mirror
+   repository access token** scoped to only that repo. Every confirmed
+   write from a supported tool then pushes the touched file's before/after
+   content to that repo's `main` branch - a private, push-only audit trail
+   for manual rollback. Content that looks like it holds a literal
+   credential (not routed through `!secret`) is never pushed; the tool's
+   response reports that back instead.
+
+   To create the access token:
+   1. GitHub → your avatar (top right) → **Settings** → **Developer
+      settings** → **Personal access tokens** → **Fine-grained tokens** →
+      **Generate new token**.
+   2. **Repository access**: "Only select repositories" → pick the one
+      dedicated mirror repo above.
+   3. **Permissions** → **Repository permissions** → set **Contents** to
+      **Read and write**. Leave everything else at "No access" - no
+      `workflow` scope, no admin rights, no force-push.
+   4. Set an **Expiration** date - not "No expiration".
+   5. Click **Generate token**, copy it immediately (GitHub won't show it
+      again), and paste it into the **Mirror repository access token**
+      field. It's stored as a password-type field.
+
+   Supported today: `write_automation`, `create_template_entity`/
+   `update_template_entity`/`delete_template_entity`, `write_dashboard`.
+   `create_helper`/`update_helper`/`delete_helper` are intentionally not
+   yet covered - HA's helper storage debounces its save 10 seconds, which
+   would silently mirror stale content (tracked in issue #43); derived-
+   sensor mirroring hasn't been built yet either.
 
 ## Connecting an MCP client
 
@@ -206,14 +238,16 @@ package-safety works, what Home Assistant's storage layer will and won't let
 a custom integration do safely - see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Offline automation testing and git mirroring of writes made through this
-integration are design-stage, not built - see
+Git mirroring of writes made through this integration is built - see
+[Setup](#setup) step 7 above to turn it on. Offline automation testing
+(the two-tier lint/CI concept) is still design-stage, not built - see
 [docs/AUTOMATION_TESTING_DESIGN.md](docs/AUTOMATION_TESTING_DESIGN.md).
 [scripts/config-repo-setup/](scripts/config-repo-setup/) has standalone
 scripts for bootstrapping the security hygiene (`.gitignore`, secret
 scanning, config-validation CI) that design assumes onto your own HA
-*config* repo - a different repo from the dedicated mirror repo that
-design proposes, independent of whether the rest of it ever gets built.
+*config* repo - a different repo from the dedicated mirror repo mirroring
+actually pushes to, independent of whether the rest of that design ever
+gets built.
 
 ## Contributing
 
