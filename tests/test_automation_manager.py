@@ -150,11 +150,14 @@ async def test_write_automation_updates_existing_in_package_preserves_other_cont
         "    name: EMHAS enabled\n",
     )
 
-    await automation_manager.write_automation(
+    result = await automation_manager.write_automation(
         "solar_charge",
         {"alias": "New alias", "trigger": [], "action": [], "mode": "single"},
     )
 
+    assert "Old alias" in result.content_before
+    assert "New alias" in result.content_after
+    assert result.content_before != result.content_after
     mock_reload_service.assert_called_once()
 
     raw = (tmp_path / "packages/emhas.yaml").read_text()
@@ -176,11 +179,13 @@ async def test_write_automation_creates_new_in_default_file(
 ):
     assert not (tmp_path / "automations.yaml").exists()
 
-    location = await automation_manager.write_automation(
+    result = await automation_manager.write_automation(
         "brand_new", {"alias": "Brand new", "trigger": [], "action": []}
     )
 
-    assert location.file_path == "automations.yaml"
+    assert result.location.file_path == "automations.yaml"
+    assert result.content_before is None
+    assert "brand_new" in result.content_after
     mock_reload_service.assert_called_once()
 
     parsed = pyyaml.safe_load((tmp_path / "automations.yaml").read_text())
@@ -194,13 +199,14 @@ async def test_write_automation_creates_new_with_explicit_package(
 ):
     _write(tmp_path, "packages/emhas.yaml", "automation: []\n")
 
-    location = await automation_manager.write_automation(
+    result = await automation_manager.write_automation(
         "new_in_package",
         {"alias": "New in package", "trigger": [], "action": []},
         package="emhas.yaml",
     )
 
-    assert location.file_path == "packages/emhas.yaml"
+    assert result.location.file_path == "packages/emhas.yaml"
+    assert result.content_before == "automation: []\n"
     parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
     assert parsed["automation"][0]["id"] == "new_in_package"
 

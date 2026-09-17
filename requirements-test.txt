@@ -13,6 +13,21 @@ pytest-cov>=4.0.0
 hypothesis>=6.0.0
 
 # Additional test utilities
+# aioresponses is NOT usable here, despite being listed as a dependency -
+# left unimported anywhere. homeassistant==2026.8.2 (pinned below,
+# transitively) hard-pins aiohttp==3.14.3 exactly, not a floor - confirmed
+# directly by a real resolution failure, not assumed. aioresponses==0.7.9
+# (its latest release; confirmed no newer one exists) constructs
+# aiohttp.ClientResponse directly for every mocked call, and aiohttp
+# 3.14.0 added a new required keyword-only stream_writer argument
+# ClientResponse.__init__ now needs that aioresponses doesn't pass -
+# breaks every mocked call, GET and PUT alike (bisected directly: aiohttp
+# 3.13.0 works, 3.14.0 doesn't) - and since homeassistant's pin can't be
+# moved down to 3.13.x, aioresponses simply cannot mock anything in this
+# repo as things stand. tests/test_mirror.py uses a small hand-rolled
+# fake aiohttp session instead - see that file. Revisit this comment (and
+# whether aioresponses is worth keeping in this file at all) if a future
+# aioresponses release fixes the incompatibility.
 aioresponses>=0.7.0
 freezegun>=1.2.0
 
