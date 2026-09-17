@@ -288,9 +288,7 @@ async def test_get_automation_reports_currently_enabled_true(
     (tmp_path / "automations.yaml").write_text(
         "- id: my_automation\n  trigger: []\n  action: []\n"
     )
-    hass.states.async_set(
-        "automation.my_automation", "on", {"id": "my_automation"}
-    )
+    hass.states.async_set("automation.my_automation", "on", {"id": "my_automation"})
 
     result = await GetAutomationTool(manager).async_call(
         hass,
@@ -313,9 +311,7 @@ async def test_get_automation_reports_currently_enabled_false(
     (tmp_path / "automations.yaml").write_text(
         "- id: my_automation\n  trigger: []\n  action: []\n"
     )
-    hass.states.async_set(
-        "automation.my_automation", "off", {"id": "my_automation"}
-    )
+    hass.states.async_set("automation.my_automation", "off", {"id": "my_automation"})
 
     result = await GetAutomationTool(manager).async_call(
         hass,
@@ -1401,8 +1397,8 @@ async def test_write_automation_tool_dry_run_mirrors_to_proposed_branch(
             OPT_MIRROR_TOKEN: "ghp_test",
         },
     )
-    _arm(hass)
     manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
     (tmp_path / "automations.yaml").write_text(
         "- id: my_automation\n  alias: Old\n  trigger: []\n  action: []\n"
     )
@@ -1459,8 +1455,8 @@ async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabl
     hass.config_entries.async_update_entry(
         setup_integration_with_entry, options={OPT_DRY_RUN: True}
     )
-    _arm(hass)
     manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
     (tmp_path / "automations.yaml").write_text(
         "- id: my_automation\n  trigger: []\n  action: []\n"
     )
@@ -1487,6 +1483,14 @@ async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabl
 async def test_update_template_entity_tool_dry_run_mirrors_to_proposed_branch(
     hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
 ):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
     _write_package(
         tmp_path,
         "packages/emhas.yaml",
