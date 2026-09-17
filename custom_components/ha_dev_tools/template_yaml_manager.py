@@ -137,15 +137,14 @@ class TemplateEntityLocation:
 class TemplateWriteResult:
     """What a template entity write actually did - location, reload status,
     and before/after file content, for mirror.py (docs/AUTOMATION_TESTING_DESIGN.md's
-    "Mirroring" section) to push. content_before is None only if the target
-    file didn't exist at all - in practice always populated here, since
-    create_entity already requires its target package file to exist and
-    update_entity/delete_entity only reach this point via find_entity,
-    which already found the entity in an existing file."""
+    "Mirroring" section) to push. Unlike write_automation, content_before is
+    never None here: create_entity already requires its target package file
+    to exist, and update_entity/delete_entity only reach this point via
+    find_entity, which already found the entity in an existing file."""
 
     location: TemplateEntityLocation
     reloaded: bool
-    content_before: str | None
+    content_before: str
     content_after: str
 
 
@@ -390,14 +389,9 @@ class TemplateYamlManager:
                 "first, this tool won't invent a new package file"
             )
 
-        try:
-            content_before: str | None = await self.file_manager.read_file(file_path)
-        except FileNotFoundError:
-            content_before = None
-        document = (
-            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
-            if content_before is not None
-            else None
+        content_before = await self.file_manager.read_file(file_path)
+        document = await self.hass.async_add_executor_job(
+            _new_yaml().load, content_before
         )
         content_after, block_index = await self.hass.async_add_executor_job(
             self._build_create_content, document, platform, config, triggers
@@ -497,16 +491,9 @@ class TemplateYamlManager:
         config["unique_id"] = unique_id
 
         location = await self.find_entity(unique_id)
-        try:
-            content_before: str | None = await self.file_manager.read_file(
-                location.file_path
-            )
-        except FileNotFoundError:
-            content_before = None
-        document = (
-            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
-            if content_before is not None
-            else None
+        content_before = await self.file_manager.read_file(location.file_path)
+        document = await self.hass.async_add_executor_job(
+            _new_yaml().load, content_before
         )
         content_after = await self.hass.async_add_executor_job(
             self._build_update_content, document, location, config
@@ -560,16 +547,9 @@ class TemplateYamlManager:
         False despite a successful write.
         """
         location = await self.find_entity(unique_id)
-        try:
-            content_before: str | None = await self.file_manager.read_file(
-                location.file_path
-            )
-        except FileNotFoundError:
-            content_before = None
-        document = (
-            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
-            if content_before is not None
-            else None
+        content_before = await self.file_manager.read_file(location.file_path)
+        document = await self.hass.async_add_executor_job(
+            _new_yaml().load, content_before
         )
         content_after = await self.hass.async_add_executor_job(
             self._build_delete_content, document, location

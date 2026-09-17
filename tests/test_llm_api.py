@@ -990,3 +990,96 @@ async def test_update_template_entity_tool_mirrors_when_enabled(
 
     assert result["mirror"]["mirrored"] is True
     assert result["mirror"]["commits"] == ["before", "after"]
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_tool_mirrors_when_enabled(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-2"}}),  # PUT after
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="create_template_entity",
+                tool_args={
+                    "platform": "sensor",
+                    "config": {
+                        "name": "New",
+                        "unique_id": "new_one",
+                        "state": "{{ 1 }}",
+                    },
+                    "package": "emhas.yaml",
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["before", "after"]
+
+
+@pytest.mark.asyncio
+async def test_delete_template_entity_tool_mirrors_when_enabled(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Gone\n"
+        "        unique_id: gone\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-2"}}),  # PUT after
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_template_entity", tool_args={"unique_id": "gone"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["before", "after"]
