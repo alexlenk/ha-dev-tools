@@ -133,6 +133,22 @@ class TemplateEntityLocation:
     entity_index: int
 
 
+@dataclass(frozen=True)
+class TemplateWriteResult:
+    """What a template entity write actually did - location, reload status,
+    and before/after file content, for mirror.py (docs/AUTOMATION_TESTING_DESIGN.md's
+    "Mirroring" section) to push. content_before is None only if the target
+    file didn't exist at all - in practice always populated here, since
+    create_entity already requires its target package file to exist and
+    update_entity/delete_entity only reach this point via find_entity,
+    which already found the entity in an existing file."""
+
+    location: TemplateEntityLocation
+    reloaded: bool
+    content_before: str | None
+    content_after: str
+
+
 class TemplateEntityNotFoundError(Exception):
     """Raised when a unique_id doesn't resolve to any known template entity."""
 
@@ -339,11 +355,11 @@ class TemplateYamlManager:
         package: str,
         triggers: list[dict[str, Any]] | None = None,
         expected_hash: str | None = None,
-    ) -> tuple[TemplateEntityLocation, bool]:
+    ) -> TemplateWriteResult:
         """Create a new template entity in its own new template: block.
 
-        Returns (location, reloaded) - see _reload_template for when
-        reloaded can come back False despite a successful write.
+        See _reload_template for when the result's reloaded can come back
+        False despite a successful write.
 
         `package` names an existing `packages/<package>` file (relative to
         packages/) - required, no default-file fallback, since
@@ -374,8 +390,16 @@ class TemplateYamlManager:
                 "first, this tool won't invent a new package file"
             )
 
-        document = await self._load_document(file_path)
-        content, block_index = await self.hass.async_add_executor_job(
+        try:
+            content_before: str | None = await self.file_manager.read_file(file_path)
+        except FileNotFoundError:
+            content_before = None
+        document = (
+            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
+            if content_before is not None
+            else None
+        )
+        content_after, block_index = await self.hass.async_add_executor_job(
             self._build_create_content, document, platform, config, triggers
         )
 
@@ -386,7 +410,7 @@ class TemplateYamlManager:
         # atomic write.
         await self.file_manager.write_file(
             file_path,
-            content,
+            content_after,
             expected_hash=expected_hash,
             validate_before_write=True,
         )
@@ -405,7 +429,12 @@ class TemplateYamlManager:
             platform,
             file_path,
         )
-        return location, reloaded
+        return TemplateWriteResult(
+            location=location,
+            reloaded=reloaded,
+            content_before=content_before,
+            content_after=content_after,
+        )
 
     def _build_create_content(
         self,
@@ -445,7 +474,7 @@ class TemplateYamlManager:
         config: dict[str, Any],
         *,
         expected_hash: str | None = None,
-    ) -> tuple[TemplateEntityLocation, bool]:
+    ) -> TemplateWriteResult:
         """Update an existing template entity's config in place, by unique_id.
 
         Only touches the resolved entity's own dict within its existing
@@ -455,8 +484,8 @@ class TemplateYamlManager:
         renaming a unique_id isn't supported by this method (delete +
         create instead, deliberately - a rename is really two operations).
 
-        Returns (location, reloaded) - see _reload_template for when
-        reloaded can come back False despite a successful write.
+        See _reload_template for when the result's reloaded can come back
+        False despite a successful write.
         """
         config = dict(config)
         if config.get("unique_id") not in (None, unique_id):
@@ -468,14 +497,24 @@ class TemplateYamlManager:
         config["unique_id"] = unique_id
 
         location = await self.find_entity(unique_id)
-        document = await self._load_document(location.file_path)
-        content = await self.hass.async_add_executor_job(
+        try:
+            content_before: str | None = await self.file_manager.read_file(
+                location.file_path
+            )
+        except FileNotFoundError:
+            content_before = None
+        document = (
+            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
+            if content_before is not None
+            else None
+        )
+        content_after = await self.hass.async_add_executor_job(
             self._build_update_content, document, location, config
         )
 
         await self.file_manager.write_file(
             location.file_path,
-            content,
+            content_after,
             expected_hash=expected_hash,
             validate_before_write=True,
         )
@@ -486,7 +525,12 @@ class TemplateYamlManager:
             unique_id,
             location.file_path,
         )
-        return location, reloaded
+        return TemplateWriteResult(
+            location=location,
+            reloaded=reloaded,
+            content_before=content_before,
+            content_after=content_after,
+        )
 
     def _build_update_content(
         self, document: Any, location: TemplateEntityLocation, config: dict[str, Any]
@@ -504,7 +548,7 @@ class TemplateYamlManager:
 
     async def delete_entity(
         self, unique_id: str, *, expected_hash: str | None = None
-    ) -> tuple[TemplateEntityLocation, bool]:
+    ) -> TemplateWriteResult:
         """Delete a template entity by unique_id.
 
         Cleans up after itself: if removing this entity empties its
@@ -512,18 +556,28 @@ class TemplateYamlManager:
         block with nothing but trigger/condition/variable keys (no
         remaining platform lists), the whole block is removed.
 
-        Returns (location, reloaded) - see _reload_template for when
-        reloaded can come back False despite a successful write.
+        See _reload_template for when the result's reloaded can come back
+        False despite a successful write.
         """
         location = await self.find_entity(unique_id)
-        document = await self._load_document(location.file_path)
-        content = await self.hass.async_add_executor_job(
+        try:
+            content_before: str | None = await self.file_manager.read_file(
+                location.file_path
+            )
+        except FileNotFoundError:
+            content_before = None
+        document = (
+            await self.hass.async_add_executor_job(_new_yaml().load, content_before)
+            if content_before is not None
+            else None
+        )
+        content_after = await self.hass.async_add_executor_job(
             self._build_delete_content, document, location
         )
 
         await self.file_manager.write_file(
             location.file_path,
-            content,
+            content_after,
             expected_hash=expected_hash,
             validate_before_write=True,
         )
@@ -534,7 +588,12 @@ class TemplateYamlManager:
             unique_id,
             location.file_path,
         )
-        return location, reloaded
+        return TemplateWriteResult(
+            location=location,
+            reloaded=reloaded,
+            content_before=content_before,
+            content_after=content_after,
+        )
 
     def _build_delete_content(
         self, document: Any, location: TemplateEntityLocation

@@ -233,16 +233,18 @@ async def test_create_entity_new_block_preserves_other_content(
         "    name: EMHAS enabled\n",
     )
 
-    location, reloaded = await template_manager.create_entity(
+    result = await template_manager.create_entity(
         "sensor",
         {"name": "New Sensor", "unique_id": "new_sensor", "state": "{{ 1 }}"},
         package="emhas.yaml",
         triggers=[{"trigger": "state", "entity_id": "sensor.source"}],
     )
 
-    assert location.file_path == "packages/emhas.yaml"
-    assert location.platform == "sensor"
-    assert reloaded is True
+    assert result.location.file_path == "packages/emhas.yaml"
+    assert result.location.platform == "sensor"
+    assert result.reloaded is True
+    assert "emhas_enabled" in result.content_before
+    assert "new_sensor" in result.content_after
     mock_reload_service.assert_called_once()
 
     raw = (tmp_path / "packages/emhas.yaml").read_text()
@@ -302,11 +304,13 @@ async def test_update_entity_in_place_preserves_siblings(
         '        state: "{{ 2 }}"\n',
     )
 
-    location, reloaded = await template_manager.update_entity(
+    result = await template_manager.update_entity(
         "target", {"name": "Target Renamed", "state": "{{ 3 }}"}
     )
 
-    assert reloaded is True
+    assert result.reloaded is True
+    assert "Target" in result.content_before and "Renamed" not in result.content_before
+    assert "Target Renamed" in result.content_after
     _, config = await template_manager.get_entity("target")
     assert config["name"] == "Target Renamed"
     assert config["state"] == "{{ 3 }}"
@@ -360,9 +364,11 @@ async def test_delete_entity_removes_only_that_entity(
         '      - name: B\n        unique_id: delete_me\n        state: "{{ 2 }}"\n',
     )
 
-    location, reloaded = await template_manager.delete_entity("delete_me")
+    result = await template_manager.delete_entity("delete_me")
 
-    assert reloaded is True
+    assert result.reloaded is True
+    assert "delete_me" in result.content_before
+    assert "delete_me" not in result.content_after
     entities = await template_manager.list_entities()
     assert {e["unique_id"] for e in entities} == {"keep_me"}
 

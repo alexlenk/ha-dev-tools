@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-09-17
+
+### Added
+- Git mirroring extended to `create_template_entity`/`update_template_entity`/`delete_template_entity`, completing the file-based half of issue #34's mirroring scope (`write_automation` was #40; helpers/dashboard/derived-sensor mirroring, which need a different content source, remain open). `TemplateYamlManager.create_entity`/`update_entity`/`delete_entity` now return the touched file's before/after content (`TemplateWriteResult`), same shape and same reasoning as `AutomationWriteResult`. `llm_api.py`'s three template-entity write tools share a new `_mirror_file_write()` helper with `write_automation` rather than repeating the same mirror-and-report logic four times.
+
 ## [2.8.0] - 2026-09-17
 
 ### Added

@@ -93,6 +93,29 @@ def _mirror_result_payload(result: mirror.MirrorResult) -> JsonObjectType:
     return payload
 
 
+async def _mirror_file_write(
+    hass: HomeAssistant,
+    response: JsonObjectType,
+    *,
+    file_path: str,
+    content_before: str | None,
+    content_after: str,
+) -> JsonObjectType:
+    """Mirror a file-based write's before/after content into response['mirror'],
+    if mirroring is enabled - shared by every WriteGatedTool whose _write()
+    touches a single resolved YAML file (write_automation, create/update/
+    delete_template_entity)."""
+    if mirror.is_mirror_enabled(hass):
+        mirror_result = await mirror.mirror_write(
+            hass,
+            path=file_path,
+            content_before=content_before,
+            content_after=content_after,
+        )
+        response["mirror"] = _mirror_result_payload(mirror_result)
+    return response
+
+
 def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
     """Structured (not error) payload for a config/options flow step needing input.
 
@@ -750,15 +773,13 @@ class WriteAutomationTool(WriteGatedTool):
             "file_path": result.location.file_path,
             "is_package": result.location.is_package,
         }
-        if mirror.is_mirror_enabled(hass):
-            mirror_result = await mirror.mirror_write(
-                hass,
-                path=result.location.file_path,
-                content_before=result.content_before,
-                content_after=result.content_after,
-            )
-            response["mirror"] = _mirror_result_payload(mirror_result)
-        return response
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 def _helper_domain_schema() -> vol.Schema:
@@ -1229,7 +1250,7 @@ class CreateTemplateEntityTool(WriteGatedTool):
         """Create the template entity."""
         args = tool_input.tool_args
         try:
-            location, reloaded = await self._manager.create_entity(
+            result = await self._manager.create_entity(
                 args["platform"],
                 args["config"],
                 package=args["package"],
@@ -1241,11 +1262,18 @@ class CreateTemplateEntityTool(WriteGatedTool):
             TemplateEntityNotFoundError,
         ) as exc:
             return _tool_error(exc)
-        return {
-            "file_path": location.file_path,
-            "platform": location.platform,
-            "reloaded": reloaded,
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 class UpdateTemplateEntityTool(WriteGatedTool):
@@ -1282,7 +1310,7 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         """Update the template entity."""
         args = tool_input.tool_args
         try:
-            location, reloaded = await self._manager.update_entity(
+            result = await self._manager.update_entity(
                 args["unique_id"], args["config"]
             )
         except (
@@ -1291,11 +1319,18 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             DuplicateTemplateUniqueIdError,
         ) as exc:
             return _tool_error(exc)
-        return {
-            "file_path": location.file_path,
-            "platform": location.platform,
-            "reloaded": reloaded,
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 class DeleteTemplateEntityTool(WriteGatedTool):
@@ -1324,16 +1359,23 @@ class DeleteTemplateEntityTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Delete the template entity."""
         try:
-            location, reloaded = await self._manager.delete_entity(
+            result = await self._manager.delete_entity(
                 tool_input.tool_args["unique_id"]
             )
         except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
             return _tool_error(exc)
-        return {
-            "file_path": location.file_path,
-            "platform": location.platform,
-            "reloaded": reloaded,
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 class GetDashboardTool(GatedTool):
