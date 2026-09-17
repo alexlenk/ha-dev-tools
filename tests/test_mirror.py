@@ -276,3 +276,51 @@ async def test_mirror_write_reports_failure_without_raising(
 
     assert result.mirrored is False
     assert "mirror push failed" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_mirror_write_json_content_type_uses_storage_scanner(
+    hass: HomeAssistant, mirror_entry
+):
+    """content_type='json' scans with find_storage_credentials (no !secret
+    exemption), not find_yaml_credentials - a plain 'password' value in JSON
+    content would slip past the YAML scanner's tag check entirely differently,
+    so this proves the dispatch actually happens, not just that some scan runs."""
+    fake_session = FakeSession([])
+
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass,
+            path=".storage/input_boolean",
+            content_before=None,
+            content_after='{"data": {"items": [{"id": "a", "password": "literal"}]}}',
+            content_type="json",
+        )
+
+    assert result.mirrored is False
+    assert "password" in result.reason
+    assert fake_session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_mirror_write_json_content_type_pushes_clean_content(
+    hass: HomeAssistant, mirror_entry
+):
+    fake_session = FakeSession(
+        [
+            _FakeResponse(404),
+            _FakeResponse(201, {"content": {"sha": "sha-1"}}),
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass,
+            path=".storage/lovelace",
+            content_before=None,
+            content_after='{"data": {"config": {"views": []}}}',
+            content_type="json",
+        )
+
+    assert result.mirrored is True
+    assert result.commits == ("after",)
