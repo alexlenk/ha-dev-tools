@@ -77,6 +77,12 @@ class FakeSession:
     def put(self, url, **kwargs):
         return self._next("PUT", url, kwargs)
 
+    def post(self, url, **kwargs):
+        return self._next("POST", url, kwargs)
+
+    def patch(self, url, **kwargs):
+        return self._next("PATCH", url, kwargs)
+
 
 def _patched(fake_session: FakeSession):
     return patch(
@@ -324,3 +330,174 @@ async def test_mirror_write_json_content_type_pushes_clean_content(
 
     assert result.mirrored is True
     assert result.commits == ("after",)
+
+
+def test_proposed_branch_name_sanitizes_unsafe_characters():
+    assert (
+        mirror.proposed_branch_name("automation", "my cool:id!")
+        == "proposed/automation-my-cool-id"
+    )
+
+
+def test_proposed_branch_name_falls_back_when_id_is_all_unsafe():
+    assert (
+        mirror.proposed_branch_name("automation", "::::")
+        == "proposed/automation-unknown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mirror_dry_run_skips_when_content_has_credential(
+    hass: HomeAssistant, mirror_entry
+):
+    fake_session = FakeSession([])
+
+    with _patched(fake_session):
+        result = await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  password: hunter2\n",
+            kind="automation",
+            entity_id="a",
+        )
+
+    assert result.mirrored is False
+    assert "password" in result.reason
+    assert fake_session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_mirror_dry_run_fails_cleanly_when_main_branch_missing(
+    hass: HomeAssistant, mirror_entry
+):
+    """main doesn't exist in the mirror repo at all - nothing to branch
+    proposed/* off of (issue #50's hardcoded-branch gap, surfaced here too)."""
+    fake_session = FakeSession(
+        [
+            _FakeResponse(404),  # _sync_before's GET current -> doesn't exist
+            _FakeResponse(404),  # GET git/ref/heads/main -> doesn't exist
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  alias: x\n",
+            kind="automation",
+            entity_id="a",
+        )
+
+    assert result.mirrored is False
+    assert "main" in result.reason
+    assert "doesn't exist" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_mirror_dry_run_creates_new_proposed_branch(
+    hass: HomeAssistant, mirror_entry
+):
+    fake_session = FakeSession(
+        [
+            _FakeResponse(404),  # _sync_before GET current -> doesn't exist
+            _FakeResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/heads/main
+            _FakeResponse(404),  # GET ref/heads/proposed/... -> doesn't exist
+            _FakeResponse(201),  # POST git/refs -> create branch
+            _FakeResponse(404),  # GET current on the new branch -> doesn't exist
+            _FakeResponse(201, {"content": {"sha": "proposed-sha"}}),  # PUT
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  alias: would-be\n",
+            kind="automation",
+            entity_id="a",
+        )
+
+    assert result.mirrored is True
+    assert result.commits == ("proposed",)
+    assert result.branch == "proposed/automation-a"
+    assert [c[0] for c in fake_session.calls] == [
+        "GET",
+        "GET",
+        "GET",
+        "POST",
+        "GET",
+        "PUT",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mirror_dry_run_resets_existing_proposed_branch_and_pushes_before(
+    hass: HomeAssistant, mirror_entry
+):
+    """Live state has drifted (before-commit fires) and the proposed branch
+    already exists from an earlier dry-run attempt - it gets force-reset to
+    main's current tip rather than accumulating old history."""
+    recorded = "- id: a\n  alias: recorded\n"
+    stale_proposed = "- id: a\n  alias: stale-proposal\n"
+
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"content": _b64(recorded), "sha": "old-sha"}),
+            _FakeResponse(200, {"content": {"sha": "before-sha"}}),  # PUT before
+            _FakeResponse(200, {"object": {"sha": "main-sha-2"}}),  # GET ref/main
+            _FakeResponse(
+                200, {"object": {"sha": "stale-branch-sha"}}
+            ),  # GET ref/proposed - exists, stale
+            _FakeResponse(200),  # PATCH force-reset
+            _FakeResponse(
+                200, {"content": _b64(stale_proposed), "sha": "stale-file-sha"}
+            ),  # GET current on branch after reset
+            _FakeResponse(200, {"content": {"sha": "new-proposed-sha"}}),  # PUT
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before="- id: a\n  alias: drifted\n",
+            content_after="- id: a\n  alias: new-proposal\n",
+            kind="automation",
+            entity_id="a",
+        )
+
+    assert result.mirrored is True
+    assert result.commits == ("before", "proposed")
+    assert result.branch == "proposed/automation-a"
+    assert [c[0] for c in fake_session.calls] == [
+        "GET",
+        "PUT",
+        "GET",
+        "GET",
+        "PATCH",
+        "GET",
+        "PUT",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mirror_dry_run_reports_failure_without_raising(
+    hass: HomeAssistant, mirror_entry
+):
+    fake_session = FakeSession([_FakeResponse(500)])
+
+    with _patched(fake_session):
+        result = await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  alias: x\n",
+            kind="automation",
+            entity_id="a",
+        )
+
+    assert result.mirrored is False
+    assert "mirror push failed" in result.reason

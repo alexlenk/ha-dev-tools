@@ -91,6 +91,8 @@ def _mirror_result_payload(result: mirror.MirrorResult) -> JsonObjectType:
         payload["reason"] = result.reason
     if result.commits:
         payload["commits"] = list(result.commits)
+    if result.branch is not None:
+        payload["branch"] = result.branch
     return payload
 
 
@@ -300,7 +302,7 @@ class WriteGatedTool(GatedTool):
             }
 
         if access_control.is_dry_run(hass):
-            return {
+            response: JsonObjectType = {
                 "dry_run": True,
                 "action": self.name,
                 "would_apply": preview,
@@ -310,6 +312,13 @@ class WriteGatedTool(GatedTool):
                     "be turned off from this integration's Configure page."
                 ),
             }
+            if mirror.is_mirror_enabled(hass):
+                mirror_result = await self._dry_run_mirror(
+                    hass, tool_input, llm_context
+                )
+                if mirror_result is not None:
+                    response["mirror"] = _mirror_result_payload(mirror_result)
+            return response
         return await self._write(hass, tool_input, llm_context)
 
     async def _write(
@@ -320,6 +329,23 @@ class WriteGatedTool(GatedTool):
     ) -> JsonObjectType:
         """Subclasses implement their actual write logic here, not _run."""
         raise NotImplementedError
+
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """Override to push this dry-run call's resolved would-be content to
+        a proposed/<kind>-<id> branch (docs/AUTOMATION_TESTING_DESIGN.md's
+        "Mirroring" section, dry-run bullet - issue #35), for tools whose
+        manager can compute that content without actually writing it.
+        Returns None (the default) for tools that can't - write_dashboard
+        (no such compute-without-writing path; the real WS command is the
+        only way to resolve it) and every non-file-based write tool (helpers,
+        derived sensors) - the dry-run preview then just has no 'mirror' key,
+        same as before this existed."""
+        return None
 
 
 class DevToolsPingTool(llm.Tool):
@@ -855,6 +881,38 @@ class WriteAutomationTool(WriteGatedTool):
             content_after=result.content_after,
         )
 
+    @override
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """Compute this call's would-be automation content and mirror it to
+        a proposed/automation-<id> branch (issue #35) - reuses
+        write_automation's own resolve+build logic via dry_run=True, so
+        "what would happen" here is exactly what a real write would
+        produce, just never touching disk."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.write_automation(
+                args["automation_id"],
+                args["config"],
+                package=args.get("package"),
+                expected_hash=args.get("expected_hash"),
+                dry_run=True,
+            )
+        except (AutomationNotFoundError, DuplicateAutomationIdError, ValueError) as exc:
+            return mirror.MirrorResult(mirrored=False, reason=str(exc))
+        return await mirror.mirror_dry_run(
+            hass,
+            path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+            kind="automation",
+            entity_id=args["automation_id"],
+        )
+
 
 def _helper_domain_schema() -> vol.Schema:
     return vol.In(HELPER_DOMAINS)
@@ -1351,6 +1409,38 @@ class CreateTemplateEntityTool(WriteGatedTool):
             content_after=result.content_after,
         )
 
+    @override
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """See WriteAutomationTool's identical override - issue #35."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.create_entity(
+                args["platform"],
+                args["config"],
+                package=args["package"],
+                triggers=args.get("triggers"),
+                dry_run=True,
+            )
+        except (
+            ValueError,
+            DuplicateTemplateUniqueIdError,
+            TemplateEntityNotFoundError,
+        ) as exc:
+            return mirror.MirrorResult(mirrored=False, reason=str(exc))
+        return await mirror.mirror_dry_run(
+            hass,
+            path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+            kind="template_entity",
+            entity_id=str(args["config"].get("unique_id", "unknown")),
+        )
+
 
 class UpdateTemplateEntityTool(WriteGatedTool):
     """Update an existing YAML template: entity's config in place."""
@@ -1408,6 +1498,34 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             content_after=result.content_after,
         )
 
+    @override
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """See WriteAutomationTool's identical override - issue #35."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.update_entity(
+                args["unique_id"], args["config"], dry_run=True
+            )
+        except (
+            ValueError,
+            TemplateEntityNotFoundError,
+            DuplicateTemplateUniqueIdError,
+        ) as exc:
+            return mirror.MirrorResult(mirrored=False, reason=str(exc))
+        return await mirror.mirror_dry_run(
+            hass,
+            path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+            kind="template_entity",
+            entity_id=args["unique_id"],
+        )
+
 
 class DeleteTemplateEntityTool(WriteGatedTool):
     """Delete a YAML template: entity by unique_id."""
@@ -1451,6 +1569,28 @@ class DeleteTemplateEntityTool(WriteGatedTool):
             file_path=result.location.file_path,
             content_before=result.content_before,
             content_after=result.content_after,
+        )
+
+    @override
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """See WriteAutomationTool's identical override - issue #35."""
+        unique_id = tool_input.tool_args["unique_id"]
+        try:
+            result = await self._manager.delete_entity(unique_id, dry_run=True)
+        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
+            return mirror.MirrorResult(mirrored=False, reason=str(exc))
+        return await mirror.mirror_dry_run(
+            hass,
+            path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+            kind="template_entity",
+            entity_id=unique_id,
         )
 
 

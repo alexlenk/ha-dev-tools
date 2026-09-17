@@ -8,17 +8,18 @@ integration otherwise keeps its runtime footprint deliberately light
 (RPi/NUC-class installs).
 
 Independent of run mode (live/dry-run) and of the confirm-token gate -
-mirror_write() is only ever called after a write has already been
-confirmed and (in live mode) actually applied. Mirroring failing must
-never fail or block the write it's mirroring - every public function here
-catches its own errors and reports them in its return value instead of
-raising.
+mirror_write()/mirror_dry_run() are only ever called after a write has
+already been confirmed (and, for mirror_write(), actually applied).
+Mirroring failing must never fail or block the write it's mirroring -
+every public function here catches its own errors and reports them in
+its return value instead of raising.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,14 +75,25 @@ def _headers(hass: HomeAssistant) -> dict[str, str]:
     }
 
 
-async def _get_current(hass: HomeAssistant, path: str) -> tuple[str, str] | None:
-    """Fetch (content, sha) for path at the mirror repo's main HEAD, or None if it
+def proposed_branch_name(kind: str, entity_id: str) -> str:
+    """Build a proposed/<kind>-<id> branch name from an arbitrary entity id.
+
+    Automation ids and template unique_ids are user-chosen strings, not
+    guaranteed git-ref-safe (spaces, colons, etc. are all valid HA ids but
+    invalid in a git ref) - sanitize rather than pass through raw.
+    """
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", entity_id).strip("-.") or "unknown"
+    return f"proposed/{kind}-{safe_id}"
+
+
+async def _get_current(
+    hass: HomeAssistant, path: str, *, branch: str = _TARGET_BRANCH
+) -> tuple[str, str] | None:
+    """Fetch (content, sha) for path at the given branch's HEAD, or None if it
     doesn't exist there yet."""
     session = async_get_clientsession(hass)
     url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{path}"
-    async with session.get(
-        url, headers=_headers(hass), params={"ref": _TARGET_BRANCH}
-    ) as resp:
+    async with session.get(url, headers=_headers(hass), params={"ref": branch}) as resp:
         if resp.status == 404:
             return None
         resp.raise_for_status()
@@ -91,9 +103,15 @@ async def _get_current(hass: HomeAssistant, path: str) -> tuple[str, str] | None
 
 
 async def _put(
-    hass: HomeAssistant, path: str, content: str, *, message: str, sha: str | None
+    hass: HomeAssistant,
+    path: str,
+    content: str,
+    *,
+    message: str,
+    sha: str | None,
+    branch: str = _TARGET_BRANCH,
 ) -> str:
-    """Create or update a single file at the mirror repo's main HEAD, return its new sha.
+    """Create or update a single file at the given branch's HEAD, return its new sha.
 
     One file per call, never a broader tree write - keeps each mirror
     commit scoped to exactly the file a write tool actually touched.
@@ -103,7 +121,7 @@ async def _put(
     payload: dict[str, Any] = {
         "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-        "branch": _TARGET_BRANCH,
+        "branch": branch,
     }
     if sha is not None:
         payload["sha"] = sha
@@ -113,13 +131,48 @@ async def _put(
     return body["content"]["sha"]
 
 
+async def _get_ref_sha(hass: HomeAssistant, branch: str) -> str | None:
+    """Get a branch's current HEAD commit sha, or None if it doesn't exist."""
+    session = async_get_clientsession(hass)
+    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/ref/heads/{branch}"
+    async with session.get(url, headers=_headers(hass)) as resp:
+        if resp.status == 404:
+            return None
+        resp.raise_for_status()
+        body = await resp.json()
+    return body["object"]["sha"]
+
+
+async def _set_ref(hass: HomeAssistant, branch: str, sha: str) -> None:
+    """Create branch if it doesn't exist yet, or force-move it to sha if it does.
+
+    Always resetting an existing proposed/* branch to the base commit's
+    current tip (rather than leaving old history on it) is what keeps that
+    branch's diff a clean "current reality -> would-be change" comparison
+    on every dry-run, not an accumulating pile of unrelated old attempts.
+    """
+    session = async_get_clientsession(hass)
+    existing = await _get_ref_sha(hass, branch)
+    if existing is None:
+        url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs"
+        payload = {"ref": f"refs/heads/{branch}", "sha": sha}
+        async with session.post(url, headers=_headers(hass), json=payload) as resp:
+            resp.raise_for_status()
+    elif existing != sha:
+        url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs/heads/{branch}"
+        payload = {"sha": sha, "force": True}
+        async with session.patch(url, headers=_headers(hass), json=payload) as resp:
+            resp.raise_for_status()
+
+
 @dataclass(frozen=True)
 class MirrorResult:
-    """What mirror_write() actually did, for the write tool's response."""
+    """What mirror_write()/mirror_dry_run() actually did, for the write tool's response."""
 
     mirrored: bool
     reason: str | None = None
     commits: tuple[str, ...] = ()
+    branch: str | None = None
 
 
 # Which mirror_secrets.py scanner to run, keyed by the pushed content's own
@@ -134,6 +187,56 @@ _SCANNERS = {
 }
 
 
+def _credential_findings(
+    content_before: str | None, content_after: str, content_type: str
+) -> list[str]:
+    scan = _SCANNERS[content_type]
+    findings = scan(content_after)
+    if content_before is not None:
+        findings = findings + scan(content_before)
+    return findings
+
+
+def _credential_skip_reason(path: str, content_type: str, findings: list[str]) -> str:
+    if content_type == "yaml":
+        advice = (
+            "not routed through !secret - move it to secrets.yaml to "
+            "enable mirroring for this file."
+        )
+    else:
+        advice = (
+            "with a literal value - HA's storage files have no !secret "
+            "mechanism, so this file can't be mirrored as-is."
+        )
+    return f"'{path}' has a credential-shaped key ({', '.join(findings)}) {advice}"
+
+
+async def _sync_before(
+    hass: HomeAssistant, path: str, content_before: str | None
+) -> tuple[str | None, str | None, list[str]]:
+    """Sync the target branch to content_before if it's drifted, return the
+    resulting (current_content, current_sha, commits) - shared by
+    mirror_write() (before its own after-commit to main) and
+    mirror_dry_run() (before branching proposed/* off of main)."""
+    commits: list[str] = []
+    current = await _get_current(hass, path)
+    current_content = current[0] if current is not None else None
+    current_sha = current[1] if current is not None else None
+
+    if content_before is not None and current_content != content_before:
+        current_sha = await _put(
+            hass,
+            path,
+            content_before,
+            message=f"Mirror: live state of {path} before write",
+            sha=current_sha,
+        )
+        current_content = content_before
+        commits.append("before")
+
+    return current_content, current_sha, commits
+
+
 async def mirror_write(
     hass: HomeAssistant,
     *,
@@ -142,7 +245,7 @@ async def mirror_write(
     content_after: str,
     content_type: str = "yaml",
 ) -> MirrorResult:
-    """Mirror a confirmed write's before/after content for one file.
+    """Mirror a confirmed, applied write's before/after content for one file.
 
     - Scans content_after (and content_before, if present) for credentials
       first (mirror_secrets.py / issue #39, via the scanner content_type
@@ -155,45 +258,17 @@ async def mirror_write(
     - After-commit: pushes content_after, skipped if it's already what the
       mirror repo now has (e.g. the write produced byte-identical content).
     """
-    scan = _SCANNERS[content_type]
-    findings = scan(content_after)
-    if content_before is not None:
-        findings = findings + scan(content_before)
+    findings = _credential_findings(content_before, content_after, content_type)
     if findings:
-        if content_type == "yaml":
-            advice = (
-                "not routed through !secret - move it to secrets.yaml to "
-                "enable mirroring for this file."
-            )
-        else:
-            advice = (
-                "with a literal value - HA's storage files have no !secret "
-                "mechanism, so this file can't be mirrored as-is."
-            )
         return MirrorResult(
             mirrored=False,
-            reason=(
-                f"'{path}' has a credential-shaped key "
-                f"({', '.join(findings)}) {advice}"
-            ),
+            reason=_credential_skip_reason(path, content_type, findings),
         )
 
-    commits: list[str] = []
     try:
-        current = await _get_current(hass, path)
-        current_content = current[0] if current is not None else None
-        current_sha = current[1] if current is not None else None
-
-        if content_before is not None and current_content != content_before:
-            current_sha = await _put(
-                hass,
-                path,
-                content_before,
-                message=f"Mirror: live state of {path} before write",
-                sha=current_sha,
-            )
-            current_content = content_before
-            commits.append("before")
+        current_content, current_sha, commits = await _sync_before(
+            hass, path, content_before
+        )
 
         if current_content != content_after:
             await _put(
@@ -209,3 +284,70 @@ async def mirror_write(
         return MirrorResult(mirrored=False, reason=f"mirror push failed: {exc}")
 
     return MirrorResult(mirrored=True, commits=tuple(commits))
+
+
+async def mirror_dry_run(
+    hass: HomeAssistant,
+    *,
+    path: str,
+    content_before: str | None,
+    content_after: str,
+    kind: str,
+    entity_id: str,
+    content_type: str = "yaml",
+) -> MirrorResult:
+    """Mirror a dry-run write's resolved would-be content, per
+    docs/AUTOMATION_TESTING_DESIGN.md's "Mirroring" section: nothing live
+    changed, so instead of an after-commit to main, the would-be content
+    goes to its own proposed/<kind>-<id> branch, freshly branched from
+    main's current HEAD - after still syncing main to content_before first
+    (same drift-detection reasoning as mirror_write's before-commit; this
+    runs "on every confirmed write, either run mode", per that doc).
+
+    Never touches main's own after-state, since nothing was actually
+    written - only mirror_write() (a live, applied write) does that.
+    """
+    findings = _credential_findings(content_before, content_after, content_type)
+    if findings:
+        return MirrorResult(
+            mirrored=False,
+            reason=_credential_skip_reason(path, content_type, findings),
+        )
+
+    branch = proposed_branch_name(kind, entity_id)
+    try:
+        _current_content, _current_sha, commits = await _sync_before(
+            hass, path, content_before
+        )
+
+        main_sha = await _get_ref_sha(hass, _TARGET_BRANCH)
+        if main_sha is None:
+            return MirrorResult(
+                mirrored=False,
+                reason=(
+                    f"'{_TARGET_BRANCH}' branch doesn't exist yet in the "
+                    "mirror repo - nothing to branch proposed/* off of. "
+                    "Create it (even as an empty initial commit) to enable "
+                    "dry-run mirroring."
+                ),
+            )
+        await _set_ref(hass, branch, main_sha)
+
+        proposed_current = await _get_current(hass, path, branch=branch)
+        proposed_content = proposed_current[0] if proposed_current is not None else None
+        proposed_sha = proposed_current[1] if proposed_current is not None else None
+        if proposed_content != content_after:
+            await _put(
+                hass,
+                path,
+                content_after,
+                message=f"Propose: would-be {path} from a dry-run write",
+                sha=proposed_sha,
+                branch=branch,
+            )
+            commits.append("proposed")
+    except Exception as exc:  # noqa: BLE001 - never let a mirror failure fail the write
+        _LOGGER.warning("Dry-run mirroring %s failed: %s", path, exc)
+        return MirrorResult(mirrored=False, reason=f"mirror push failed: {exc}")
+
+    return MirrorResult(mirrored=True, commits=tuple(commits), branch=branch)

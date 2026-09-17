@@ -281,6 +281,29 @@ async def test_create_entity_appends_new_block_alongside_existing(
     assert unique_ids == {"existing", "new_one"}
 
 
+@pytest.mark.asyncio
+async def test_create_entity_dry_run_computes_content_without_writing(
+    template_manager, tmp_path, mock_reload_service
+):
+    """dry_run=True (issue #35) resolves the same location and builds the
+    same content_after a real create would, but never touches the file or
+    reloads."""
+    _write(tmp_path, "packages/emhas.yaml", "template: []\n")
+
+    result = await template_manager.create_entity(
+        "sensor",
+        {"name": "New", "unique_id": "new_one", "state": "{{ 1 }}"},
+        package="emhas.yaml",
+        dry_run=True,
+    )
+
+    assert result.location.file_path == "packages/emhas.yaml"
+    assert result.reloaded is False
+    assert "new_one" in result.content_after
+    assert "new_one" not in (tmp_path / "packages/emhas.yaml").read_text()
+    mock_reload_service.assert_not_called()
+
+
 # --- update_entity ---------------------------------------------------------
 
 
@@ -323,6 +346,33 @@ async def test_update_entity_in_place_preserves_siblings(
     assert parsed["template"][0]["triggers"] == [
         {"trigger": "state", "entity_id": "sensor.source"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_update_entity_dry_run_computes_content_without_writing(
+    template_manager, tmp_path, mock_reload_service
+):
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Old\n"
+        "        unique_id: target\n"
+        '        state: "{{ 1 }}"\n',
+    )
+
+    result = await template_manager.update_entity(
+        "target", {"name": "New", "state": "{{ 2 }}"}, dry_run=True
+    )
+
+    assert result.reloaded is False
+    assert "Old" in result.content_before
+    assert "New" in result.content_after
+    raw = (tmp_path / "packages/emhas.yaml").read_text()
+    assert "Old" in raw
+    assert "New" not in raw
+    mock_reload_service.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -371,6 +421,28 @@ async def test_delete_entity_removes_only_that_entity(
     assert "delete_me" not in result.content_after
     entities = await template_manager.list_entities()
     assert {e["unique_id"] for e in entities} == {"keep_me"}
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_dry_run_computes_content_without_writing(
+    template_manager, tmp_path, mock_reload_service
+):
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        '      - name: A\n        unique_id: delete_me\n        state: "{{ 1 }}"\n',
+    )
+
+    result = await template_manager.delete_entity("delete_me", dry_run=True)
+
+    assert result.reloaded is False
+    assert "delete_me" in result.content_before
+    assert "delete_me" not in result.content_after
+    raw = (tmp_path / "packages/emhas.yaml").read_text()
+    assert "delete_me" in raw
+    mock_reload_service.assert_not_called()
 
 
 @pytest.mark.asyncio
