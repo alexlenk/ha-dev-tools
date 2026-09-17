@@ -294,8 +294,10 @@ class WriteGatedTool(GatedTool):
                 "would_apply": preview,
                 "confirm_token": new_token,
                 "note": (
-                    "Show this to the user and ask them to confirm before "
-                    "calling again with the identical arguments plus "
+                    "Show the user the full would_apply content above - the "
+                    "complete config/definition, not just its id or a "
+                    "summary of it - and ask them to confirm before calling "
+                    "again with the identical arguments plus "
                     f"confirm_token={new_token!r}. Expires in {minutes} "
                     "minutes."
                 ),
@@ -308,8 +310,10 @@ class WriteGatedTool(GatedTool):
                 "would_apply": preview,
                 "note": (
                     "Dry-run mode is enabled for this integration - no "
-                    "changes were made. Show this to the user; dry-run can "
-                    "be turned off from this integration's Configure page."
+                    "changes were made. Show the user the full would_apply "
+                    "content above - the complete config/definition, not "
+                    "just its id or a summary of it. Dry-run can be turned "
+                    "off from this integration's Configure page."
                 ),
             }
             if mirror.is_mirror_enabled(hass):
