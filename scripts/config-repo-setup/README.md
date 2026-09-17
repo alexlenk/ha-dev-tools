@@ -2,8 +2,12 @@
 
 Scripts to bootstrap a Home Assistant *configuration* repo (a separate
 repo from this one - your `automations.yaml`/`packages/` tree, e.g. an
-`ha-installation-*` repo) with the baseline hygiene discussed in
+`ha-installation-*` repo, most likely the one the Git Pull add-on deploys
+from) with the baseline hygiene discussed in
 [docs/AUTOMATION_TESTING_DESIGN.md](../../docs/AUTOMATION_TESTING_DESIGN.md).
+Not the same repo as that design's proposed *mirror* repo - the mirror is
+a separate, dedicated, private repo written only by `ha_dev_tools` itself;
+these scripts have nothing to do with it.
 
 They're standalone shell scripts with no dependency on this integration at
 runtime - copy them, or run them straight out of a clone of this repo,

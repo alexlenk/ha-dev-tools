@@ -1,11 +1,22 @@
-# Automation testing & git-based promotion — design notes
+# Automation testing & git mirroring — design notes
 
-Design record for offline automation testing and a git-based promotion path
-out of `ha_dev_tools`. Nothing in this document is built. It exists to
-capture the reasoning behind the shape that was chosen (and the shapes that
-were explicitly rejected) before any of it becomes code, the same way
+Design record for offline automation testing and git mirroring of writes
+made through `ha_dev_tools`. Nothing in this document is built. It exists
+to capture the reasoning behind the shape that was chosen (and the shapes
+that were explicitly rejected) before any of it becomes code, the same way
 [ARCHITECTURE.md](ARCHITECTURE.md)'s "Still open" section tracks other
 deferred work.
+
+The git-mirroring section below replaces an earlier "git-based promotion
+flow" design that shipped in this same document. That earlier shape framed
+a branch + PR + CI + human-merge sequence as something that gated whether a
+change reached the live instance. It didn't, and pretending it did was the
+problem: every write tool already applies live via reload, unconditionally,
+before any of that git activity happens. Git can't un-happen a write, so a
+"promotion pipeline" downstream of it was an audit trail wearing a gate's
+clothes. The replacement below keeps the audit trail (that part was real
+and useful) and adds an actual gate - a per-write confirmation step - that
+sits where it can do something, before the write happens rather than after.
 
 ## The gap
 
@@ -65,6 +76,10 @@ engine:
 This stays in `ha_dev_tools` because it benefits from being live (real
 entity registry, real current state for template checks) and is cheap and
 safe enough to run on every edit as part of the authoring conversation.
+It's also the natural content for the "local testing" step in the
+per-write confirmation flow below - `lint_automation`'s findings belong in
+the preview a human reviews before confirming a write, not as a separate
+tool call the agent has to remember to make.
 
 ### Tier 2 - offline behavioral simulation (a separate project, not this repo)
 
@@ -95,91 +110,151 @@ threshold, `for:` duration edges, source state `unavailable`/`unknown`,
 multiple `choose` branches true at once - rather than hand-writing every
 case.
 
-The bridge back to this repo: a possible future `write_automation_test`
-tool that has the MCP-connected agent author a scenario test into the
-user's config repo alongside an automation edit, so authoring stays
-conversational while execution stays fully decoupled from the live
-instance. Not designed yet - format (plain `pytest`, or a declarative YAML
-scenario DSL) is an open question.
+Tier 2 runs as GitHub Actions CI on commits pushed to the mirror repo (see
+below), not as a separate always-on service. Not designed yet - format
+(plain `pytest`, or a declarative YAML scenario DSL) is an open question.
 
-## Git-based promotion flow
+## Run modes, per-write confirmation, and mirroring
 
-Proposed pipeline: local edit + `lint_automation` (tier 1) -> local commit
--> push a branch + open a PR -> independent CI re-test (tier 2, hosted
-runner) -> required human review/merge -> the existing Git Pull add-on
-deploys to production, unchanged.
+Three independent, orthogonal controls, not one setting doing three jobs:
 
-Each stage, and why it's shaped this way:
+### Run mode - `live` | `dry-run`
 
-- **Local commit, no remote.** Safe by construction - no remote credential
-  involved at all. Only if the target directory is already a git working
-  tree; never auto-`git init` an unmanaged directory. Closes a real gap
-  (no audit trail today) without adding any new attack surface, but note
-  it doesn't change what happens to the *live* instance - `write_automation`
-  already writes and reloads regardless of git state; committing just
-  records that same change.
-- **Push a branch, never the branch `git-pull` tracks.** The credential
-  the MCP server holds is scoped to branch-push + PR creation only -
-  explicitly no merge/admin/bypass rights on the protected branch.
-- **Branch protection enforced by the git host**, not by the pipeline's
-  good behavior. This is what actually re-establishes a human confirmation
-  gate - a compromised token that technically can't merge can't bypass a
-  server-side protection rule, whereas "the bot just doesn't push to main"
-  is not a security boundary.
-- **CI re-test at this stage is a correctness gate, not an authorization
-  gate.** "CI green" must never auto-merge or auto-deploy. If it did, the
-  same production box would be authoring, approving, and receiving its own
-  change - the CI step would be rubber-stamping rather than reviewing, and
-  it would corrupt the property git history is supposed to guarantee (that
-  a human looked at this before it landed).
-- **Git Pull add-on stays exactly as it is.** Its own independent deploy
-  credential, only ever pulling the protected branch, only after a human
-  merge. Not folded into `ha_dev_tools` - it already exists, is
-  purpose-built, and is deliberately outside the LLM-facing tool surface;
-  merging the two would put a second, previously-separate credential
-  domain behind whatever compromises the MCP server.
+A global, persistent integration option (`access_control.is_dry_run()`,
+unchanged from what's built today). Every write tool runs identically in
+either mode, right up to the very last step: in `dry-run`, the resolved
+change is returned as a preview instead of being written to disk; in
+`live`, it's written and the affected config reloaded. This is a mode you
+set for an environment (a test instance vs. a real one), not something
+toggled per change - and specifically **not** the mechanism that decides
+whether an individual write was approved. A human forgetting to flip a
+global option back is exactly the failure mode that must not gate safety.
+
+### Per-write confirmation - always on, both modes
+
+Every write tool call is two calls, regardless of run mode:
+
+1. **Propose.** Called without a valid token. Builds the same config dict
+   the real write would use (matching what `automation_manager.py` etc.
+   already construct), renders it as YAML with the `id` key stripped (not
+   something a user should hand-edit back in - it's bookkeeping for
+   `find_automation`'s duplicate-id detection), runs `lint_automation`
+   against it, and returns the YAML snippet plus the lint findings plus a
+   short-lived token bound to a hash of the tool name and its normalized
+   arguments. No side effects. The tool's own response text instructs the
+   agent to show this to the user and ask for explicit confirmation before
+   calling again - the same pattern `WriteGatedTool`'s existing dry-run
+   short-circuit already uses successfully today.
+2. **Confirm.** Same tool, same arguments, plus the matching token. Only
+   then does it fall through to the run-mode-appropriate outcome above.
+
+This is friction and a better experience, deliberately not a hard security
+boundary - it doesn't stop an agent from calling both steps back to back
+with no real human in between. Binding the token to the specific tool +
+arguments (not a bare nonce) at least stops silent scope drift between the
+two calls. An HA-native out-of-band approval gate (a mobile actionable
+notification or a dashboard button, with the real write wired to an
+automation the LLM/MCP surface has no path to at all) was considered and
+rejected - see "Explicitly rejected" below.
+
+### Mirroring - independent on/off, either run mode
+
+A dedicated, private GitHub repo, configured in the integration -
+deliberately **not** the same repo the existing Git Pull add-on deploys
+from (see `scripts/config-repo-setup/`, which hardens that different repo
+for a different purpose). Keeping them separate is what avoids two
+independent writers racing on the same live config tree: this mirror is
+written only by `ha_dev_tools` itself, on its own schedule, and nothing
+else ever pulls from or pushes to it.
+
+On every **confirmed** write (mirroring on, either run mode):
+
+- **Before-commit, always to `main`.** Sync `main` to the actual current
+  live state of the file(s) about to be touched, before anything else
+  happens. If nothing has changed since the last mirrored write, this is
+  an empty diff - git has nothing new to record, which is itself a useful
+  confirmation that live state hasn't drifted. If it *has* drifted (a
+  manual SSH edit, the Git Pull add-on deploying something), that drift
+  becomes its own visible commit on `main` before the new change lands on
+  top of it - `main` ends up an honest, continuously-verified mirror of
+  live truth, not just a log of agent actions.
+- **Live mode:** the write applies, then the new live state is committed
+  to `main` as well.
+- **Dry-run mode:** nothing live changes. The resolved would-be YAML is
+  pushed instead to its own branch, one branch per automation/entity
+  (`proposed/<kind>-<id>`), branched from the `main` HEAD `main` was just
+  synced to - so the branch's diff cleanly shows "this is what would
+  change from current reality," and multiple explored-but-unapplied ideas
+  can coexist without clobbering each other. Accepted tradeoff: this
+  accumulates branches over time with no pruning policy yet (see "Open
+  questions").
+
+Manual rollback is just: find the old YAML in `main`'s history, copy it
+back via the same paste-able-snippet flow the propose step already uses.
+No merge, no deploy credential, no special tooling - the mirror repo is a
+read source for a human, not a system another process consumes.
 
 ## Blast-radius analysis
 
-Two separate axes matter here, and conflating them is the easiest way to
-get this wrong.
+**Effect on the live instance** - mirroring itself never touches the live
+instance and never gates anything; it happens strictly after (live mode)
+or instead of (dry-run) a write that the run mode + confirmation token
+already decided. The things that actually control live effect are, in
+order: run mode (can this write ever touch disk at all), then per-write
+confirmation (was this specific call deliberately confirmed).
 
-**Effect on the live instance**, weakest to strongest:
-1. `lint_automation` / tier-2 simulation - no persistence anywhere.
-2. Branch + PR (scoped credential, no merge rights) - zero live effect
-   until a separate human merge plus the existing Git Pull add-on act on
-   it. Strictly weaker than what `write_automation` can already do today.
-3. `write_automation`'s existing full write + reload - the ceiling that
-   already exists, unconditionally, today.
+**New attack surface beyond the live instance**, per
+[SECURITY.md](SECURITY.md)'s framing of this integration already
+collapsing one previously-separate credential domain (HA auth vs.
+SSH/file access): the mirroring push credential, scoped to a single
+dedicated private repo, outbound-push only - no merge/admin rights needed
+because nothing in this design ever merges anything back into the live
+system. Reading tier-2 CI results back (see "Open questions") would add an
+outbound read of the GitHub API using that same credential; deliberately
+not an inbound webhook, since that would mean exposing an endpoint to the
+internet from an instance that's typically behind NAT with no port
+forward - a much larger new surface than an outbound-only credential.
 
-Local commit doesn't sit on this axis at all - it piggybacks on whatever
-already wrote the file; it adds provenance, not live impact.
+## Explicitly rejected
 
-**New attack surface beyond the live instance** (this is the part worth
-being honest about, per [SECURITY.md](SECURITY.md)'s framing of this
-integration already collapsing one previously-separate credential domain -
-HA auth vs. SSH/file access):
-- Local commit: none.
-- Branch + PR: introduces a git-host credential to the MCP server's
-  process for the first time. Mitigated, not eliminated, by scoping (no
-  merge/admin) and host-enforced branch protection. Also makes the CI
-  triggered by that branch reachable from an HA-token compromise - if that
-  CI exposes any secret to PR-triggered jobs, a compromised MCP server now
-  has a second path to it. That's a pre-existing CI-hardening
-  responsibility (secrets shouldn't be exposed to PR-triggered jobs
-  regardless of who pushes), not a vulnerability this design creates - but
-  it is a precondition to state explicitly before relying on this pipeline,
-  not something to assume away.
-
-**Explicitly rejected:**
-- Running a second `HomeAssistant()` core inside the live instance.
-- The MCP server holding `git pull`/production-deploy credentials, or
-  reimplementing anything the Git Pull add-on already does.
-- The MCP server pushing directly to the branch `git-pull` tracks, or any
-  "CI green implies auto-merge/auto-deploy" shortcut.
+- **Treating git branch/PR/CI/merge as a live-deploy gate.** The write
+  already happened (or didn't) via run mode + confirmation before
+  mirroring ever runs. Framing human review/merge as "the" gate was
+  inaccurate about what it actually blocks - nothing, by that point.
+- **Relying on the dry-run toggle's on/off timing as an approval signal.**
+  Too coarse - a persistent environment-level mode, not a per-change
+  decision - and depends on a human remembering to flip it back at exactly
+  the right moment.
+- **An HA-native notification/automation-based approval gate** (mobile
+  actionable notification or dashboard button, wired so the real write
+  only happens via a service call the LLM/MCP surface can't itself reach).
+  Would have been the one mechanism that actually proves a human looked,
+  but the real engineering cost (a pending-change store, plus an
+  automation every user has to wire up themselves) wasn't worth it for
+  what turned out to be the actual goal - "we don't need a full guarantee,
+  just a better experience." The two-call confirmation token gets most of
+  the UX benefit for a fraction of the build.
+- **Running a second `HomeAssistant()` core inside the live instance.**
+- **The MCP server holding `git pull`/production-deploy credentials, or
+  reimplementing anything the Git Pull add-on already does.** Reinforced
+  by mirroring deliberately targeting a separate repo from whatever the
+  Git Pull add-on manages.
 
 ## Open questions
 
+- **`proposed/*` branch lifecycle.** One branch per automation/entity is
+  the current answer, chosen for simplicity even knowing it can accumulate
+  clutter with no pruning policy yet - revisit if that turns out to be a
+  real problem rather than a theoretical one.
+- **How tier-2 CI results get back to the agent.** Leaning toward a
+  pull-based tool (e.g. `get_mirror_status`) the agent calls on demand,
+  querying the pushed commit's check-run/status via the same outbound
+  credential used to push - not a webhook, for the inbound-connectivity
+  reason above, and not blocking the write call itself, since a hosted CI
+  run can take minutes. Not fully decided.
+- **Whether `confirm_token` can be added once via `WriteGatedTool`'s shared
+  base, or needs touching each write tool's own `vol.Schema`
+  individually.** Implementation detail, not yet checked against the code.
 - Where tier 2 actually lives - new repo, name, scope: not decided.
 - Scenario-generation design - which `hypothesis` strategies per trigger/
   condition type: not designed.
@@ -202,3 +277,11 @@ HA auth vs. SSH/file access):
 - [home-assistant/actions - official Actions (hassfest, etc.)](https://github.com/home-assistant/actions)
 - [Git Pull add-on README](https://github.com/home-assistant/addons/blob/master/git_pull/README.md)
 - [How I GitOps Home Assistant Configurations](https://budimanjojo.com/2021/11/04/gitops-home-assistant-configurations/)
+- [MCP Elicitation: Human-in-the-Loop for MCP Servers](https://dzone.com/articles/mcp-elicitation-human-in-the-loop-for-mcp-servers) -
+  confirms elicitation exists at the protocol level but depends on client
+  support.
+- [ni-c/mcp-approval](https://github.com/ni-c/mcp-approval) - source of the
+  two-call confirmation token pattern used above.
+- [home-assistant/core `mcp_server` component](https://github.com/home-assistant/core/tree/dev/homeassistant/components/mcp_server) -
+  checked `server.py`/`session.py` directly; no elicitation support as of
+  the `dev` branch, which is why this design doesn't rely on it.
