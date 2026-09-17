@@ -152,7 +152,7 @@ matters for setup, covered below.
 | `find_entities` | Area/domain/name-scoped entity lookup - avoids dumping hundreds of entities |
 | `render_template` | Render a Jinja2 template against live state, never raising on error |
 | `validate_template` | Check template syntax and flag referenced entities that don't exist |
-| `get_automation` | Layout-aware read: resolves whether an automation lives in `automations.yaml` or a `packages/*.yaml` file |
+| `get_automation` | Layout-aware read: resolves whether an automation lives in `automations.yaml` or a `packages/*.yaml` file, and reports whether it's currently enabled - that's runtime-only state the YAML itself never shows |
 | `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward |
 | `check_config` | Home Assistant's own full config validation |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
@@ -177,7 +177,7 @@ matters for setup, covered below.
 | Tool | What it does |
 |---|---|
 | `entity_health_report` | Per-integration counts of disabled/hidden/unavailable/missing entities, scannable instead of a wall of text |
-| `audit_automations` | Flags duplicate automation IDs across packages and references to currently-unavailable entities |
+| `audit_automations` | Flags duplicate automation IDs across packages and references to currently-unavailable entities (tagged with whether that automation is actually enabled), plus a list of currently-disabled automations |
 
 `dev_tools_ping` also exists as a zero-dependency smoke test for the
 integration/MCP wiring itself - it's the one tool that isn't gated (see

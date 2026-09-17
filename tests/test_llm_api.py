@@ -43,6 +43,7 @@ from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
+from custom_components.ha_dev_tools.automation_manager import AutomationManager
 from custom_components.ha_dev_tools.const import (
     OPT_DRY_RUN,
     OPT_MIRROR_ENABLED,
@@ -65,6 +66,7 @@ from custom_components.ha_dev_tools.llm_api import (
     DeleteTemplateEntityTool,
     DevToolsPingTool,
     FindEntitiesTool,
+    GetAutomationTool,
     GetDerivedSensorTool,
     GetEntityHistoryTool,
     GetLogbookTool,
@@ -257,6 +259,116 @@ async def test_gated_tool_succeeds_when_armed_and_admin(
     assert isinstance(result, dict)
     # A successful call extends the idle window (touch_armed).
     assert path.stat().st_mtime >= mtime_before
+
+
+# --- GetAutomationTool / currently_enabled ----------------------------------
+
+
+def _automation_manager(hass: HomeAssistant, tmp_path) -> AutomationManager:
+    hass.config.config_dir = str(tmp_path)
+    security_manager = SecurityManager(
+        hass,
+        {
+            "read_paths": ["automations.yaml", "packages/**/*.yaml"],
+            "write_paths": [],
+            "denied_paths": [],
+        },
+    )
+    file_manager = FileManager(hass, security_manager)
+    return AutomationManager(hass, file_manager)
+
+
+@pytest.mark.asyncio
+async def test_get_automation_reports_currently_enabled_true(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  trigger: []\n  action: []\n"
+    )
+    hass.states.async_set(
+        "automation.my_automation", "on", {"id": "my_automation"}
+    )
+
+    result = await GetAutomationTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["currently_enabled"] is True
+    assert result["runtime_state_note"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_automation_reports_currently_enabled_false(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  trigger: []\n  action: []\n"
+    )
+    hass.states.async_set(
+        "automation.my_automation", "off", {"id": "my_automation"}
+    )
+
+    result = await GetAutomationTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["currently_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_automation_reports_unknown_when_never_reloaded(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """No automation.* entity exists yet - currently_enabled is None, with a note."""
+    manager = _automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  trigger: []\n  action: []\n"
+    )
+
+    result = await GetAutomationTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["currently_enabled"] is None
+    assert result["runtime_state_note"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_automation_returns_error_for_missing_id(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: some_other_id\n  trigger: []\n  action: []\n"
+    )
+
+    result = await GetAutomationTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "missing"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert "error" in result
 
 
 # --- WriteGatedTool / dry-run ------------------------------------------------

@@ -724,7 +724,11 @@ class GetAutomationTool(GatedTool):
         "defines it (the default automations.yaml, or a packages/*.yaml "
         "file) - a plain file read can silently miss package-defined "
         "automations. Fails clearly if the id isn't found or is defined in "
-        "more than one file, rather than guessing."
+        "more than one file, rather than guessing. Also reports whether "
+        "the automation is currently enabled - that's runtime-only state "
+        "(toggling it via the UI or automation.turn_off never touches the "
+        "YAML), so the config content alone never tells you whether it's "
+        "actually active right now."
     )
     parameters = vol.Schema({vol.Required("automation_id"): str})
 
@@ -746,10 +750,21 @@ class GetAutomationTool(GatedTool):
             )
         except (AutomationNotFoundError, DuplicateAutomationIdError) as exc:
             return _tool_error(exc)
+        automation_id = tool_input.tool_args["automation_id"]
+        live_state = audit_manager.find_automation_state(hass, automation_id)
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
             "config": config,
+            "currently_enabled": (
+                None if live_state is None else live_state.state == "on"
+            ),
+            "runtime_state_note": (
+                "No automation.<x> entity found for this id yet - it may "
+                "not have been reloaded since being added or last edited."
+                if live_state is None
+                else None
+            ),
         }
 
 
