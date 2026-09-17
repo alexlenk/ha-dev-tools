@@ -38,6 +38,7 @@ import pytest
 import voluptuous as vol
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.ha_dev_tools import access_control
@@ -71,6 +72,7 @@ from custom_components.ha_dev_tools.llm_api import (
     ReloadDerivedSensorTool,
     UpdateDerivedSensorTool,
     UpdateTemplateEntityTool,
+    WriteDashboardTool,
     WriteGatedTool,
 )
 from custom_components.ha_dev_tools.security import SecurityManager
@@ -1083,3 +1085,83 @@ async def test_delete_template_entity_tool_mirrors_when_enabled(
 
     assert result["mirror"]["mirrored"] is True
     assert result["mirror"]["commits"] == ["before", "after"]
+
+
+# --- write_dashboard tool (storage-file-based mirroring) ---------------------
+#
+# Unlike helpers (see llm_api.py's _mirror_file_write docstring for why
+# those are deliberately NOT wired up), lovelace dashboards save
+# immediately (LovelaceStorage.async_save -> self._store.async_save),
+# confirmed against home-assistant/core source - so reading .storage/
+# lovelace* right after write_dashboard() returns is safe.
+
+
+@pytest.fixture
+async def _setup_lovelace_components(hass: HomeAssistant):
+    assert await async_setup_component(hass, "websocket_api", {})
+    assert await async_setup_component(hass, "lovelace", {})
+
+
+@pytest.mark.asyncio
+async def test_write_dashboard_tool_writes_and_reports_saved(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_lovelace_components,
+):
+    tool = WriteDashboardTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="write_dashboard",
+            tool_args={"config": {"views": [{"title": "Test View", "cards": []}]}},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["saved"] is True
+    assert "mirror" not in result  # mirroring not configured on this entry
+
+
+@pytest.mark.asyncio
+async def test_write_dashboard_tool_mirrors_when_enabled(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_lovelace_components,
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    tool = WriteDashboardTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(404),  # GET current - no dashboard mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="write_dashboard",
+                tool_args={"config": {"views": [{"title": "New", "cards": []}]}},
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    # content_before is None (no dashboard saved before this call in this
+    # test) - only the after-commit pushes, matching mirror.py's own
+    # "content_before is None -> no before-commit" rule.
+    assert result["mirror"]["commits"] == ["after"]

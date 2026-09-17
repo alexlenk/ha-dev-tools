@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.2] - 2026-09-17
+
+### Added
+- Git mirroring extended to `write_dashboard`, storage-file-based (`.storage/lovelace` or `.storage/lovelace.<url_path>`) rather than reading a resolved YAML file like `write_automation`/the template-entity tools do - confirmed against `home-assistant/core` that `LovelaceStorage.async_save()` writes immediately, so reading the storage file right after `write_dashboard()` returns reliably captures the new content. `mirror.mirror_write()` and `mirror_secrets.py`'s credential scan now take a `content_type` ("yaml" or "json") so the same mirroring/scanning logic serves both real config files and raw `.storage/*` JSON.
+- `create_helper`/`update_helper`/`delete_helper` mirroring was investigated but deliberately NOT implemented this round: HA's generic `StorageCollection` (`helpers/collection.py`) debounces its save 10 seconds (`async_delay_save(..., SAVE_DELAY=10)`), so a read right after the write would almost always capture stale, pre-write content rather than the real change - tracked in issue #43 pending a design decision (reconstruct after-content from the API response in-memory, force an immediate flush, or a background file-watcher).
+
+### Fixed
+- `/config/.storage/schedule` was missing from `DEFAULT_READ_ONLY_PATHS` - confirmed against `homeassistant/components/schedule`'s own `Store(key=DOMAIN)` that this was a genuine pre-existing gap, unrelated to this release's own changes but found while researching helper storage paths for the mirroring work above.
+
 ## [2.8.1] - 2026-09-17
 
 ### Added

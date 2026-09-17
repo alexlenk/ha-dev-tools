@@ -122,18 +122,32 @@ class MirrorResult:
     commits: tuple[str, ...] = ()
 
 
+# Which mirror_secrets.py scanner to run, keyed by the pushed content's own
+# shape - "yaml" for a real config file (write_automation, template
+# entities), "json" for a .storage/<domain> file's raw content (helpers,
+# dashboards) or a resolved config-entry's serialized .data/.options
+# (derived sensors). Both take raw text in, findings out - see
+# mirror_secrets.py.
+_SCANNERS = {
+    "yaml": mirror_secrets.find_yaml_credentials,
+    "json": mirror_secrets.find_storage_credentials,
+}
+
+
 async def mirror_write(
     hass: HomeAssistant,
     *,
     path: str,
     content_before: str | None,
     content_after: str,
+    content_type: str = "yaml",
 ) -> MirrorResult:
-    """Mirror a confirmed write's before/after content for one YAML file.
+    """Mirror a confirmed write's before/after content for one file.
 
     - Scans content_after (and content_before, if present) for credentials
-      first (mirror_secrets.py / issue #39) - skips mirroring entirely,
-      neither commit, if either is flagged.
+      first (mirror_secrets.py / issue #39, via the scanner content_type
+      selects) - skips mirroring entirely, neither commit, if either is
+      flagged.
     - Before-commit: syncs main to content_before, but only if it differs
       from what the mirror repo currently has recorded for this path - a
       no-op if nothing's drifted since the last mirrored write, a real
@@ -141,16 +155,26 @@ async def mirror_write(
     - After-commit: pushes content_after, skipped if it's already what the
       mirror repo now has (e.g. the write produced byte-identical content).
     """
-    findings = mirror_secrets.find_yaml_credentials(content_after)
+    scan = _SCANNERS[content_type]
+    findings = scan(content_after)
     if content_before is not None:
-        findings = findings + mirror_secrets.find_yaml_credentials(content_before)
+        findings = findings + scan(content_before)
     if findings:
+        if content_type == "yaml":
+            advice = (
+                "not routed through !secret - move it to secrets.yaml to "
+                "enable mirroring for this file."
+            )
+        else:
+            advice = (
+                "with a literal value - HA's storage files have no !secret "
+                "mechanism, so this file can't be mirrored as-is."
+            )
         return MirrorResult(
             mirrored=False,
             reason=(
-                f"'{path}' has a literal value under a credential-shaped key "
-                f"not routed through !secret ({', '.join(findings)}) - move "
-                "it to secrets.yaml to enable mirroring for this file."
+                f"'{path}' has a credential-shaped key "
+                f"({', '.join(findings)}) {advice}"
             ),
         )
 
