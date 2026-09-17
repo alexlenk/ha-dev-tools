@@ -1,14 +1,16 @@
 """Tests for mirror.py's GitHub Contents API client and mirror_write() orchestration.
 
-Uses aioresponses to intercept the real aiohttp.ClientSession HA's own
-async_get_clientsession(hass) returns - see docs/AUTOMATION_TESTING_DESIGN.md's
-"Mirroring" section for the design this implements.
+Uses a small hand-rolled fake aiohttp session rather than aioresponses -
+see requirements-test.txt's comment on aioresponses for why: it's
+fundamentally incompatible with the exact aiohttp version
+homeassistant==2026.8.2 hard-pins, not just a version this repo happens
+to have picked.
 """
 
 import base64
+from unittest.mock import patch
 
 import pytest
-from aioresponses import aioresponses
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -21,11 +23,66 @@ from custom_components.ha_dev_tools.const import (
 )
 
 REPO = "alexlenk/ha-mirror"
-CONTENTS_URL = f"https://api.github.com/repos/{REPO}/contents/automations.yaml"
 
 
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+class _FakeResponse:
+    """Stands in for aiohttp.ClientResponse - just enough of its API for mirror.py."""
+
+    def __init__(self, status: int, payload: object = None):
+        self.status = status
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"HTTP {self.status}")
+
+
+class _FakeRequestContext:
+    def __init__(self, response: _FakeResponse):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class FakeSession:
+    """Stands in for aiohttp.ClientSession - replays queued responses in call order.
+
+    mirror.py's own call sequence within a single mirror_write() is
+    deterministic (GET, then 0-2 PUTs), so a simple ordered queue is
+    enough - no need to match by URL/method.
+    """
+
+    def __init__(self, responses: list[_FakeResponse]):
+        self._responses = list(responses)
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def _next(self, method: str, url: str, kwargs: dict) -> _FakeRequestContext:
+        self.calls.append((method, url, kwargs))
+        return _FakeRequestContext(self._responses.pop(0))
+
+    def get(self, url, **kwargs):
+        return self._next("GET", url, kwargs)
+
+    def put(self, url, **kwargs):
+        return self._next("PUT", url, kwargs)
+
+
+def _patched(fake_session: FakeSession):
+    return patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    )
 
 
 @pytest.fixture
@@ -65,48 +122,53 @@ async def test_is_mirror_enabled_true_when_fully_configured(
 async def test_mirror_write_skips_when_after_content_has_credential(
     hass: HomeAssistant, mirror_entry
 ):
-    result = await mirror.mirror_write(
-        hass,
-        path="automations.yaml",
-        content_before=None,
-        content_after="- id: a\n  password: hunter2\n",
-    )
+    fake_session = FakeSession([])  # no HTTP call should even be attempted
+
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  password: hunter2\n",
+        )
 
     assert result.mirrored is False
     assert "password" in result.reason
     assert "secrets.yaml" in result.reason
+    assert fake_session.calls == []
 
 
 @pytest.mark.asyncio
 async def test_mirror_write_skips_when_before_content_has_credential(
     hass: HomeAssistant, mirror_entry
 ):
-    result = await mirror.mirror_write(
-        hass,
-        path="automations.yaml",
-        content_before="- id: a\n  token: literal\n",
-        content_after="- id: a\n  alias: clean\n",
-    )
+    fake_session = FakeSession([])
+
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass,
+            path="automations.yaml",
+            content_before="- id: a\n  token: literal\n",
+            content_after="- id: a\n  alias: clean\n",
+        )
 
     assert result.mirrored is False
     assert "token" in result.reason
+    assert fake_session.calls == []
 
 
 @pytest.mark.asyncio
 async def test_mirror_write_new_file_pushes_after_commit_only(
     hass: HomeAssistant, mirror_entry
 ):
-    with aioresponses() as mocked:
-        mocked.get(
-            CONTENTS_URL + "?ref=main",
-            status=404,
-        )
-        mocked.put(
-            CONTENTS_URL,
-            status=201,
-            payload={"content": {"sha": "new-sha"}},
-        )
+    fake_session = FakeSession(
+        [
+            _FakeResponse(404),  # GET current - doesn't exist yet
+            _FakeResponse(201, {"content": {"sha": "new-sha"}}),  # PUT after
+        ]
+    )
 
+    with _patched(fake_session):
         result = await mirror.mirror_write(
             hass,
             path="automations.yaml",
@@ -116,6 +178,7 @@ async def test_mirror_write_new_file_pushes_after_commit_only(
 
     assert result.mirrored is True
     assert result.commits == ("after",)
+    assert [c[0] for c in fake_session.calls] == ["GET", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -127,23 +190,15 @@ async def test_mirror_write_pushes_before_commit_on_drift_then_after(
     live_before = "- id: a\n  alias: drifted\n"
     live_after = "- id: a\n  alias: new\n"
 
-    with aioresponses() as mocked:
-        mocked.get(
-            CONTENTS_URL + "?ref=main",
-            status=200,
-            payload={"content": _b64(recorded_content), "sha": "old-sha"},
-        )
-        mocked.put(
-            CONTENTS_URL,
-            status=200,
-            payload={"content": {"sha": "before-sha"}},
-        )
-        mocked.put(
-            CONTENTS_URL,
-            status=200,
-            payload={"content": {"sha": "after-sha"}},
-        )
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"content": _b64(recorded_content), "sha": "old-sha"}),
+            _FakeResponse(200, {"content": {"sha": "before-sha"}}),
+            _FakeResponse(200, {"content": {"sha": "after-sha"}}),
+        ]
+    )
 
+    with _patched(fake_session):
         result = await mirror.mirror_write(
             hass,
             path="automations.yaml",
@@ -153,6 +208,7 @@ async def test_mirror_write_pushes_before_commit_on_drift_then_after(
 
     assert result.mirrored is True
     assert result.commits == ("before", "after")
+    assert [c[0] for c in fake_session.calls] == ["GET", "PUT", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -162,18 +218,14 @@ async def test_mirror_write_before_commit_is_noop_when_unchanged(
     """Mirror already has exactly the pre-write content - only the after-commit pushes."""
     same_content = "- id: a\n  alias: same\n"
 
-    with aioresponses() as mocked:
-        mocked.get(
-            CONTENTS_URL + "?ref=main",
-            status=200,
-            payload={"content": _b64(same_content), "sha": "sha-1"},
-        )
-        mocked.put(
-            CONTENTS_URL,
-            status=200,
-            payload={"content": {"sha": "sha-2"}},
-        )
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"content": _b64(same_content), "sha": "sha-1"}),
+            _FakeResponse(200, {"content": {"sha": "sha-2"}}),
+        ]
+    )
 
+    with _patched(fake_session):
         result = await mirror.mirror_write(
             hass,
             path="automations.yaml",
@@ -183,6 +235,7 @@ async def test_mirror_write_before_commit_is_noop_when_unchanged(
 
     assert result.mirrored is True
     assert result.commits == ("after",)
+    assert [c[0] for c in fake_session.calls] == ["GET", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -192,19 +245,18 @@ async def test_mirror_write_noop_when_after_already_matches(
     """Nothing to push at all - after-content is already what the mirror has."""
     content = "- id: a\n  alias: same\n"
 
-    with aioresponses() as mocked:
-        mocked.get(
-            CONTENTS_URL + "?ref=main",
-            status=200,
-            payload={"content": _b64(content), "sha": "sha-1"},
-        )
+    fake_session = FakeSession(
+        [_FakeResponse(200, {"content": _b64(content), "sha": "sha-1"})]
+    )
 
+    with _patched(fake_session):
         result = await mirror.mirror_write(
             hass, path="automations.yaml", content_before=None, content_after=content
         )
 
     assert result.mirrored is True
     assert result.commits == ()
+    assert [c[0] for c in fake_session.calls] == ["GET"]
 
 
 @pytest.mark.asyncio
@@ -212,9 +264,9 @@ async def test_mirror_write_reports_failure_without_raising(
     hass: HomeAssistant, mirror_entry
 ):
     """A GitHub API failure never propagates - it comes back as a normal result."""
-    with aioresponses() as mocked:
-        mocked.get(CONTENTS_URL + "?ref=main", status=500)
+    fake_session = FakeSession([_FakeResponse(500)])
 
+    with _patched(fake_session):
         result = await mirror.mirror_write(
             hass,
             path="automations.yaml",
