@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.6] - 2026-09-17
+
+### Changed
+- Every write tool's `description` (write_automation, create/update/delete_helper, create/update/delete_derived_sensor, create/update/delete_template_entity, write_dashboard) now explicitly states the propose/confirm flow and `confirm_token`'s exact field name, instead of that only being documented in `WriteGatedTool`'s source docstring and each response's own free-text `note`. Found live: a caller guessed the confirm token belonged in `expected_hash` (a real, schema-declared field with a plausible-sounding purpose) instead, and got a silently-reissued fresh token with no indication `expected_hash` was the wrong field - confirmed against a real MCP client that `write_automation`'s served schema has neither a `confirm_token` key nor any `required` array at all, so a caller relying on the schema alone has no way to discover this. `description` is the one part of a tool's definition every MCP client reliably shows in full regardless of how it renders `parameters`/`inputSchema` - see issue #48 for the open question on whether that missing schema metadata is this integration's fault or a client/harness-side simplification.
+
 ## [2.8.5] - 2026-09-17
 
 ### Fixed
