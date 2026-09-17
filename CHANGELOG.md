@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-09-17
+
+### Fixed
+- `get_entity_history` and `get_logbook` crashed with a raw, unhandled `Error: 'start_time'` (a bare `KeyError`) when a caller omitted `start_time` - and `get_entity_history` had the same crash risk for a missing `entity_ids`. Both fields were already declared `vol.Required` in each tool's `parameters` schema, but that schema was never actually invoked anywhere to validate `tool_args` before `_run()` - it's only ever used as metadata for the tool's exposed JSON schema - so an omitted "required" field reached a direct `args["..."]` index instead of being rejected cleanly. New `_require()` helper raises a clear `ValueError` (already caught and turned into a normal tool-error payload) instead. Found live while testing v2.8.3, filed and fixed as issue #45.
+
+### Added
+- README's Setup section documents how to turn on git mirroring and, since no guide existed for it, walks through creating the scoped fine-grained GitHub personal access token it needs step by step. Also corrected a stale line in the Architecture section still calling git mirroring "design-stage, not built" - it shipped in 2.8.0-2.8.2.
+
 ## [2.8.3] - 2026-09-17
 
 ### Fixed

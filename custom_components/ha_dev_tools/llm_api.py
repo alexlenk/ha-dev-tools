@@ -175,6 +175,20 @@ def _parse_datetime(value: str, *, field: str) -> Any:
     return parsed
 
 
+def _require(args: dict, field: str) -> Any:
+    """Fetch a required field, raising ValueError (not a raw KeyError) if it's missing.
+
+    parameters (the voluptuous schema declaring `vol.Required(field)`) is
+    only ever used to build the tool's exposed JSON schema - nothing
+    invokes it to actually validate tool_args before _run(), so a caller
+    omitting a "required" field previously reached a direct args[field]
+    index and raised an unhandled KeyError instead of a clean, caught
+    error (see issue #45's get_entity_history/get_logbook crash)."""
+    if field not in args:
+        raise ValueError(f"'{field}' is required")
+    return args[field]
+
+
 def _write_schema(fields: dict) -> vol.Schema:
     """A write tool's own fields, plus the confirm_token every WriteGatedTool needs.
 
@@ -534,7 +548,9 @@ class GetEntityHistoryTool(GatedTool):
         """Fetch state history for the requested entities."""
         args = tool_input.tool_args
         try:
-            start_time = _parse_datetime(args["start_time"], field="start_time")
+            start_time = _parse_datetime(
+                _require(args, "start_time"), field="start_time"
+            )
             end_time = (
                 _parse_datetime(args["end_time"], field="end_time")
                 if args.get("end_time")
@@ -542,7 +558,7 @@ class GetEntityHistoryTool(GatedTool):
             )
             return await history_manager.get_entity_history(
                 hass,
-                args["entity_ids"],
+                _require(args, "entity_ids"),
                 start_time=start_time,
                 end_time=end_time,
                 significant_changes_only=args.get("significant_changes_only", True),
@@ -590,7 +606,9 @@ class GetLogbookTool(GatedTool):
         """Fetch logbook entries for the requested period."""
         args = tool_input.tool_args
         try:
-            start_time = _parse_datetime(args["start_time"], field="start_time")
+            start_time = _parse_datetime(
+                _require(args, "start_time"), field="start_time"
+            )
             end_time = (
                 _parse_datetime(args["end_time"], field="end_time")
                 if args.get("end_time")
