@@ -100,6 +100,16 @@ def _new_yaml() -> YAML:
     return yaml
 
 
+def _load_yaml(content: str) -> Any:
+    """Synchronous: build a fresh YAML() and load content with it, for
+    hass.async_add_executor_job() - same reasoning as automation_manager.py's
+    helper of the same name: YAML(typ="rt")'s own __init__ does a blocking
+    scandir, so a bare `_new_yaml().load` passed as the executor job's
+    callable only defers load() to the executor - `_new_yaml()` itself is
+    evaluated eagerly on the event loop before being passed in."""
+    return _new_yaml().load(content)
+
+
 def _to_plain(value: Any) -> Any:
     """Recursively convert ruamel's round-trip types into plain JSON-safe values.
 
@@ -238,7 +248,7 @@ class TemplateYamlManager:
             content = await self.file_manager.read_file(file_path)
         except FileNotFoundError:
             return None
-        return await self.hass.async_add_executor_job(_new_yaml().load, content)
+        return await self.hass.async_add_executor_job(_load_yaml, content)
 
     def _template_blocks(self, document: Any) -> CommentedSeq | list:
         """Return the template: list within a loaded document, or [] if it has none."""
@@ -390,9 +400,7 @@ class TemplateYamlManager:
             )
 
         content_before = await self.file_manager.read_file(file_path)
-        document = await self.hass.async_add_executor_job(
-            _new_yaml().load, content_before
-        )
+        document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after, block_index = await self.hass.async_add_executor_job(
             self._build_create_content, document, platform, config, triggers
         )
@@ -492,9 +500,7 @@ class TemplateYamlManager:
 
         location = await self.find_entity(unique_id)
         content_before = await self.file_manager.read_file(location.file_path)
-        document = await self.hass.async_add_executor_job(
-            _new_yaml().load, content_before
-        )
+        document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after = await self.hass.async_add_executor_job(
             self._build_update_content, document, location, config
         )
@@ -548,9 +554,7 @@ class TemplateYamlManager:
         """
         location = await self.find_entity(unique_id)
         content_before = await self.file_manager.read_file(location.file_path)
-        document = await self.hass.async_add_executor_job(
-            _new_yaml().load, content_before
-        )
+        document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after = await self.hass.async_add_executor_job(
             self._build_delete_content, document, location
         )
