@@ -1147,9 +1147,28 @@ async def test_write_dashboard_tool_mirrors_when_enabled(
         ]
     )
 
-    with patch(
-        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
-        return_value=fake_session,
+    # pytest_homeassistant_custom_component's `hass` fixture always wraps
+    # Store in mock_storage() (an in-memory dict, never real disk - see its
+    # own hass_storage fixture) - so unlike write_dashboard's real target
+    # (LovelaceStorage.async_save() -> real file write, confirmed against
+    # home-assistant/core), _read_storage_file's FileManager.read_file()
+    # would never see the write this call makes. Patch it directly to
+    # supply what a real .storage/lovelace read would return, so this test
+    # isolates the mirror wiring itself, not the test harness's storage mock.
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(
+                side_effect=[
+                    None,
+                    '{"data": {"config": {"views": [{"title": "New", "cards": []}]}}}',
+                ]
+            ),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+            return_value=fake_session,
+        ),
     ):
         result = await tool._write(
             hass,
