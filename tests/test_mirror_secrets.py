@@ -1,5 +1,7 @@
 """Tests for mirror_secrets.py's credential detection (issue #39)."""
 
+import json
+
 from custom_components.ha_dev_tools import mirror_secrets
 
 
@@ -47,10 +49,15 @@ def test_find_yaml_credentials_unparseable_content_is_treated_as_unsafe():
 
 
 def test_find_storage_credentials_flags_literal_value_no_secret_exemption():
-    data = {"config_entry_id": "abc", "options": {"api_key": "literal"}}
-    assert mirror_secrets.find_storage_credentials(data) == ["options.api_key"]
+    content = json.dumps({"config_entry_id": "abc", "options": {"api_key": "literal"}})
+    assert mirror_secrets.find_storage_credentials(content) == ["options.api_key"]
 
 
 def test_find_storage_credentials_clean_data():
-    data = {"name": "My Sensor", "unit_of_measurement": "kWh"}
-    assert mirror_secrets.find_storage_credentials(data) == []
+    content = json.dumps({"name": "My Sensor", "unit_of_measurement": "kWh"})
+    assert mirror_secrets.find_storage_credentials(content) == []
+
+
+def test_find_storage_credentials_unparseable_content_is_treated_as_unsafe():
+    findings = mirror_secrets.find_storage_credentials("{not valid json")
+    assert findings

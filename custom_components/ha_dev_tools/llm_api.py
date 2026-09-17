@@ -48,6 +48,7 @@ from .derived_sensor_manager import (
     FlowStepRequiredError,
     InvalidDerivedSensorDomainError,
 )
+from .file_manager import FileManager
 from .helper_manager import (
     HELPER_DOMAINS,
     InvalidHelperDomainError,
@@ -91,6 +92,58 @@ def _mirror_result_payload(result: mirror.MirrorResult) -> JsonObjectType:
     if result.commits:
         payload["commits"] = list(result.commits)
     return payload
+
+
+async def _mirror_file_write(
+    hass: HomeAssistant,
+    response: JsonObjectType,
+    *,
+    file_path: str,
+    content_before: str | None,
+    content_after: str,
+    content_type: str = "yaml",
+) -> JsonObjectType:
+    """Mirror a write's before/after content into response['mirror'], if
+    mirroring is enabled - shared by every WriteGatedTool whose _write()
+    resolves to a single file's content, whether that's a real YAML config
+    file it wrote itself (write_automation, create/update/delete_template_entity)
+    or a .storage/* file HA core wrote on its behalf and saves immediately
+    (write_dashboard - see _storage_file_manager/_read_storage_file below).
+    Deliberately not used for helpers (create/update/delete_helper): HA's
+    StorageCollection debounces those writes 10 seconds
+    (helpers/collection.py's async_delay_save), so a read right after the
+    call would capture stale, pre-write content - see issue tracking that
+    gap rather than mirroring something silently wrong."""
+    if mirror.is_mirror_enabled(hass):
+        mirror_result = await mirror.mirror_write(
+            hass,
+            path=file_path,
+            content_before=content_before,
+            content_after=content_after,
+            content_type=content_type,
+        )
+        response["mirror"] = _mirror_result_payload(mirror_result)
+    return response
+
+
+def _storage_file_manager(hass: HomeAssistant) -> FileManager:
+    """A FileManager for reading .storage/* files around a dashboard write,
+    built on the same shared SecurityManager __init__.py already stores in
+    hass.data[DOMAIN] - not the FileManager automation_manager.py/
+    template_yaml_manager.py hold (those are for their own YAML writes); a
+    fresh one here since dashboard_manager.py never touches files at all
+    (HA core's own WS handler does, internally)."""
+    security_manager = hass.data[DOMAIN]["security_manager"]
+    return FileManager(hass, security_manager)
+
+
+async def _read_storage_file(hass: HomeAssistant, path: str) -> str | None:
+    """Read a .storage/* file's raw content for mirroring, or None if it
+    doesn't exist yet (e.g. a dashboard that's never been saved before)."""
+    try:
+        return await _storage_file_manager(hass).read_file(path)
+    except FileNotFoundError:
+        return None
 
 
 def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
@@ -765,15 +818,13 @@ class WriteAutomationTool(WriteGatedTool):
             "file_path": result.location.file_path,
             "is_package": result.location.is_package,
         }
-        if mirror.is_mirror_enabled(hass):
-            mirror_result = await mirror.mirror_write(
-                hass,
-                path=result.location.file_path,
-                content_before=result.content_before,
-                content_after=result.content_after,
-            )
-            response["mirror"] = _mirror_result_payload(mirror_result)
-        return response
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 def _helper_domain_schema() -> vol.Schema:
@@ -1244,7 +1295,7 @@ class CreateTemplateEntityTool(WriteGatedTool):
         """Create the template entity."""
         args = tool_input.tool_args
         try:
-            location, reloaded = await self._manager.create_entity(
+            result = await self._manager.create_entity(
                 args["platform"],
                 args["config"],
                 package=args["package"],
@@ -1256,11 +1307,18 @@ class CreateTemplateEntityTool(WriteGatedTool):
             TemplateEntityNotFoundError,
         ) as exc:
             return _tool_error(exc)
-        return {
-            "file_path": location.file_path,
-            "platform": location.platform,
-            "reloaded": reloaded,
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 class UpdateTemplateEntityTool(WriteGatedTool):
@@ -1297,7 +1355,7 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         """Update the template entity."""
         args = tool_input.tool_args
         try:
-            location, reloaded = await self._manager.update_entity(
+            result = await self._manager.update_entity(
                 args["unique_id"], args["config"]
             )
         except (
@@ -1306,11 +1364,18 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             DuplicateTemplateUniqueIdError,
         ) as exc:
             return _tool_error(exc)
-        return {
-            "file_path": location.file_path,
-            "platform": location.platform,
-            "reloaded": reloaded,
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 class DeleteTemplateEntityTool(WriteGatedTool):
@@ -1339,16 +1404,23 @@ class DeleteTemplateEntityTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Delete the template entity."""
         try:
-            location, reloaded = await self._manager.delete_entity(
+            result = await self._manager.delete_entity(
                 tool_input.tool_args["unique_id"]
             )
         except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
             return _tool_error(exc)
-        return {
-            "file_path": location.file_path,
-            "platform": location.platform,
-            "reloaded": reloaded,
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
 
 
 class GetDashboardTool(GatedTool):
@@ -1404,10 +1476,18 @@ class WriteDashboardTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Write the dashboard config."""
         args = tool_input.tool_args
+        url_path = args.get("url_path")
+        # Storage key convention confirmed directly against home-assistant/
+        # core's lovelace/dashboard.py: CONFIG_STORAGE_KEY_DEFAULT = "lovelace"
+        # for the default dashboard, CONFIG_STORAGE_KEY = "lovelace.{}" (the
+        # dashboard's id, which is its url_path for storage-mode dashboards)
+        # for any other.
+        storage_path = f".storage/lovelace{f'.{url_path}' if url_path else ''}"
         try:
+            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
             await dashboard_manager.write_dashboard(
-                hass, user, args["config"], url_path=args.get("url_path")
+                hass, user, args["config"], url_path=url_path
             )
         except (
             UnresolvedUserError,
@@ -1415,7 +1495,18 @@ class WriteDashboardTool(WriteGatedTool):
             WebSocketCommandError,
         ) as exc:
             return _tool_error(exc)
-        return {"saved": True, "url_path": args.get("url_path")}
+        content_after = await _read_storage_file(hass, storage_path)
+        response: JsonObjectType = {"saved": True, "url_path": url_path}
+        if content_after is not None:
+            response = await _mirror_file_write(
+                hass,
+                response,
+                file_path=storage_path,
+                content_before=content_before,
+                content_after=content_after,
+                content_type="json",
+            )
+        return response
 
 
 class AuditAutomationsTool(GatedTool):

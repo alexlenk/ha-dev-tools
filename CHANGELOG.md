@@ -7,10 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.8.1] - 2026-09-17
+## [2.8.3] - 2026-09-17
 
 ### Fixed
 - `get_automation` and `audit_automations` only ever read `automations.yaml`/`packages/*.yaml` - so whether an automation is actually enabled right now was invisible to both. Toggling an automation via the UI or the `automation.turn_off`/`turn_on` services never touches the YAML `enabled:` key; that state lives purely on the live `automation.*` entity, whose `entity_id` is derived from `alias` (slugified), not from the config `id` - so it can't be guessed, only looked up by scanning `automation.*` entities for a matching `id` attribute. `get_automation` now reports `currently_enabled` (and a note when no matching entity exists yet, e.g. not reloaded since being added); `audit_automations` now reports a `currently_disabled` list and tags every `references_unavailable_entities` finding with `currently_enabled`, since that finding is real but lower-urgency on an automation that's off anyway. New `audit_manager.find_automation_state()` helper backs both. Found via a real case of an agent treating a disabled automation as if it were live.
+
+## [2.8.2] - 2026-09-17
+
+### Added
+- Git mirroring extended to `write_dashboard`, storage-file-based (`.storage/lovelace` or `.storage/lovelace.<url_path>`) rather than reading a resolved YAML file like `write_automation`/the template-entity tools do - confirmed against `home-assistant/core` that `LovelaceStorage.async_save()` writes immediately, so reading the storage file right after `write_dashboard()` returns reliably captures the new content. `mirror.mirror_write()` and `mirror_secrets.py`'s credential scan now take a `content_type` ("yaml" or "json") so the same mirroring/scanning logic serves both real config files and raw `.storage/*` JSON.
+- `create_helper`/`update_helper`/`delete_helper` mirroring was investigated but deliberately NOT implemented this round: HA's generic `StorageCollection` (`helpers/collection.py`) debounces its save 10 seconds (`async_delay_save(..., SAVE_DELAY=10)`), so a read right after the write would almost always capture stale, pre-write content rather than the real change - tracked in issue #43 pending a design decision (reconstruct after-content from the API response in-memory, force an immediate flush, or a background file-watcher).
+
+### Fixed
+- `/config/.storage/schedule` was missing from `DEFAULT_READ_ONLY_PATHS` - confirmed against `homeassistant/components/schedule`'s own `Store(key=DOMAIN)` that this was a genuine pre-existing gap, unrelated to this release's own changes but found while researching helper storage paths for the mirroring work above.
+
+## [2.8.1] - 2026-09-17
+
+### Added
+- Git mirroring extended to `create_template_entity`/`update_template_entity`/`delete_template_entity`, completing the file-based half of issue #34's mirroring scope (`write_automation` was #40; helpers/dashboard/derived-sensor mirroring, which need a different content source, remain open). `TemplateYamlManager.create_entity`/`update_entity`/`delete_entity` now return the touched file's before/after content (`TemplateWriteResult`), same shape and same reasoning as `AutomationWriteResult`. `llm_api.py`'s three template-entity write tools share a new `_mirror_file_write()` helper with `write_automation` rather than repeating the same mirror-and-report logic four times.
 
 ## [2.8.0] - 2026-09-17
 

@@ -11,6 +11,7 @@ general entropy/pattern secret scanner (gitleaks-style) - see issue #39's
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ruamel.yaml import YAML
@@ -85,11 +86,19 @@ def find_yaml_credentials(content: str) -> list[str]:
     return findings
 
 
-def find_storage_credentials(data: Any) -> list[str]:
-    """Same check for storage-based content (dicts/lists straight from JSON, a
-    config-entry's .data/.options, ...) - no !secret mechanism exists there,
-    so any credential-shaped key with a literal string value is flagged.
+def find_storage_credentials(content: str) -> list[str]:
+    """Same check for storage-based content (a .storage/<domain> file's raw
+    JSON text, or a resolved config-entry's .data/.options serialized the
+    same way) - no !secret mechanism exists there, so any credential-shaped
+    key with a literal string value is flagged. Same shape as
+    find_yaml_credentials (raw text in, findings out) for a uniform call
+    site in mirror.py; unparseable content is treated as unsafe to mirror,
+    same reasoning as find_yaml_credentials.
     """
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return ["<content did not parse as JSON - treated as unsafe to mirror>"]
     findings: list[str] = []
     _walk(data, path="", findings=findings)
     return findings

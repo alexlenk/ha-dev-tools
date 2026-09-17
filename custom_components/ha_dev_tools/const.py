@@ -23,6 +23,11 @@ DEFAULT_READ_ONLY_PATHS = [
     "/config/.storage/input_*",
     "/config/.storage/timer",
     "/config/.storage/counter",
+    # schedule's own storage key (confirmed by reading
+    # homeassistant/components/schedule/__init__.py + const.py directly -
+    # Store(key=DOMAIN), DOMAIN = "schedule") was missing here entirely -
+    # a real pre-existing gap, not something this comment is guessing at.
+    "/config/.storage/schedule",
     "/config/.storage/script",
     "/config/.storage/scene",
     "/config/.storage/automation",
