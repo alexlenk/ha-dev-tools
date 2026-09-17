@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-09-17
+
+### Fixed
+- The propose/confirm and dry-run response `note` fields only said "show this to the user," which a live test showed wasn't specific enough - an agent surfaced just the automation's id, not the actual `would_apply` config it was about to write. Both notes now say explicitly to show the full `would_apply` content, not just its id or a summary.
+
 ## [2.9.0] - 2026-09-17
 
 ### Added
