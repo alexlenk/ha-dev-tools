@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-09-17
+
+### Fixed
+- **Safety-critical**: `write_automation` and the template-entity write tools serialized a brand-new plain string like `"off"`/`"on"`/`"yes"`/`"no"` unquoted, since ruamel.yaml's own resolver follows YAML 1.2 (only `true`/`false` are boolean-like there) and sees no reason to quote it. Home Assistant's own YAML loader follows PyYAML's default resolver (YAML 1.1 semantics), which reads an unquoted `off` back as the boolean `False` - so a state condition written as `state: "off"` came back from disk as `state: False`, failed schema validation ("expected str"), and silently disabled the whole automation. Confirmed live: a real safety automation (a lawn-mower off-limits containment automation gated on `state` conditions) was disabled this way immediately after a write. `automation_manager.py`/`template_yaml_manager.py` now force-quote any brand-new plain string that exactly matches one of PyYAML's implicit bool/null scalars (`yes`/`no`/`true`/`false`/`on`/`off` and case variants, plus `null`/`~`) before splicing it into the document - values already loaded from an existing file are untouched, since those already round-trip with whatever quote style they were written with.
+
 ## [2.9.1] - 2026-09-17
 
 ### Fixed

@@ -240,6 +240,51 @@ async def test_write_automation_dry_run_computes_content_without_writing(
 
 
 @pytest.mark.asyncio
+async def test_write_automation_quotes_ambiguous_state_scalars(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """A live-tested regression: writing a condition with a bare on/off/
+    yes/no value used to reload as a bool, not a str - ruamel.yaml's own
+    resolver (YAML 1.2) sees "off" as a perfectly safe unquoted plain
+    scalar and doesn't quote it when dumping brand-new config, but Home
+    Assistant's own YAML loader (PyYAML's default resolver, YAML 1.1
+    semantics) reads an unquoted `off` back as `False`. That then fails
+    schema validation ("expected str, got False") and HA auto-disables
+    the whole automation - exactly what happened live with a
+    state-condition-gated safety automation."""
+    result = await automation_manager.write_automation(
+        "state_condition_automation",
+        {
+            "alias": "Uses on/off state conditions",
+            "trigger": [],
+            "condition": [
+                {"condition": "state", "entity_id": "switch.x", "state": "off"}
+            ],
+            "action": [
+                {
+                    "repeat": {
+                        "until": [
+                            {
+                                "condition": "state",
+                                "entity_id": "switch.y",
+                                "state": "on",
+                            }
+                        ]
+                    }
+                }
+            ],
+        },
+    )
+
+    assert 'state: "off"' in result.content_after
+    assert 'state: "on"' in result.content_after
+
+    parsed = pyyaml.safe_load((tmp_path / "automations.yaml").read_text())
+    assert parsed[0]["condition"][0]["state"] == "off"
+    assert parsed[0]["action"][0]["repeat"]["until"][0]["state"] == "on"
+
+
+@pytest.mark.asyncio
 async def test_write_automation_missing_package_raises(automation_manager, tmp_path):
     with pytest.raises(AutomationNotFoundError):
         await automation_manager.write_automation(

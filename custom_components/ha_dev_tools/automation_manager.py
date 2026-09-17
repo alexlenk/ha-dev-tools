@@ -32,6 +32,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from .file_manager import FileManager
 
@@ -39,6 +40,44 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_AUTOMATIONS_FILE = "automations.yaml"
 PACKAGES_DIR = "packages"
+
+# Exactly the plain scalars PyYAML's default resolver (what Home
+# Assistant's own YAML loader uses to read this file back) treats as
+# bool/None rather than a string - the classic YAML 1.1 "Norway problem".
+# ruamel.yaml's own resolver follows YAML 1.2 (only true/True/TRUE/
+# false/False/FALSE are boolean-like there), so when it dumps a brand-new
+# plain `str` it didn't load with existing quote styling, it has no
+# reason to quote e.g. "off" - it looks like a perfectly safe plain
+# string under YAML 1.2. Confirmed live: an unquoted `state: off` written
+# this way reloads via HA's loader as `state: False`, which then fails
+# schema validation (expects a str) and silently disables the whole
+# automation.
+_AMBIGUOUS_SCALARS = frozenset(
+    {
+        "yes",
+        "Yes",
+        "YES",
+        "no",
+        "No",
+        "NO",
+        "true",
+        "True",
+        "TRUE",
+        "false",
+        "False",
+        "FALSE",
+        "on",
+        "On",
+        "ON",
+        "off",
+        "Off",
+        "OFF",
+        "null",
+        "Null",
+        "NULL",
+        "~",
+    }
+)
 
 
 def _new_yaml() -> YAML:
@@ -57,6 +96,24 @@ def _load_yaml(content: str) -> Any:
     load() to the executor, since `_new_yaml()` itself is evaluated eagerly
     on the event loop before being passed in)."""
     return _new_yaml().load(content)
+
+
+def _quote_ambiguous_scalars(value: Any) -> Any:
+    """Recursively force-quote plain strings PyYAML would misread as bool/None.
+
+    Only ever applied to brand-new config a caller passed in (plain dict/
+    list/str from a tool call), never to values already loaded from the
+    file - those already round-trip with whatever quote style they were
+    written with. Same helper duplicated in template_yaml_manager.py,
+    which splices new config into YAML documents the same way.
+    """
+    if isinstance(value, dict):
+        return {k: _quote_ambiguous_scalars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_quote_ambiguous_scalars(v) for v in value]
+    if isinstance(value, str) and value in _AMBIGUOUS_SCALARS:
+        return DoubleQuotedScalarString(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -284,6 +341,7 @@ class AutomationManager:
         """
         config = dict(config)
         config["id"] = str(automation_id)
+        config = _quote_ambiguous_scalars(config)
 
         locations = await self.find_all_locations(automation_id)
         if len(locations) > 1:

@@ -52,6 +52,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from .file_manager import FileManager
 
@@ -60,6 +61,39 @@ _LOGGER = logging.getLogger(__name__)
 TEMPLATE_KEY = "template"
 DEFAULT_CONFIG_FILE = "configuration.yaml"
 PACKAGES_DIR = "packages"
+
+# Same set + same reasoning as automation_manager.py's helper of the same
+# name: PyYAML's default resolver (what HA's own YAML loader uses to read
+# this file back) treats these plain scalars as bool/None, not str -
+# ruamel.yaml's YAML-1.2 resolver doesn't, so it won't quote them on its
+# own when dumping a brand-new plain `str` it didn't load with existing
+# quote styling.
+_AMBIGUOUS_SCALARS = frozenset(
+    {
+        "yes",
+        "Yes",
+        "YES",
+        "no",
+        "No",
+        "NO",
+        "true",
+        "True",
+        "TRUE",
+        "false",
+        "False",
+        "FALSE",
+        "on",
+        "On",
+        "ON",
+        "off",
+        "Off",
+        "OFF",
+        "null",
+        "Null",
+        "NULL",
+        "~",
+    }
+)
 
 # Every platform the template integration supports (confirmed by reading
 # homeassistant/components/template/const.py at this repo's pinned HA
@@ -108,6 +142,21 @@ def _load_yaml(content: str) -> Any:
     callable only defers load() to the executor - `_new_yaml()` itself is
     evaluated eagerly on the event loop before being passed in."""
     return _new_yaml().load(content)
+
+
+def _quote_ambiguous_scalars(value: Any) -> Any:
+    """Recursively force-quote plain strings PyYAML would misread as bool/None.
+
+    Same helper duplicated in automation_manager.py - see that copy's
+    docstring for the full reasoning.
+    """
+    if isinstance(value, dict):
+        return {k: _quote_ambiguous_scalars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_quote_ambiguous_scalars(v) for v in value]
+    if isinstance(value, str) and value in _AMBIGUOUS_SCALARS:
+        return DoubleQuotedScalarString(value)
+    return value
 
 
 def _to_plain(value: Any) -> Any:
@@ -398,6 +447,9 @@ class TemplateYamlManager:
         if existing:
             raise DuplicateTemplateUniqueIdError(unique_id, existing)
 
+        config = _quote_ambiguous_scalars(config)
+        triggers = _quote_ambiguous_scalars(triggers) if triggers else triggers
+
         file_path = f"{PACKAGES_DIR}/{package}"
         if not (self._config_dir / file_path).is_file():
             raise TemplateEntityNotFoundError(
@@ -520,6 +572,7 @@ class TemplateYamlManager:
                 "+ create_entity to change a unique_id"
             )
         config["unique_id"] = unique_id
+        config = _quote_ambiguous_scalars(config)
 
         location = await self.find_entity(unique_id)
         content_before = await self.file_manager.read_file(location.file_path)
