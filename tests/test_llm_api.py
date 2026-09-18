@@ -34,7 +34,7 @@ import base64
 import inspect
 import json
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import voluptuous as vol
@@ -61,10 +61,13 @@ from custom_components.ha_dev_tools.derived_sensor_manager import (
 )
 from custom_components.ha_dev_tools.file_manager import FileManager
 from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
+from custom_components.ha_dev_tools.log_manager import LogManager
 from custom_components.ha_dev_tools.mqtt_manager import MqttNotAvailableError
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
+    AuditAutomationsTool,
+    CheckConfigTool,
     CreateDerivedSensorTool,
     CreateHelperTool,
     CreateTemplateEntityTool,
@@ -75,25 +78,37 @@ from custom_components.ha_dev_tools.llm_api import (
     DeleteHelperTool,
     DeleteTemplateEntityTool,
     DevToolsPingTool,
+    EntityHealthReportTool,
     FindEntitiesTool,
+    GetAddonLogsTool,
     GetAutomationTool,
+    GetDashboardTool,
     GetDerivedSensorTool,
     GetEntityHistoryTool,
     GetLogbookTool,
+    GetLogsTool,
     GetScriptTool,
+    GetTemplateEntityTool,
+    ListAddonsTool,
     ListDerivedSensorsTool,
+    ListHelpersTool,
     ListMqttTopicsTool,
     ListScriptsTool,
+    ListTemplateEntitiesTool,
     ReloadDerivedSensorTool,
+    ReloadDomainTool,
+    RenderTemplateTool,
     UpdateDerivedSensorTool,
     UpdateHelperTool,
     UpdateTemplateEntityTool,
+    ValidateTemplateTool,
     WriteAutomationTool,
     WriteDashboardTool,
     WriteGatedTool,
     WriteScriptTool,
 )
 from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.supervisor_manager import SupervisorNotAvailableError
 from custom_components.ha_dev_tools.template_yaml_manager import TemplateYamlManager
 
 
@@ -282,6 +297,21 @@ async def test_gated_tool_succeeds_when_armed_and_admin(
     assert isinstance(result, dict)
     # A successful call extends the idle window (touch_armed).
     assert path.stat().st_mtime >= mtime_before
+
+
+@pytest.mark.asyncio
+async def test_entity_health_report_tool_calls_manager(hass: HomeAssistant):
+    """Never exercised anywhere else - a thin argument-plumbing wrapper
+    around entity_manager.entity_health_report, same shape as
+    FindEntitiesTool above."""
+    result = await EntityHealthReportTool()._run(
+        hass,
+        llm.ToolInput(tool_name="entity_health_report", tool_args={}),
+        _llm_context(),
+    )
+
+    assert isinstance(result, dict)
+    assert "by_integration" in result
 
 
 # --- DeleteEntityTool --------------------------------------------------------
@@ -622,6 +652,163 @@ async def test_list_mqtt_topics_tool_not_available_returns_tool_error(
     assert result["error_type"] == "MqttNotAvailableError"
 
 
+# --- RenderTemplateTool / ValidateTemplateTool -------------------------------
+#
+# template_manager.py's own tests cover the actual Jinja2 rendering/
+# validation logic - these just prove the tool wrapper plumbs arguments
+# through and returns the manager's result, real end to end (no mocking
+# needed - both run entirely in-process against live state).
+
+
+@pytest.mark.asyncio
+async def test_render_template_tool_renders_against_live_state(hass: HomeAssistant):
+    result = await RenderTemplateTool()._run(
+        hass,
+        llm.ToolInput(
+            tool_name="render_template",
+            tool_args={"template": "{{ 1 + 1 }}"},
+        ),
+        _llm_context(),
+    )
+
+    assert result == {"success": True, "result": 2}
+
+
+@pytest.mark.asyncio
+async def test_validate_template_tool_reports_syntax_error(hass: HomeAssistant):
+    """Never exercised anywhere else - covers the tool wrapper, not the
+    already-tested validation logic itself."""
+    result = await ValidateTemplateTool()._run(
+        hass,
+        llm.ToolInput(
+            tool_name="validate_template", tool_args={"template": "{{ unterminated"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["valid"] is False
+
+
+# --- GetLogsTool --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_logs_tool_returns_filtered_entries(hass: HomeAssistant):
+    """Never imported by any existing test - covers both the LogFilters
+    argument plumbing and the entries/count response shaping."""
+    log_manager = LogManager(hass, SecurityManager(hass, {}))
+    fake_entry = Mock()
+    fake_entry.to_dict.return_value = {"message": "hello"}
+    tool = GetLogsTool(log_manager)
+
+    with patch.object(
+        log_manager, "get_core_logs", AsyncMock(return_value=[fake_entry])
+    ) as mock_get_logs:
+        result = await tool._run(
+            hass,
+            llm.ToolInput(tool_name="get_logs", tool_args={"lines": 50, "level": "ERROR"}),
+            _llm_context(),
+        )
+
+    assert result == {"entries": [{"message": "hello"}], "count": 1}
+    filters = mock_get_logs.call_args.args[0]
+    assert filters.lines == 50
+    assert filters.level == "ERROR"
+
+
+# --- ListAddonsTool / GetAddonLogsTool (Supervisor-only tools) ---------------
+#
+# Can't stand up a real Supervisor in this sandbox (see
+# supervisor_manager.py's module docstring) - "not available" is exercised
+# for real (no hassio component registered at all here), "calls manager"
+# mocks the module function the same way the derived-sensor tool tests do.
+
+
+@pytest.mark.asyncio
+async def test_list_addons_tool_surfaces_not_available(hass: HomeAssistant):
+    result = await ListAddonsTool()._run(
+        hass, llm.ToolInput(tool_name="list_addons", tool_args={}), _llm_context()
+    )
+
+    assert result["error_type"] == "SupervisorNotAvailableError"
+
+
+@pytest.mark.asyncio
+async def test_list_addons_tool_calls_manager(hass: HomeAssistant):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.supervisor_manager.list_addons",
+        AsyncMock(return_value=[{"slug": "core_mosquitto"}]),
+    ):
+        result = await ListAddonsTool()._run(
+            hass, llm.ToolInput(tool_name="list_addons", tool_args={}), _llm_context()
+        )
+
+    assert result == {"addons": [{"slug": "core_mosquitto"}]}
+
+
+@pytest.mark.asyncio
+async def test_get_addon_logs_tool_surfaces_not_available(hass: HomeAssistant):
+    result = await GetAddonLogsTool()._run(
+        hass,
+        llm.ToolInput(tool_name="get_addon_logs", tool_args={"slug": "core_mosquitto"}),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "SupervisorNotAvailableError"
+
+
+@pytest.mark.asyncio
+async def test_get_addon_logs_tool_calls_manager(hass: HomeAssistant):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.supervisor_manager.get_addon_logs",
+        AsyncMock(return_value={"logs": "hello\n"}),
+    ) as mock_get_addon_logs:
+        result = await GetAddonLogsTool()._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_addon_logs",
+                tool_args={"slug": "core_mosquitto", "lines": 10},
+            ),
+            _llm_context(),
+        )
+
+    assert result == {"logs": "hello\n"}
+    mock_get_addon_logs.assert_called_once_with(hass, "core_mosquitto", lines=10)
+
+
+# --- CheckConfigTool / ReloadDomainTool ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_config_tool_calls_manager(hass: HomeAssistant):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.config_tools.check_ha_config",
+        AsyncMock(return_value={"valid": True}),
+    ) as mock_check:
+        result = await CheckConfigTool()._run(
+            hass, llm.ToolInput(tool_name="check_config", tool_args={}), _llm_context()
+        )
+
+    assert result == {"valid": True}
+    mock_check.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_reload_domain_tool_calls_manager(hass: HomeAssistant):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.config_tools.reload_domain",
+        AsyncMock(return_value={"reloaded": True}),
+    ) as mock_reload:
+        result = await ReloadDomainTool()._run(
+            hass,
+            llm.ToolInput(tool_name="reload_domain", tool_args={"domain": "automation"}),
+            _llm_context(),
+        )
+
+    assert result == {"reloaded": True}
+    mock_reload.assert_called_once_with(hass, "automation")
+
+
 # --- GetAutomationTool / currently_enabled ----------------------------------
 
 
@@ -918,6 +1105,33 @@ async def test_write_gated_tool_blocks_write_when_dry_run_enabled(
     assert result["dry_run"] is True
     assert result["action"] == "stub_write"
     assert result["would_apply"] == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
+async def test_write_gated_tool_dry_run_mirror_default_hook_returns_none(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """Most write tools (helpers, derived sensors, dashboards) never
+    override _dry_run_mirror - dry-run + mirroring enabled together must
+    still come back with no 'mirror' key for them, via the base class's
+    default None, rather than only ever being exercised by the tools that
+    do override it."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_DRY_RUN: True,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    _arm(hass)
+    tool = _StubWriteTool()
+
+    result = await _confirm(hass, tool, admin_user, {"foo": "bar"})
+
+    assert result["dry_run"] is True
+    assert "mirror" not in result
 
 
 @pytest.mark.asyncio
@@ -1337,6 +1551,26 @@ async def test_create_derived_sensor_tool_needs_input_payload(hass: HomeAssistan
 
 
 @pytest.mark.asyncio
+async def test_create_derived_sensor_tool_surfaces_invalid_domain(hass: HomeAssistant):
+    """The other exception branch alongside FlowStepRequiredError above -
+    never exercised anywhere else."""
+    tool = CreateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.create_derived_sensor",
+        AsyncMock(side_effect=InvalidDerivedSensorDomainError("bad domain")),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="create_derived_sensor", tool_args={"domain": "min_max"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "InvalidDerivedSensorDomainError"
+
+
+@pytest.mark.asyncio
 async def test_update_derived_sensor_tool_calls_manager(hass: HomeAssistant):
     tool = UpdateDerivedSensorTool()
     with patch(
@@ -1375,6 +1609,31 @@ async def test_update_derived_sensor_tool_surfaces_not_found(hass: HomeAssistant
 
 
 @pytest.mark.asyncio
+async def test_update_derived_sensor_tool_needs_input_payload(hass: HomeAssistant):
+    """update_derived_sensor's own FlowStepRequiredError path - only
+    create_derived_sensor's equivalent (above) was covered before."""
+    tool = UpdateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.update_derived_sensor",
+        AsyncMock(
+            side_effect=FlowStepRequiredError(
+                "init", [{"name": "max", "type": "float"}], None
+            )
+        ),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["needs_input"] is True
+    assert result["step_id"] == "init"
+
+
+@pytest.mark.asyncio
 async def test_delete_derived_sensor_tool_calls_manager(hass: HomeAssistant):
     tool = DeleteDerivedSensorTool()
     with patch(
@@ -1394,6 +1653,24 @@ async def test_delete_derived_sensor_tool_calls_manager(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
+async def test_delete_derived_sensor_tool_surfaces_not_found(hass: HomeAssistant):
+    tool = DeleteDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.delete_derived_sensor",
+        AsyncMock(side_effect=DerivedSensorNotFoundError("nope")),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "DerivedSensorNotFoundError"
+
+
+@pytest.mark.asyncio
 async def test_reload_derived_sensor_tool_calls_manager(hass: HomeAssistant):
     tool = ReloadDerivedSensorTool()
     with patch(
@@ -1410,6 +1687,24 @@ async def test_reload_derived_sensor_tool_calls_manager(hass: HomeAssistant):
 
     assert result == {"reloaded": True, "entry_id": "abc"}
     mock_reload.assert_called_once_with(hass, "abc")
+
+
+@pytest.mark.asyncio
+async def test_reload_derived_sensor_tool_surfaces_not_found(hass: HomeAssistant):
+    tool = ReloadDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.reload_derived_sensor",
+        AsyncMock(side_effect=DerivedSensorNotFoundError("nope")),
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="reload_derived_sensor", tool_args={"entry_id": "abc"}
+            ),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "DerivedSensorNotFoundError"
 
 
 # --- Template entity write tools (mirroring wiring) --------------------------
@@ -1454,6 +1749,79 @@ def _write_package(tmp_path, rel_path: str, content: str) -> None:
     full = tmp_path / rel_path
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text(content)
+
+
+# --- ListTemplateEntitiesTool / GetTemplateEntityTool (reads) ----------------
+#
+# Neither tool was ever imported by any existing test - both are thin
+# read-side wrappers around the same real TemplateYamlManager the write
+# tools above use.
+
+
+@pytest.mark.asyncio
+async def test_list_template_entities_tool_calls_manager(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: One\n"
+        "        unique_id: one\n"
+        '        state: "{{ 1 }}"\n',
+    )
+
+    result = await ListTemplateEntitiesTool(template_yaml_manager)._run(
+        hass,
+        llm.ToolInput(tool_name="list_template_entities", tool_args={}),
+        _llm_context(),
+    )
+
+    assert [item["unique_id"] for item in result["items"]] == ["one"]
+
+
+@pytest.mark.asyncio
+async def test_get_template_entity_tool_returns_config(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Target\n"
+        "        unique_id: target\n"
+        '        state: "{{ 1 }}"\n',
+    )
+
+    result = await GetTemplateEntityTool(template_yaml_manager)._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_template_entity", tool_args={"unique_id": "target"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["file_path"] == "packages/emhas.yaml"
+    assert result["config"]["name"] == "Target"
+
+
+@pytest.mark.asyncio
+async def test_get_template_entity_tool_surfaces_not_found(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+
+    result = await GetTemplateEntityTool(template_yaml_manager)._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_template_entity", tool_args={"unique_id": "missing"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "TemplateEntityNotFoundError"
 
 
 @pytest.mark.asyncio
@@ -1540,6 +1908,134 @@ async def test_delete_template_entity_tool_writes_and_reports_location(
     assert result["file_path"] == "packages/emhas.yaml"
     assert result["reloaded"] is True
     assert "mirror" not in result
+
+
+# --- Template entity write tools: exception branches -------------------------
+#
+# The happy paths above never exercise these tools' except clauses (or
+# their _dry_run_mirror equivalents) - a missing 'unique_id'/nonexistent
+# unique_id triggers the same real errors template_yaml_manager.py's own
+# tests already verify, no mocking needed.
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_tool_write_rejects_missing_unique_id(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="create_template_entity",
+            tool_args={
+                "platform": "sensor",
+                "config": {"name": "New", "state": "{{ 1 }}"},
+                "package": "emhas.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_tool_dry_run_mirror_skips_on_error(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._dry_run_mirror(
+        hass,
+        llm.ToolInput(
+            tool_name="create_template_entity",
+            tool_args={
+                "platform": "sensor",
+                "config": {"name": "New", "state": "{{ 1 }}"},
+                "package": "emhas.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result.mirrored is False
+
+
+@pytest.mark.asyncio
+async def test_update_template_entity_tool_write_surfaces_not_found(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = UpdateTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="update_template_entity",
+            tool_args={"unique_id": "missing", "config": {"name": "New"}},
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "TemplateEntityNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_update_template_entity_tool_dry_run_mirror_skips_when_not_found(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = UpdateTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._dry_run_mirror(
+        hass,
+        llm.ToolInput(
+            tool_name="update_template_entity",
+            tool_args={"unique_id": "missing", "config": {"name": "New"}},
+        ),
+        _llm_context(),
+    )
+
+    assert result.mirrored is False
+
+
+@pytest.mark.asyncio
+async def test_delete_template_entity_tool_write_surfaces_not_found(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_template_entity", tool_args={"unique_id": "missing"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "TemplateEntityNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_delete_template_entity_tool_dry_run_mirror_skips_when_not_found(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/emhas.yaml", "template: []\n")
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+
+    result = await tool._dry_run_mirror(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_template_entity", tool_args={"unique_id": "missing"}
+        ),
+        _llm_context(),
+    )
+
+    assert result.mirrored is False
 
 
 class _FakeMirrorResponse:
@@ -1737,6 +2233,61 @@ async def test_delete_template_entity_tool_mirrors_when_enabled(
     assert result["mirror"]["commits"] == ["before", "after"]
 
 
+# --- GetDashboardTool ---------------------------------------------------------
+#
+# Never imported by any existing test.
+
+
+@pytest.mark.asyncio
+async def test_get_dashboard_tool_calls_manager(hass: HomeAssistant, admin_user):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.dashboard_manager.get_dashboard",
+        AsyncMock(return_value={"views": []}),
+    ) as mock_get:
+        result = await GetDashboardTool()._run(
+            hass,
+            llm.ToolInput(tool_name="get_dashboard", tool_args={"url_path": "x"}),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"views": []}
+    mock_get.assert_called_once_with(hass, admin_user, url_path="x")
+
+
+@pytest.mark.asyncio
+async def test_get_dashboard_tool_surfaces_unresolved_user(hass: HomeAssistant):
+    """No user in context - resolve_user must refuse before dashboard_manager
+    is ever called."""
+    result = await GetDashboardTool()._run(
+        hass, llm.ToolInput(tool_name="get_dashboard", tool_args={}), _llm_context()
+    )
+
+    assert result["error_type"] == "UnresolvedUserError"
+
+
+# --- AuditAutomationsTool ------------------------------------------------------
+#
+# audit_manager.py's own tests cover the actual audit logic - this is the
+# thin tool wrapper, never imported by any existing test.
+
+
+@pytest.mark.asyncio
+async def test_audit_automations_tool_calls_manager(hass: HomeAssistant):
+    manager = Mock()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.audit_manager.audit_automations",
+        AsyncMock(return_value={"duplicates": []}),
+    ) as mock_audit:
+        result = await AuditAutomationsTool(manager)._run(
+            hass,
+            llm.ToolInput(tool_name="audit_automations", tool_args={}),
+            _llm_context(),
+        )
+
+    assert result == {"duplicates": []}
+    mock_audit.assert_called_once_with(hass, manager)
+
+
 # --- write_dashboard tool (storage-file-based mirroring) ---------------------
 #
 # Unlike helpers (see llm_api.py's _mirror_file_write docstring for why
@@ -1835,6 +2386,122 @@ async def test_write_dashboard_tool_mirrors_when_enabled(
     # test) - only the after-commit pushes, matching mirror.py's own
     # "content_before is None -> no before-commit" rule.
     assert result["mirror"]["commits"] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_write_dashboard_tool_surfaces_unresolved_user(
+    hass: HomeAssistant, setup_integration_with_entry
+):
+    """No user in context - resolve_user must refuse before
+    dashboard_manager.write_dashboard is ever called."""
+    tool = WriteDashboardTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="write_dashboard", tool_args={"config": {"views": []}}
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "UnresolvedUserError"
+
+
+# --- ListHelpersTool / helper tools' invalid-domain exception branches ------
+#
+# Each create/update/delete_helper tool already has success-path coverage
+# below (via the mirroring tests) - what's missing is their shared
+# except clause. Bypassing schema validation by calling _run()/_write()
+# directly (as the rest of this file already does) lets a bad domain
+# reach helper_manager's own real _check_domain() check, no mocking
+# needed.
+
+
+@pytest.mark.asyncio
+async def test_list_helpers_tool_calls_manager(hass: HomeAssistant, admin_user):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.helper_manager.list_helpers",
+        AsyncMock(return_value=[{"id": "abc"}]),
+    ) as mock_list:
+        result = await ListHelpersTool()._run(
+            hass,
+            llm.ToolInput(
+                tool_name="list_helpers", tool_args={"domain": "input_boolean"}
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"items": [{"id": "abc"}]}
+    mock_list.assert_called_once_with(hass, admin_user, "input_boolean")
+
+
+@pytest.mark.asyncio
+async def test_list_helpers_tool_invalid_domain_returns_tool_error(
+    hass: HomeAssistant, admin_user
+):
+    result = await ListHelpersTool()._run(
+        hass,
+        llm.ToolInput(tool_name="list_helpers", tool_args={"domain": "not_a_domain"}),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["error_type"] == "InvalidHelperDomainError"
+
+
+@pytest.mark.asyncio
+async def test_create_helper_tool_invalid_domain_returns_tool_error(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    # "input_bogus" (not a real HELPER_DOMAINS entry) still matches the
+    # default security policy's ".storage/input_*" read allowlist pattern,
+    # so _read_storage_file succeeds and _check_domain's rejection is what
+    # actually gets exercised here, not an unrelated permission error.
+    result = await CreateHelperTool()._write(
+        hass,
+        llm.ToolInput(
+            tool_name="create_helper",
+            tool_args={"domain": "input_bogus", "config": {"name": "x"}},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["error_type"] == "InvalidHelperDomainError"
+
+
+@pytest.mark.asyncio
+async def test_update_helper_tool_invalid_domain_returns_tool_error(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    result = await UpdateHelperTool()._write(
+        hass,
+        llm.ToolInput(
+            tool_name="update_helper",
+            tool_args={
+                "domain": "input_bogus",
+                "item_id": "x",
+                "config": {"name": "x"},
+            },
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["error_type"] == "InvalidHelperDomainError"
+
+
+@pytest.mark.asyncio
+async def test_delete_helper_tool_invalid_domain_returns_tool_error(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    result = await DeleteHelperTool()._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_helper",
+            tool_args={"domain": "input_bogus", "item_id": "x"},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["error_type"] == "InvalidHelperDomainError"
 
 
 # --- helper mirroring: in-memory reconstruction, never re-reading the ------
@@ -2385,6 +3052,93 @@ async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabl
 
 
 @pytest.mark.asyncio
+async def test_write_automation_tool_write_performs_real_write_when_dry_run_disabled(
+    hass: HomeAssistant, tmp_path
+):
+    """Every other write_automation test above drives dry-run mode - this
+    is the only one exercising the real _write() path (dry-run disabled,
+    the default), calling _write() directly to isolate it from the
+    confirm-flow/gating already covered elsewhere."""
+    manager = _write_automation_manager(hass, tmp_path)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  alias: Old\n  trigger: []\n  action: []\n"
+    )
+    hass.services.async_register("automation", "reload", AsyncMock())
+    tool = WriteAutomationTool(manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="write_automation",
+            tool_args={
+                "automation_id": "my_automation",
+                "config": {"alias": "New", "trigger": [], "action": []},
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["file_path"] == "automations.yaml"
+    assert result["is_package"] is False
+    assert "mirror" not in result
+    assert "New" in (tmp_path / "automations.yaml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_write_automation_tool_write_surfaces_not_found(
+    hass: HomeAssistant, tmp_path
+):
+    """write_automation's own _write() exception handling - a nonexistent
+    target package must come back as a _tool_error, not raise
+    (_dry_run_mirror's identical except clause is covered separately
+    below - the real _write() path here was never exercised by anything)."""
+    manager = _write_automation_manager(hass, tmp_path)
+    tool = WriteAutomationTool(manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="write_automation",
+            tool_args={
+                "automation_id": "brand_new",
+                "config": {"trigger": [], "action": []},
+                "package": "does_not_exist.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "AutomationNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_write_automation_tool_dry_run_mirror_skips_when_package_missing(
+    hass: HomeAssistant, tmp_path
+):
+    """_dry_run_mirror's own exception handling - a dry-run write targeting
+    a nonexistent package file must skip mirroring with a reason, not raise
+    AutomationNotFoundError uncaught."""
+    manager = _write_automation_manager(hass, tmp_path)
+    tool = WriteAutomationTool(manager)
+
+    result = await tool._dry_run_mirror(
+        hass,
+        llm.ToolInput(
+            tool_name="write_automation",
+            tool_args={
+                "automation_id": "brand_new",
+                "config": {"trigger": [], "action": []},
+                "package": "does_not_exist.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result.mirrored is False
+    assert "does_not_exist.yaml" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_delete_automation_tool_confirm_flow_deletes_and_reloads(
     hass: HomeAssistant, admin_user, tmp_path
 ):
@@ -2680,6 +3434,54 @@ async def test_write_script_tool_dry_run_mirrors_to_proposed_branch(
     # Nothing live actually changed:
     assert "Old" in (tmp_path / "scripts.yaml").read_text()
     assert "New" not in (tmp_path / "scripts.yaml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_write_script_tool_write_surfaces_not_found(
+    hass: HomeAssistant, tmp_path
+):
+    """write_script's own _write() exception handling - a nonexistent
+    target package must come back as a _tool_error, not raise."""
+    manager = _write_script_manager(hass, tmp_path)
+    tool = WriteScriptTool(manager)
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="write_script",
+            tool_args={
+                "script_id": "brand_new",
+                "config": {"sequence": []},
+                "package": "does_not_exist.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "ScriptNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_write_script_tool_dry_run_mirror_skips_when_not_found(
+    hass: HomeAssistant, tmp_path
+):
+    manager = _write_script_manager(hass, tmp_path)
+    tool = WriteScriptTool(manager)
+
+    result = await tool._dry_run_mirror(
+        hass,
+        llm.ToolInput(
+            tool_name="write_script",
+            tool_args={
+                "script_id": "brand_new",
+                "config": {"sequence": []},
+                "package": "does_not_exist.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+
+    assert result.mirrored is False
 
 
 @pytest.mark.asyncio

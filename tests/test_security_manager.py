@@ -1,6 +1,7 @@
 """Test SecurityManager functionality with Home Assistant fixtures."""
 
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -2270,3 +2271,153 @@ def test_dynamic_modifications_with_validation(hass: HomeAssistant):
     is_valid, error = manager.validate_file_path("test.yaml")
     assert is_valid is False
     assert error == ERROR_PERMISSION_DENIED
+
+
+# ============================================================================
+# Additional Coverage: private glob helper, error branches, and public
+# methods never directly exercised (Silver test-coverage push)
+# ============================================================================
+
+
+def test_fnmatch_globstar_trailing_globstar_matches_bare_prefix(hass: HomeAssistant):
+    """A trailing '/**' with no '**/' variant present must still match the
+    prefix directory itself, not just its descendants - the '**/' branch is
+    tried first and doesn't apply here, so this exercises the separate
+    '/**' fallback in _fnmatch_globstar (only reachable through
+    validate_file_path's own allowlist check, not called directly - no
+    existing test in this file calls a private helper directly either).
+    """
+    manager = SecurityManager(hass, {"read_paths": ["/config/packages/**"]})
+
+    is_valid, error = manager.validate_file_path("packages")
+
+    assert is_valid is True
+    assert error is None
+
+
+def test_validate_file_path_resolves_outside_config_directory(hass: HomeAssistant):
+    """An allowlisted path that is itself absolute escapes the config
+    directory when joined with Path (an absolute right-hand side resets
+    the join instead of nesting under it) - validate_file_path must still
+    catch that via the resolved-path boundary check rather than trusting
+    the allowlist match alone.
+    """
+    manager = SecurityManager(hass, {"read_paths": ["/etc/outside.yaml"]})
+
+    is_valid, error = manager.validate_file_path("/etc/outside.yaml")
+
+    assert is_valid is False
+    assert error == ERROR_INVALID_PATH
+
+
+def test_validate_file_path_wraps_path_resolution_failure(
+    hass: HomeAssistant, security_manager
+):
+    """If Path.resolve() itself raises (e.g. a filesystem race or
+    permission error), validate_file_path must report ERROR_INVALID_PATH
+    instead of letting the raw OSError propagate."""
+    with patch.object(Path, "resolve", side_effect=OSError("simulated resolve failure")):
+        is_valid, error = security_manager.validate_file_path("configuration.yaml")
+
+    assert is_valid is False
+    assert error == ERROR_INVALID_PATH
+
+
+def test_validate_file_path_rejects_invalid_extension_via_directory_match(
+    hass: HomeAssistant,
+):
+    """A bare directory entry (no glob) in the allowlist grants access to
+    every file under it via the directory-prefix match, but that shouldn't
+    also bypass the extension check for files that aren't themselves an
+    exact allowlist entry - only being explicitly allowlisted does that.
+    """
+    manager = SecurityManager(hass, {"read_paths": ["mydir"]})
+
+    is_valid, error = manager.validate_file_path("mydir/script.exe")
+
+    assert is_valid is False
+    assert error == ERROR_INVALID_PATH
+
+
+def test_validate_file_path_wraps_unexpected_error(
+    hass: HomeAssistant, security_manager
+):
+    """Any unexpected exception during validation - not just the resolve()
+    failure handled explicitly above - must still be caught by the outer
+    handler and reported as ERROR_INVALID_PATH rather than crashing the
+    caller."""
+    with patch(
+        "custom_components.ha_dev_tools.security.os.path.normpath",
+        side_effect=RuntimeError("simulated unexpected failure"),
+    ):
+        is_valid, error = security_manager.validate_file_path("configuration.yaml")
+
+    assert is_valid is False
+    assert error == ERROR_INVALID_PATH
+
+
+def test_is_denylisted_subdirectory_of_plain_denied_path(
+    hass: HomeAssistant, security_manager
+):
+    """A denylist entry with no wildcard still blocks everything nested
+    under it, not just the exact path itself - checked via the plain
+    'startswith(denied + "/")' branch, distinct from the glob-pattern
+    matching used for wildcard entries."""
+    assert security_manager.is_denylisted(".storage/onboarding/nested.json") is True
+
+
+def test_is_denylisted_plain_entry_matches_with_config_prefix(
+    hass: HomeAssistant, security_manager
+):
+    """A denylist entry configured without a leading slash (e.g. '.uuid')
+    must still match the same file addressed with its '/config/' prefix,
+    via the prefix-aware fnmatch fallback - distinct from the exact-match
+    and subdirectory checks, neither of which apply here."""
+    assert security_manager.is_denylisted("/config/.uuid") is True
+
+
+def test_is_allowlisted_returns_true_once_allowlist_is_emptied(hass: HomeAssistant):
+    """Allowlist mode is only 'on' while the allowlist is non-empty.
+    _build_allowlist's own docstring argues the allowlist can never start
+    empty from configuration alone - but removing every entry at runtime
+    (e.g. via repeated remove_from_allowlist calls) is a real, reachable
+    way to empty it, and is_allowlisted's documented behavior for that
+    case ("empty allowlist = allow all") was never actually exercised."""
+    manager = SecurityManager(hass, {"read_paths": ["/config/only.yaml"]})
+    manager.remove_from_allowlist("/config/only.yaml")
+
+    assert manager.allowlist == set()
+    assert manager.is_allowlisted("/config/anything.yaml") is True
+
+
+def test_is_readable_true_for_read_and_write_paths(hass: HomeAssistant):
+    """is_readable() is never exercised by validate_file_path at all - it's
+    a standalone convenience query that must recognize both read_paths and
+    write_paths (write implies read), and reject anything in neither."""
+    manager = SecurityManager(
+        hass,
+        {
+            "read_paths": ["/config/read_only.yaml"],
+            "write_paths": ["/config/write_me.yaml"],
+        },
+    )
+
+    assert manager.is_readable("/config/read_only.yaml") is True
+    assert manager.is_readable("/config/write_me.yaml") is True
+    assert manager.is_readable("/config/other.yaml") is False
+
+
+def test_is_writable_matches_bare_directory_prefix(hass: HomeAssistant):
+    """_path_matches_set's directory-prefix branch (shared by is_readable
+    and is_writable) is never reached by any existing test - a bare
+    directory entry with no glob must still grant access to files nested
+    under it."""
+    manager = SecurityManager(hass, {"write_paths": ["packages"]})
+
+    assert manager.is_writable("packages/lights.yaml") is True
+
+
+def test_get_security_mode_is_always_allowlist(hass: HomeAssistant, security_manager):
+    """The system only ever operates in strict allowlist mode - no
+    branches here, but never called by any existing test either."""
+    assert security_manager.get_security_mode() == "allowlist"

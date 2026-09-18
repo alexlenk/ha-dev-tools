@@ -15,6 +15,22 @@ def test_find_yaml_credentials_allows_secret_tag():
     assert mirror_secrets.find_yaml_credentials(content) == []
 
 
+def test_find_yaml_credentials_flags_non_secret_tag():
+    """Only !secret is the documented safe/unsafe signal - any other tag on
+    a sensitive key (a typo, !env_var, !include, ...) is not that mechanism
+    and must still be flagged, not silently exempted like !secret is."""
+    content = "automation:\n  - id: a\n    password: !env_var MY_PASSWORD\n"
+    assert mirror_secrets.find_yaml_credentials(content) == ["automation[0].password"]
+
+
+def test_find_yaml_credentials_ignores_non_string_keys():
+    """A mapping key that isn't a string (YAML allows int/bool/etc. keys)
+    can't be substring-matched against SENSITIVE_KEY_SUBSTRINGS - it's
+    never sensitive-shaped, regardless of its value."""
+    content = "automation:\n  - id: a\n    123: hunter2\n"
+    assert mirror_secrets.find_yaml_credentials(content) == []
+
+
 def test_find_yaml_credentials_clean_content():
     content = "automation:\n  - id: a\n    alias: Front door\n    trigger: []\n"
     assert mirror_secrets.find_yaml_credentials(content) == []

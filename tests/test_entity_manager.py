@@ -1,6 +1,8 @@
 """Tests for area/domain-scoped entity lookup (entity_manager.py)."""
 
 import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -16,6 +18,7 @@ from custom_components.ha_dev_tools.entity_manager import (
     entity_health_report,
     entity_registry_snapshot,
     find_entities,
+    resolve_area_id,
 )
 
 
@@ -145,6 +148,56 @@ async def test_find_entities_truncates_and_flags_it(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
+async def test_find_entities_by_area_id_directly(hass: HomeAssistant, bedroom_area):
+    """An area filter that's already a valid area id (not a name) should
+    resolve to itself rather than falling through to name matching."""
+    _register_entity(hass, "cover.shutter", area_id=bedroom_area.id)
+
+    result = find_entities(hass, area=bedroom_area.id)
+
+    assert {e["entity_id"] for e in result["entities"]} == {"cover.shutter"}
+
+
+def test_resolve_area_id_exact_name_fallback_when_registry_lookup_misses():
+    """HA's own async_get_area_by_name already normalizes by casefolding
+    and stripping whitespace, so a real AreaRegistry rarely misses on case
+    alone - this fallback exists for any registry (or future HA change)
+    where it does, exercised directly against a fake registry rather than
+    relying on the real one's internals happening to miss too."""
+    area_reg = MagicMock()
+    area_reg.async_get_area.return_value = None
+    area_reg.async_get_area_by_name.return_value = None
+    area_reg.async_list_areas.return_value = [
+        SimpleNamespace(name="Kitchen", id="area_kitchen"),
+    ]
+
+    assert resolve_area_id(area_reg, "KITCHEN") == "area_kitchen"
+
+
+@pytest.mark.asyncio
+async def test_find_entities_uses_entitys_own_area_over_device(
+    hass: HomeAssistant, bedroom_area
+):
+    """An entity with its own area_id set must report that area directly,
+    without needing (or consulting) a device at all."""
+    _register_entity(hass, "cover.shutter", area_id=bedroom_area.id)
+
+    result = find_entities(hass, area=bedroom_area.id)
+
+    assert result["entities"][0]["area_id"] == bedroom_area.id
+
+
+@pytest.mark.asyncio
+async def test_find_entities_name_search_excludes_non_matches(hass: HomeAssistant):
+    _register_entity(hass, "light.kitchen")
+    _register_entity(hass, "light.bedroom")
+
+    result = find_entities(hass, domain="light", name_search="kitchen")
+
+    assert {e["entity_id"] for e in result["entities"]} == {"light.kitchen"}
+
+
+@pytest.mark.asyncio
 async def test_entity_health_report_buckets_by_integration_and_status(
     hass: HomeAssistant,
 ):
@@ -192,6 +245,18 @@ async def test_entity_health_report_disabled_entities_counted_and_flagged(
 
     assert report["by_integration"]["hue"]["disabled"] == 1
     assert report["problem_entities"][0]["status"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_entity_health_report_counts_hidden_entities(hass: HomeAssistant):
+    _register_entity(hass, "light.hue_hidden", platform="hue", state="on")
+    er.async_get(hass).async_update_entity(
+        "light.hue_hidden", hidden_by=er.RegistryEntryHider.USER
+    )
+
+    report = entity_health_report(hass)
+
+    assert report["by_integration"]["hue"]["hidden"] == 1
 
 
 @pytest.mark.asyncio

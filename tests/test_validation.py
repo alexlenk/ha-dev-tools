@@ -1,6 +1,9 @@
 """Unit tests for the ValidationManager."""
 
+from unittest.mock import patch
+
 import pytest
+import yaml
 
 from custom_components.ha_dev_tools.validation import (
     ValidationManager,
@@ -197,6 +200,51 @@ class TestValidationManager:
 
         assert result.is_valid is False
         assert len(result.errors) > 0
+
+    def test_validate_yaml_error_without_problem_mark(self, validation_manager):
+        """A YAMLError raised without a problem_mark (not every subclass sets
+        one) should still fall back to line 1 rather than raising AttributeError."""
+        with patch("yaml.safe_load", side_effect=yaml.YAMLError("plain error")):
+            result = validation_manager.validate_yaml("irrelevant: content", "test.yaml")
+
+        assert result.is_valid is False
+        assert result.line_numbers == [1]
+
+    def test_validate_yaml_unexpected_error(self, validation_manager):
+        """A non-YAMLError exception during parsing should be caught and
+        reported rather than propagating out of validate_yaml."""
+        with patch("yaml.safe_load", side_effect=ValueError("simulated failure")):
+            result = validation_manager.validate_yaml("irrelevant: content", "test.yaml")
+
+        assert result.is_valid is False
+        assert "Unexpected validation error" in result.errors[0]
+        assert result.line_numbers == [1]
+
+    def test_validate_json_unexpected_error(self, validation_manager):
+        """A non-JSONDecodeError exception during parsing should be caught
+        and reported rather than propagating out of validate_json."""
+        with patch("json.loads", side_effect=ValueError("simulated failure")):
+            result = validation_manager.validate_json("irrelevant content", "test.json")
+
+        assert result.is_valid is False
+        assert "Unexpected validation error" in result.errors[0]
+        assert result.line_numbers == [1]
+
+    def test_validate_storage_file_second_pass_error_is_swallowed(
+        self, validation_manager
+    ):
+        """The storage-specific re-parse is best-effort: if it fails after
+        validate_json already succeeded, that failure is swallowed and the
+        (valid) result from validate_json stands."""
+        valid_storage = '{"version": 1, "data": {"key": "value"}}'
+        with patch(
+            "json.loads", side_effect=[{"version": 1}, ValueError("simulated failure")]
+        ):
+            result = validation_manager.validate_storage_file(
+                valid_storage, "entity_registry"
+            )
+
+        assert result.is_valid is True
 
     def test_validation_result_structure(self, validation_manager):
         """Test that ValidationResult has correct structure."""

@@ -4,9 +4,22 @@ import pytest
 from homeassistant.core import HomeAssistant
 
 from custom_components.ha_dev_tools.template_manager import (
+    _maybe_await,
     render_template,
     validate_template,
 )
+
+
+@pytest.mark.asyncio
+async def test_maybe_await_awaits_a_real_coroutine():
+    """On HA versions where Template.async_render truly is a coroutine
+    (see this helper's own docstring - it varies by version), the
+    awaitable branch must actually be awaited, not just returned as-is."""
+
+    async def _coro():
+        return "awaited"
+
+    assert await _maybe_await(_coro()) == "awaited"
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-09-18
+
+### Added
+- `diagnostics.py` - Home Assistant's standard "Download diagnostics" support (Settings → Devices & Services → HA Dev Tools → the three-dot menu). Reports integration version, whether dry-run/git-mirroring are enabled, and whether the arm gate is currently armed (read-only - downloading diagnostics never itself extends an active arm window). The git-mirroring access token is redacted; the mirror repository name is not, since it's not a secret.
+
+### Fixed
+- `mirror_secrets.py`'s credential scanner (gates what's safe to push to your git mirror) only ever recognized the literal `!secret` tag as safe by accident of an `isinstance` check ordering, not by actually checking the tag - any tag at all (a typo, `!env_var`, `!include`, ...) on a sensitive key was silently treated the same as a real `!secret` reference. No literal credential could actually leak this way (no YAML tag mechanism embeds a literal value directly), but the scanner's own documented intent - only `!secret` is the safe/unsafe signal - wasn't actually enforced. Fixed so only a genuine `!secret` tag is exempted; anything else on a sensitive key is now correctly flagged as unsafe to mirror.
+
+### Changed
+- Test coverage: 91% -> 99% overall, closing the gaps in `file_manager.py`, `llm_api.py`, `security.py`, `dashboard_manager.py`, `validation.py`, and a dozen smaller modules - mostly untested error/exception branches, several tool classes that had never been instantiated by any test at all, and one new `tests/test_init.py` (none previously existed). Updated `quality_scale.yaml` accordingly.
+
 ## [2.16.1] - 2026-09-18
 
 ### Fixed
