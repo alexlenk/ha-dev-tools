@@ -1146,6 +1146,7 @@ async def test_update_template_entity_tool_mirrors_when_enabled(
     tool = UpdateTemplateEntityTool(template_yaml_manager)
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - not mirrored yet
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"content": {"sha": "sha-2"}}),  # PUT after
@@ -1188,6 +1189,7 @@ async def test_create_template_entity_tool_mirrors_when_enabled(
     tool = CreateTemplateEntityTool(template_yaml_manager)
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - not mirrored yet
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"content": {"sha": "sha-2"}}),  # PUT after
@@ -1243,6 +1245,7 @@ async def test_delete_template_entity_tool_mirrors_when_enabled(
     tool = DeleteTemplateEntityTool(template_yaml_manager)
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - not mirrored yet
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"content": {"sha": "sha-2"}}),  # PUT after
@@ -1320,6 +1323,7 @@ async def test_write_dashboard_tool_mirrors_when_enabled(
     tool = WriteDashboardTool()
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - no dashboard mirrored yet
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
         ]
@@ -1417,6 +1421,7 @@ async def test_write_automation_tool_dry_run_mirrors_to_proposed_branch(
 
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # _sync_before GET current -> none
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
@@ -1503,6 +1508,7 @@ async def test_update_template_entity_tool_dry_run_mirrors_to_proposed_branch(
     tool = UpdateTemplateEntityTool(template_yaml_manager)
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # _sync_before GET current -> none
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
@@ -1554,6 +1560,7 @@ async def test_create_template_entity_tool_dry_run_mirrors_to_proposed_branch(
     tool = CreateTemplateEntityTool(template_yaml_manager)
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # _sync_before GET current -> none
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
@@ -1617,6 +1624,7 @@ async def test_delete_template_entity_tool_dry_run_mirrors_to_proposed_branch(
     tool = DeleteTemplateEntityTool(template_yaml_manager)
     fake_session = _FakeMirrorSession(
         [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # _sync_before GET current -> none
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
             _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main

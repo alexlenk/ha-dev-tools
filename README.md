@@ -1,4 +1,4 @@
-<img src="custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools logo">
+<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools logo">
 
 # HA Dev Tools
 
@@ -267,10 +267,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 MIT - see [LICENSE](LICENSE).
 
-[releases-shield]: https://img.shields.io/github/release/alexlenk/ha-dev-tools.svg?style=for-the-badge
+[releases-shield]: https://img.shields.io/github/release/alexlenk/ha-dev-tools.svg
 [releases]: https://github.com/alexlenk/ha-dev-tools/releases
-[commits-shield]: https://img.shields.io/github/commit-activity/y/alexlenk/ha-dev-tools.svg?style=for-the-badge
+[commits-shield]: https://img.shields.io/github/commit-activity/y/alexlenk/ha-dev-tools.svg
 [commits]: https://github.com/alexlenk/ha-dev-tools/commits/main
-[license-shield]: https://img.shields.io/github/license/alexlenk/ha-dev-tools.svg?style=for-the-badge
+[license-shield]: https://img.shields.io/github/license/alexlenk/ha-dev-tools.svg
 [hacs]: https://github.com/hacs/integration
-[hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge
+[hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg

@@ -169,6 +169,7 @@ async def test_mirror_write_new_file_pushes_after_commit_only(
 ):
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(404),  # GET current - doesn't exist yet
             _FakeResponse(201, {"content": {"sha": "new-sha"}}),  # PUT after
         ]
@@ -184,7 +185,7 @@ async def test_mirror_write_new_file_pushes_after_commit_only(
 
     assert result.mirrored is True
     assert result.commits == ("after",)
-    assert [c[0] for c in fake_session.calls] == ["GET", "PUT"]
+    assert [c[0] for c in fake_session.calls] == ["GET", "GET", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -198,6 +199,7 @@ async def test_mirror_write_pushes_before_commit_on_drift_then_after(
 
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(200, {"content": _b64(recorded_content), "sha": "old-sha"}),
             _FakeResponse(200, {"content": {"sha": "before-sha"}}),
             _FakeResponse(200, {"content": {"sha": "after-sha"}}),
@@ -214,7 +216,7 @@ async def test_mirror_write_pushes_before_commit_on_drift_then_after(
 
     assert result.mirrored is True
     assert result.commits == ("before", "after")
-    assert [c[0] for c in fake_session.calls] == ["GET", "PUT", "PUT"]
+    assert [c[0] for c in fake_session.calls] == ["GET", "GET", "PUT", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -226,6 +228,7 @@ async def test_mirror_write_before_commit_is_noop_when_unchanged(
 
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(200, {"content": _b64(same_content), "sha": "sha-1"}),
             _FakeResponse(200, {"content": {"sha": "sha-2"}}),
         ]
@@ -241,7 +244,7 @@ async def test_mirror_write_before_commit_is_noop_when_unchanged(
 
     assert result.mirrored is True
     assert result.commits == ("after",)
-    assert [c[0] for c in fake_session.calls] == ["GET", "PUT"]
+    assert [c[0] for c in fake_session.calls] == ["GET", "GET", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -252,7 +255,10 @@ async def test_mirror_write_noop_when_after_already_matches(
     content = "- id: a\n  alias: same\n"
 
     fake_session = FakeSession(
-        [_FakeResponse(200, {"content": _b64(content), "sha": "sha-1"})]
+        [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeResponse(200, {"content": _b64(content), "sha": "sha-1"}),
+        ]
     )
 
     with _patched(fake_session):
@@ -262,14 +268,16 @@ async def test_mirror_write_noop_when_after_already_matches(
 
     assert result.mirrored is True
     assert result.commits == ()
-    assert [c[0] for c in fake_session.calls] == ["GET"]
+    assert [c[0] for c in fake_session.calls] == ["GET", "GET"]
 
 
 @pytest.mark.asyncio
 async def test_mirror_write_reports_failure_without_raising(
     hass: HomeAssistant, mirror_entry
 ):
-    """A GitHub API failure never propagates - it comes back as a normal result."""
+    """A GitHub API failure never propagates - it comes back as a normal
+    result, even when it's the very first call (resolving the default
+    branch) that fails."""
     fake_session = FakeSession([_FakeResponse(500)])
 
     with _patched(fake_session):
@@ -314,6 +322,7 @@ async def test_mirror_write_json_content_type_pushes_clean_content(
 ):
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(404),
             _FakeResponse(201, {"content": {"sha": "sha-1"}}),
         ]
@@ -368,13 +377,14 @@ async def test_mirror_dry_run_skips_when_content_has_credential(
 
 
 @pytest.mark.asyncio
-async def test_mirror_dry_run_fails_cleanly_when_main_branch_missing(
+async def test_mirror_dry_run_fails_cleanly_when_default_branch_missing(
     hass: HomeAssistant, mirror_entry
 ):
-    """main doesn't exist in the mirror repo at all - nothing to branch
-    proposed/* off of (issue #50's hardcoded-branch gap, surfaced here too)."""
+    """The resolved default branch doesn't exist as a ref yet (e.g. a
+    completely empty repo) - nothing to branch proposed/* off of."""
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(404),  # _sync_before's GET current -> doesn't exist
             _FakeResponse(404),  # GET git/ref/heads/main -> doesn't exist
         ]
@@ -401,6 +411,7 @@ async def test_mirror_dry_run_creates_new_proposed_branch(
 ):
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(404),  # _sync_before GET current -> doesn't exist
             _FakeResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/heads/main
             _FakeResponse(404),  # GET ref/heads/proposed/... -> doesn't exist
@@ -427,6 +438,7 @@ async def test_mirror_dry_run_creates_new_proposed_branch(
         "GET",
         "GET",
         "GET",
+        "GET",
         "POST",
         "GET",
         "PUT",
@@ -445,6 +457,7 @@ async def test_mirror_dry_run_resets_existing_proposed_branch_and_pushes_before(
 
     fake_session = FakeSession(
         [
+            _FakeResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeResponse(200, {"content": _b64(recorded), "sha": "old-sha"}),
             _FakeResponse(200, {"content": {"sha": "before-sha"}}),  # PUT before
             _FakeResponse(200, {"object": {"sha": "main-sha-2"}}),  # GET ref/main
@@ -474,6 +487,7 @@ async def test_mirror_dry_run_resets_existing_proposed_branch_and_pushes_before(
     assert result.branch == "proposed/automation-a"
     assert [c[0] for c in fake_session.calls] == [
         "GET",
+        "GET",
         "PUT",
         "GET",
         "GET",
@@ -501,3 +515,68 @@ async def test_mirror_dry_run_reports_failure_without_raising(
 
     assert result.mirrored is False
     assert "mirror push failed" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_mirror_write_uses_resolved_default_branch_not_hardcoded_main(
+    hass: HomeAssistant, mirror_entry
+):
+    """issue #50: not every mirror repo has (or should be forced to have) a
+    branch named "main" - the target branch must come from the repo's own
+    reported default_branch, never a hardcoded constant."""
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "develop"}),  # GET repo info
+            _FakeResponse(404),  # GET current on "develop" - doesn't exist yet
+            _FakeResponse(201, {"content": {"sha": "new-sha"}}),  # PUT after
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  alias: clean\n",
+        )
+
+    assert result.mirrored is True
+    repo_info_call, get_current_call, put_call = fake_session.calls
+    assert repo_info_call[1] == "https://api.github.com/repos/alexlenk/ha-mirror"
+    assert get_current_call[2]["params"]["ref"] == "develop"
+    assert put_call[2]["json"]["branch"] == "develop"
+
+
+@pytest.mark.asyncio
+async def test_mirror_dry_run_branches_proposed_off_resolved_default_branch(
+    hass: HomeAssistant, mirror_entry
+):
+    """Same resolved-default-branch requirement as mirror_write, for the
+    proposed/* branch's own base ref."""
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "develop"}),  # GET repo info
+            _FakeResponse(404),  # _sync_before GET current -> doesn't exist
+            _FakeResponse(200, {"object": {"sha": "develop-sha"}}),  # GET ref/develop
+            _FakeResponse(404),  # GET ref/proposed/... -> doesn't exist
+            _FakeResponse(201),  # POST git/refs -> create branch off develop-sha
+            _FakeResponse(404),  # GET current on the new branch -> doesn't exist
+            _FakeResponse(201, {"content": {"sha": "proposed-sha"}}),  # PUT
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  alias: would-be\n",
+            kind="automation",
+            entity_id="a",
+        )
+
+    assert result.mirrored is True
+    ref_branch_call = fake_session.calls[2]
+    assert ref_branch_call[1].endswith("/git/ref/heads/develop")
+    post_call = fake_session.calls[4]
+    assert post_call[2]["json"]["sha"] == "develop-sha"

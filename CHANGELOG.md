@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.9.2] - 2026-09-17
+## [2.9.3] - 2026-09-18
+
+### Fixed
+- Mirroring (`mirror.py`) hardcoded its push target to a branch named `"main"` (issue #50) - a mirror repo bootstrapped for another purpose, or one with a different default branch name, silently failed every real (non-dry-run) mirrored write, and only dry-run's `proposed/*` branching had a clear "branch missing" error for it. `mirror_write()`/`mirror_dry_run()` now resolve the mirror repo's actual `default_branch` via `GET /repos/{owner}/{repo}` on every call and target that instead.
+- `README.md`'s logo `<img>` used a repo-relative path (`custom_components/ha_dev_tools/brand/icon.png`) - GitHub's own README viewer silently rewrites that to a raw URL, but HACS's own README renderer doesn't, so the logo showed as a broken image on the HACS store page. Switched to an absolute `raw.githubusercontent.com` URL.
+
+### Changed
+- README's badge row switched from shields.io's chunky `for-the-badge` style to its plain flat default, matching this author's other repos.
 
 ### Fixed
 - **Safety-critical**: `write_automation` and the template-entity write tools serialized a brand-new plain string like `"off"`/`"on"`/`"yes"`/`"no"` unquoted, since ruamel.yaml's own resolver follows YAML 1.2 (only `true`/`false` are boolean-like there) and sees no reason to quote it. Home Assistant's own YAML loader follows PyYAML's default resolver (YAML 1.1 semantics), which reads an unquoted `off` back as the boolean `False` - so a state condition written as `state: "off"` came back from disk as `state: False`, failed schema validation ("expected str"), and silently disabled the whole automation. Confirmed live: a real safety automation (a lawn-mower off-limits containment automation gated on `state` conditions) was disabled this way immediately after a write. `automation_manager.py`/`template_yaml_manager.py` now force-quote any brand-new plain string that exactly matches one of PyYAML's implicit bool/null scalars (`yes`/`no`/`true`/`false`/`on`/`off` and case variants, plus `null`/`~`) before splicing it into the document - values already loaded from an existing file are untouched, since those already round-trip with whatever quote style they were written with.
