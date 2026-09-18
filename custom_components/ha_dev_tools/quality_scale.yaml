@@ -1,0 +1,205 @@
+# Self-declared status against Home Assistant's official Integration
+# Quality Scale (https://www.home-assistant.io/docs/quality_scale/,
+# rule list: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/).
+#
+# ha_dev_tools is a HACS-only custom integration, not part of
+# home-assistant/core, so it can never earn an official badge - hassfest's
+# quality_scale plugin only evaluates integrations under
+# homeassistant/components (see script/hassfest/quality_scale.py's
+# `if not integration.core: return`), so this file is NOT schema-validated
+# or scored by this repo's hassfest CI job despite hassfest running here.
+# It exists purely as an honest, manually-maintained scorecard against the
+# same bar core integrations are held to.
+#
+# ha_dev_tools registers zero entity platforms (PLATFORMS = [] in
+# __init__.py) - it's a pure service integration exposing an LLM tool API
+# over Home Assistant's own mcp_server integration. Every entity/device
+# rule below is exempt for that reason, not because it was skipped.
+
+rules:
+  # Bronze
+  action-setup:
+    status: exempt
+    comment: No custom service actions (hass.services.async_register) are registered.
+  appropriate-polling:
+    status: exempt
+    comment: No entities/coordinators; nothing polls anything.
+  brands:
+    status: todo
+    comment: >-
+      Not submitted to home-assistant/brands (confirmed: no
+      custom_integrations/ha_dev_tools entry exists there yet). The README's
+      logo is local only and doesn't satisfy this rule.
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage:
+    status: todo
+    comment: >-
+      tests/test_config_flow.py covers the user and options flows well, but
+      the most recent CI coverage report shows config_flow.py at 94%, not
+      the 100% this rule expects.
+  dependency-transparency: done
+  docs-actions:
+    status: exempt
+    comment: No custom service actions are registered.
+  docs-conditions:
+    status: exempt
+    comment: This integration does not provide any automation conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions:
+    status: todo
+    comment: README has no explicit "how to remove this integration" section.
+  docs-triggers:
+    status: exempt
+    comment: This integration does not provide any automation triggers.
+  entity-event-setup:
+    status: exempt
+    comment: No entities, so no entity-level event subscriptions.
+  entity-unique-id:
+    status: exempt
+    comment: No entity platforms are registered.
+  has-entity-name:
+    status: exempt
+    comment: No entity platforms are registered.
+  runtime-data:
+    status: todo
+    comment: >-
+      __init__.py stores managers in hass.data[DOMAIN] (see
+      async_setup_entry/async_unload_entry), not entry.runtime_data as this
+      rule expects.
+  test-before-configure:
+    status: exempt
+    comment: >-
+      The config flow takes no user input (const.py has sane security
+      defaults, no configuration.yaml import path) - there is nothing
+      external to test connectivity against before creating the entry.
+  test-before-setup:
+    status: exempt
+    comment: >-
+      async_setup_entry makes no external/device connection that could be
+      transiently unavailable - it only registers the LLM API and internal
+      listeners, so there is no ConfigEntryNotReady-shaped failure mode to
+      guard against.
+  unique-config-entry: done
+
+  # Silver
+  action-exceptions:
+    status: exempt
+    comment: No custom service actions are registered.
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: exempt
+    comment: The config flow (async_step_user) takes no parameters.
+  docs-installation-parameters: done
+  entity-unavailable:
+    status: exempt
+    comment: No entity platforms are registered.
+  integration-owner: done
+  log-when-unavailable:
+    status: exempt
+    comment: No polled connection/device to become unavailable.
+  parallel-updates:
+    status: exempt
+    comment: No entity platforms are registered.
+  reauthentication-flow:
+    status: exempt
+    comment: >-
+      No credentials are required to set up or use the integration itself
+      (the optional git-mirroring token lives in the options flow and is
+      not needed for the integration to function).
+  test-coverage:
+    status: todo
+    comment: >-
+      Overall coverage is ~91% per the latest CI run, with some modules well
+      below that (file_manager.py ~64%, dashboard_manager.py ~71%) - not the
+      comprehensive coverage this rule expects.
+
+  # Gold
+  devices:
+    status: exempt
+    comment: No entity platforms are registered; nothing to attach to a device.
+  diagnostics:
+    status: todo
+    comment: No diagnostics.py exists yet.
+  discovery-update-info:
+    status: exempt
+    comment: No discovery is possible or applicable for this integration type.
+  discovery:
+    status: exempt
+    comment: >-
+      There is nothing on the network/bus to discover - this integration
+      configures itself against the local Home Assistant instance it runs
+      inside.
+  docs-data-update:
+    status: exempt
+    comment: No polled or pushed device data; nothing to describe an update cycle for.
+  docs-examples: done
+  docs-known-limitations:
+    status: todo
+    comment: >-
+      Various limitations are mentioned in passing (e.g. YAML-mode
+      dashboards are read-only, add-on tools need Supervisor), but there is
+      no dedicated "Known limitations" section collecting them.
+  docs-supported-devices:
+    status: exempt
+    comment: This integration does not connect to any devices.
+  docs-supported-functions: done
+  docs-troubleshooting:
+    status: todo
+    comment: >-
+      No dedicated troubleshooting section exists. The self-clearing repair
+      issue (mcp_repair.py) covers one failure mode at runtime but doesn't
+      substitute for written troubleshooting docs.
+  docs-use-cases: done
+  dynamic-devices:
+    status: exempt
+    comment: No entity platforms/devices are registered.
+  entity-category:
+    status: exempt
+    comment: No entity platforms are registered.
+  entity-device-class:
+    status: exempt
+    comment: No entity platforms are registered.
+  entity-disabled-by-default:
+    status: exempt
+    comment: No entity platforms are registered.
+  entity-translations:
+    status: exempt
+    comment: No entity platforms are registered.
+  exception-translations:
+    status: todo
+    comment: >-
+      Raised exceptions (e.g. HomeAssistantError, TemplateError,
+      ValueError/PermissionError from file_manager.py) don't use
+      translation_key/translation_placeholders.
+  icon-translations:
+    status: exempt
+    comment: No entities or custom service actions that need icon translations.
+  reconfiguration-flow:
+    status: exempt
+    comment: >-
+      The config entry's data is always {} - there is nothing in it to
+      reconfigure. All adjustable settings (dry-run, git mirroring) already
+      live in the options flow.
+  repair-issues: done
+  stale-devices:
+    status: exempt
+    comment: No entity platforms/devices are registered.
+
+  # Platinum
+  async-dependency:
+    status: todo
+    comment: >-
+      No external device/API client library is used (file/YAML access is
+      local), so the rule's core concern doesn't directly apply, but some
+      filesystem calls in file_manager.py (e.g. Path.exists(),
+      full_path.parent.mkdir()) run directly on the event loop rather than
+      via hass.async_add_executor_job like the actual read/write calls do -
+      not confidently "done" as-is.
+  inject-websession: done
+  strict-typing:
+    status: todo
+    comment: >-
+      .pre-commit-config.yaml runs mypy with only
+      --ignore-missing-imports, not --strict.
