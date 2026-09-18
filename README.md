@@ -87,7 +87,8 @@ repository.
    a Bearer token - see [Connecting an MCP client](#connecting-an-mcp-client)
    below for exactly how to do that in Claude Code and Claude Desktop.
 5. **Every write tool now requires two calls, always.** `write_automation`,
-   `write_script`, `create_helper`/`update_helper`/`delete_helper`,
+   `delete_automation`, `write_script`,
+   `create_helper`/`update_helper`/`delete_helper`,
    `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`,
    `create_template_entity`/`update_template_entity`/`delete_template_entity`,
    and `write_dashboard` never write on their first call - they return a
@@ -134,7 +135,7 @@ repository.
       again), and paste it into the **Mirror repository access token**
       field. It's stored as a password-type field.
 
-   Supported today: `write_automation`, `write_script`,
+   Supported today: `write_automation`, `delete_automation`, `write_script`,
    `create_template_entity`/`update_template_entity`/`delete_template_entity`,
    `write_dashboard`, `create_helper`/`update_helper`/`delete_helper`,
    `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`.
@@ -149,8 +150,9 @@ repository.
    removing anything, so its last real config stays visible in the mirror
    repo's own git history.
 
-   **With dry-run mode also on:** `write_automation`, `write_script`, and
-   the template-entity tools still mirror something even though nothing
+   **With dry-run mode also on:** `write_automation`, `delete_automation`,
+   `write_script`, and the template-entity tools still mirror something
+   even though nothing
    live changed - the resolved would-be content goes to its own
    `proposed/<kind>-<id>` branch (e.g. `proposed/automation-my_automation`,
    `proposed/script-my_script`), freshly branched from the default
@@ -218,6 +220,7 @@ matters for setup, covered below.
 | `validate_template` | Check template syntax and flag referenced entities that don't exist |
 | `get_automation` | Layout-aware read: resolves whether an automation lives in `automations.yaml` or a `packages/*.yaml` file, and reports whether it's currently enabled - that's runtime-only state the YAML itself never shows |
 | `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward |
+| `delete_automation` | Layout-aware, package-safe delete - resolves which file actually defines it first, refuses to guess if the id isn't found or is defined in more than one file |
 | `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
 | `check_config` | Home Assistant's own full config validation |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |

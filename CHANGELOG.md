@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-09-18
+
+### Added
+- `delete_automation` - a real gap: `write_automation` could create/update but never delete, so removing an automation meant editing YAML by hand. Same layout-aware, package-safe pattern as `write_automation`/`write_script`: resolves which file actually defines the id first (default `automations.yaml` or a `packages/*.yaml` file), refuses to guess if it isn't found or is defined in more than one file, always reloads automations afterward. Gets the full write-tool treatment: propose/confirm token gate, dry-run preview, and dry-run + mirroring support (pushes to its own `proposed/automation-<id>` branch, same as `write_automation`).
+
 ## [2.12.0] - 2026-09-18
 
 ### Added
