@@ -61,6 +61,17 @@ mcp==1.26.0
 aiohttp_sse==2.2.0
 anyio==4.13.0
 
+# Transitive dep of homeassistant.components.mqtt (its own manifest.json
+# requirement, confirmed by reading it at the pinned homeassistant
+# version below) - not installed automatically by
+# pytest-homeassistant-custom-component, same situation as mcp_server's
+# deps above. Needed because mqtt_manager.py imports
+# `homeassistant.components.mqtt` (`__init__.py` re-exports
+# async_subscribe from .client, which imports paho.mqtt.client directly)
+# for list_mqtt_topics - re-verify the exact pin the same way if the
+# homeassistant pin below ever changes.
+paho-mqtt==2.1.0
+
 # Home Assistant core (required for integration testing).
 # Pinned via pytest-homeassistant-custom-component's own exact pin (below)
 # rather than a floor on `homeassistant` directly, because HA's own

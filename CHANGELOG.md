@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-09-18
+
+### Added
+- `list_mqtt_topics` - a new capability area (first MQTT-aware tool), read-only. Found via a real triage session: a "ghost" entity can have a live state with no entity registry entry at all (no `unique_id`, so nothing to register) - `delete_entity`/`delete_entities` can't touch these, since there's no registry entry to remove. The most common real cause is a plain YAML-configured MQTT sensor whose device is gone but whose last retained message the broker still holds. MQTT has no "list retained messages" query - the only way to discover one exists is to subscribe to a topic filter and see what the broker immediately delivers (retained messages are always delivered synchronously right after a matching subscribe). `list_mqtt_topics` does exactly that: subscribes to a caller-supplied topic filter (default `homeassistant/#`, HA's own discovery prefix - explicitly documented as *not* where a plain MQTT sensor's state lives, so the caller can point it at the actual topic tree instead, e.g. `watermeter/#`) for a bounded window (default 3s, capped at 10s), and reports the last message per matching topic. Deliberately read-only - no publish/clear-retained capability yet; that's a materially different risk tier (MQTT can drive physical devices) that needs its own security-review pass, not folded into this by default.
+
 ## [2.15.0] - 2026-09-18
 
 ### Added
