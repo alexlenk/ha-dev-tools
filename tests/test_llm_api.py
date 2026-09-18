@@ -39,6 +39,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import voluptuous as vol
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
@@ -68,6 +69,7 @@ from custom_components.ha_dev_tools.llm_api import (
     CreateTemplateEntityTool,
     DeleteAutomationTool,
     DeleteDerivedSensorTool,
+    DeleteEntityTool,
     DeleteHelperTool,
     DeleteTemplateEntityTool,
     DevToolsPingTool,
@@ -170,6 +172,7 @@ async def test_dev_tools_real_tools_registered(
         "dev_tools_ping",
         "find_entities",
         "entity_health_report",
+        "delete_entity",
         "render_template",
         "validate_template",
         "get_logs",
@@ -274,6 +277,131 @@ async def test_gated_tool_succeeds_when_armed_and_admin(
     assert isinstance(result, dict)
     # A successful call extends the idle window (touch_armed).
     assert path.stat().st_mtime >= mtime_before
+
+
+# --- DeleteEntityTool --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_tool_confirm_flow_removes_from_registry(
+    hass: HomeAssistant, admin_user
+):
+    _arm(hass)
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    tool = DeleteEntityTool()
+    args = {"entity_id": "light.kitchen_light"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_entity", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_entity", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result == {"deleted": True, "entity_id": "light.kitchen_light"}
+    assert entity_reg.async_get("light.kitchen_light") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_tool_not_found_returns_tool_error(hass: HomeAssistant):
+    tool = DeleteEntityTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_entity", tool_args={"entity_id": "light.does_not_exist"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "EntityNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_tool_no_mirror_key_when_disabled(hass: HomeAssistant):
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    tool = DeleteEntityTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_entity", tool_args={"entity_id": "light.kitchen_light"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["deleted"] is True
+    assert "mirror" not in result
+    assert entity_reg.async_get("light.kitchen_light") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_tool_mirrors_registry_snapshot_then_tombstone(
+    hass: HomeAssistant, setup_integration_with_entry
+):
+    """No real file to remove - same tombstone-marker pattern as
+    delete_derived_sensor: the mirrored "before" state is this entity's
+    full registry snapshot, "after" is a small deletion marker."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    entity_reg.async_update_entity("light.kitchen_light", name="Kitchen Light")
+    tool = DeleteEntityTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-before"}}),  # PUT before
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_entity",
+                tool_args={"entity_id": "light.kitchen_light"},
+            ),
+            _llm_context(),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["before", "after"]
+
+    put_before_json = fake_session.calls[2][2]["json"]["content"]
+    before_content = json.loads(base64.b64decode(put_before_json))
+    assert before_content["entity_id"] == "light.kitchen_light"
+    assert before_content["name"] == "Kitchen Light"
+
+    put_after_json = fake_session.calls[-1][2]["json"]["content"]
+    after_content = json.loads(base64.b64decode(put_after_json))
+    assert after_content == {"deleted": True, "entity_id": "light.kitchen_light"}
 
 
 # --- GetAutomationTool / currently_enabled ----------------------------------
