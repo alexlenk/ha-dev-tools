@@ -84,11 +84,15 @@ class FileManager:
             )
             return content
 
-        except (FileNotFoundError, PermissionError, ValueError):
-            raise
         except UnicodeDecodeError as e:
+            # Must be checked before the (..., ValueError) clause below:
+            # UnicodeDecodeError is itself a ValueError subclass, so if that
+            # broader clause came first it would catch this and re-raise the
+            # raw low-level decode error instead of this friendlier message.
             _LOGGER.error("File encoding error reading: %s", file_path)
             raise ValueError(f"File encoding error: {str(e)}")
+        except (FileNotFoundError, PermissionError, ValueError):
+            raise
         except Exception as e:
             _LOGGER.error("Unexpected error reading file %s: %s", file_path, e)
             raise RuntimeError(f"Error reading file: {str(e)}")

@@ -1,6 +1,7 @@
 """Test FileManager functionality with Home Assistant fixtures."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -333,3 +334,285 @@ async def test_delete_file_still_allowed_on_write_permitted_path(
 
     assert deleted is True
     assert not package_file.exists()
+
+
+# --- read_file error branches -------------------------------------------------
+
+
+async def test_read_file_invalid_encoding(hass: HomeAssistant, file_manager):
+    """Bytes that aren't valid UTF-8 should surface as a ValueError, not crash."""
+    bad_file = Path(hass.config.config_dir) / "badenc.yaml"
+    bad_file.write_bytes(b"\xff\xfe\x00\x01")
+
+    with pytest.raises(ValueError, match="File encoding error"):
+        await file_manager.read_file("badenc.yaml")
+
+
+async def test_read_file_unexpected_error_wrapped_as_runtime_error(
+    hass: HomeAssistant, file_manager, mock_config_file
+):
+    """An unexpected error while reading should be wrapped, not leaked raw."""
+    with patch.object(
+        file_manager, "_read_file_sync", side_effect=OSError("disk read error")
+    ):
+        with pytest.raises(RuntimeError, match="Error reading file"):
+            await file_manager.read_file("configuration.yaml")
+
+
+# --- write_file error branches ------------------------------------------------
+
+
+async def test_write_file_denied_on_blacklisted_path(
+    hass: HomeAssistant, file_manager
+):
+    """The denylist takes precedence over write_paths, same as for reads."""
+    with pytest.raises(
+        PermissionError, match="Access to blacklisted file denied: secrets.yaml"
+    ):
+        await file_manager.write_file("secrets.yaml", "a: 1\n")
+
+
+async def test_write_file_denied_on_path_traversal(
+    hass: HomeAssistant, file_manager
+):
+    """Path traversal is rejected before the write-paths check even runs."""
+    with pytest.raises(ValueError, match="Invalid file path"):
+        await file_manager.write_file("../evil.yaml", "a: 1\n")
+
+
+async def test_write_file_rejects_invalid_yaml_content(
+    hass: HomeAssistant, file_manager
+):
+    """validate_before_write (the default) must block malformed YAML."""
+    with pytest.raises(ValueError, match="Content validation failed"):
+        await file_manager.write_file("broken.yaml", "key: [unterminated")
+
+
+async def test_write_file_hash_conflict_detection(hass: HomeAssistant, file_manager):
+    """A stale expected_hash must block the write instead of silently overwriting."""
+    await file_manager.write_file(
+        "conflict.yaml", "a: 1\n", validate_before_write=False
+    )
+
+    with pytest.raises(ValueError, match="Hash conflict"):
+        await file_manager.write_file(
+            "conflict.yaml",
+            "a: 2\n",
+            expected_hash="not-the-real-hash",
+            validate_before_write=False,
+        )
+
+
+# --- _write_file_atomic / _create_backup failure handling ---------------------
+
+
+async def test_write_file_atomic_rename_failure_is_wrapped_and_cleans_up_temp(
+    hass: HomeAssistant, file_manager
+):
+    """A failure during the temp-file rename must clean up and surface as RuntimeError."""
+    with patch.object(Path, "replace", side_effect=OSError("simulated rename failure")):
+        with pytest.raises(RuntimeError, match="Error writing file"):
+            await file_manager.write_file(
+                "atomic_fail.yaml", "a: 1\n", validate_before_write=False
+            )
+
+    leftover_temp_files = list(
+        Path(hass.config.config_dir).glob(".atomic_fail.yaml.*.tmp")
+    )
+    assert leftover_temp_files == []
+
+
+async def test_write_file_backup_failure_does_not_fail_the_write(
+    hass: HomeAssistant, file_manager
+):
+    """_create_backup swallows its own errors so a backup hiccup can't block a write."""
+    await file_manager.write_file(
+        "backup_target.yaml", "a: 1\n", validate_before_write=False
+    )
+
+    with patch("shutil.copy2", side_effect=OSError("simulated backup failure")):
+        result = await file_manager.write_file(
+            "backup_target.yaml", "a: 2\n", validate_before_write=False
+        )
+
+    assert isinstance(result, dict)
+    assert result.get("accessible") is True
+
+    content = await file_manager.read_file("backup_target.yaml")
+    assert content == "a: 2\n"
+
+
+# --- file_exists error branches ------------------------------------------------
+
+
+async def test_file_exists_invalid_path(hass: HomeAssistant, file_manager):
+    """Path traversal must raise, not just report False."""
+    with pytest.raises(ValueError, match="Invalid file path"):
+        await file_manager.file_exists("../etc/passwd")
+
+
+async def test_file_exists_unexpected_error_wrapped_as_runtime_error(
+    hass: HomeAssistant, file_manager
+):
+    """An unexpected filesystem error should be wrapped, not leaked raw."""
+    with patch.object(Path, "exists", side_effect=OSError("simulated stat failure")):
+        with pytest.raises(RuntimeError, match="Error checking file"):
+            await file_manager.file_exists("configuration.yaml")
+
+
+# --- list_files -----------------------------------------------------------------
+
+
+async def test_list_files_invalid_directory(hass: HomeAssistant, file_manager):
+    """Path traversal in the directory argument must be rejected."""
+    with pytest.raises(ValueError, match="Invalid directory path"):
+        await file_manager.list_files("../etc")
+
+
+async def test_list_files_nonexistent_directory_returns_empty(
+    hass: HomeAssistant, file_manager
+):
+    """A directory that doesn't exist yet is not an error, just no files.
+
+    Uses a name matching the permissive fixture's *.yaml allowlist glob,
+    since the directory argument is itself validated as a path.
+    """
+    result = await file_manager.list_files("does_not_exist.yaml")
+
+    assert result == []
+
+
+async def test_list_files_lists_and_skips_blacklisted(
+    hass: HomeAssistant, file_manager
+):
+    """Blacklisted files are silently excluded from the listing.
+
+    Uses the top-level (default, empty-directory) listing since the
+    permissive fixture's allowlist only covers file globs, not bare
+    subdirectory paths - list_files only validates a directory argument
+    when one is actually given (falsy directory skips that check).
+    """
+    visible_file = Path(hass.config.config_dir) / "visible.yaml"
+    visible_file.write_text("a: 1\n")
+    secrets_file = Path(hass.config.config_dir) / "secrets.yaml"
+    secrets_file.write_text("api_key: hidden\n")
+
+    try:
+        result = await file_manager.list_files()
+
+        names = [f["name"] for f in result]
+        assert "visible.yaml" in names
+        assert "secrets.yaml" not in names
+    finally:
+        visible_file.unlink(missing_ok=True)
+        secrets_file.unlink(missing_ok=True)
+
+
+async def test_list_files_skips_entries_that_error_on_stat(
+    hass: HomeAssistant, file_manager
+):
+    """A single unreadable entry (e.g. a broken symlink) shouldn't fail the whole listing."""
+    broken_link = Path(hass.config.config_dir) / "broken_link.yaml"
+    broken_link.symlink_to(Path(hass.config.config_dir) / "does_not_exist_target.yaml")
+
+    try:
+        result = await file_manager.list_files()
+
+        names = [f["name"] for f in result]
+        assert "broken_link.yaml" not in names
+    finally:
+        broken_link.unlink(missing_ok=True)
+
+
+async def test_list_files_unexpected_error_wrapped_as_runtime_error(
+    hass: HomeAssistant, file_manager
+):
+    """An unexpected error while iterating the directory should be wrapped."""
+    with patch.object(Path, "iterdir", side_effect=OSError("simulated iterdir failure")):
+        with pytest.raises(RuntimeError, match="Error listing files"):
+            await file_manager.list_files()
+
+
+# --- delete_file error branches ------------------------------------------------
+
+
+async def test_delete_file_denied_on_blacklisted_path(
+    hass: HomeAssistant, file_manager
+):
+    """The denylist takes precedence over write_paths, same as for writes."""
+    with pytest.raises(
+        PermissionError, match="Access to blacklisted file denied: secrets.yaml"
+    ):
+        await file_manager.delete_file("secrets.yaml")
+
+
+async def test_delete_file_denied_on_path_traversal(
+    hass: HomeAssistant, file_manager
+):
+    """Path traversal is rejected before the write-paths check even runs."""
+    with pytest.raises(ValueError, match="Invalid file path"):
+        await file_manager.delete_file("../evil.yaml")
+
+
+async def test_delete_nonexistent_file(hass: HomeAssistant, file_manager):
+    """Deleting a file that doesn't exist should raise FileNotFoundError."""
+    with pytest.raises(FileNotFoundError, match="File not found: nonexistent.yaml"):
+        await file_manager.delete_file("nonexistent.yaml")
+
+
+async def test_delete_directory_is_rejected(hass: HomeAssistant, file_manager):
+    """delete_file must refuse to remove a directory, even one with a .yaml name."""
+    test_dir = Path(hass.config.config_dir) / "delete_directory_test.yaml"
+    test_dir.mkdir()
+
+    try:
+        with pytest.raises(ValueError, match="Cannot delete directory"):
+            await file_manager.delete_file("delete_directory_test.yaml")
+    finally:
+        test_dir.rmdir()
+
+
+async def test_delete_file_unexpected_error_wrapped_as_runtime_error(
+    hass: HomeAssistant, file_manager, mock_config_file
+):
+    """An unexpected error while deleting should be wrapped, not leaked raw."""
+    with patch.object(Path, "unlink", side_effect=OSError("simulated unlink failure")):
+        with pytest.raises(RuntimeError, match="Error deleting file"):
+            await file_manager.delete_file("configuration.yaml")
+
+
+# --- get_file_metadata ----------------------------------------------------------
+
+
+async def test_get_file_metadata_invalid_path_returns_inaccessible(
+    hass: HomeAssistant, file_manager
+):
+    """An invalid path returns limited metadata instead of raising."""
+    metadata = await file_manager.get_file_metadata("../etc/passwd")
+
+    assert metadata == {
+        "path": "../etc/passwd",
+        "exists": False,
+        "accessible": False,
+    }
+
+
+async def test_get_file_metadata_nonexistent_file(hass: HomeAssistant, file_manager):
+    """A valid but nonexistent path is accessible with exists=False."""
+    metadata = await file_manager.get_file_metadata("nonexistent.yaml")
+
+    assert metadata["accessible"] is True
+    assert metadata["exists"] is False
+
+
+async def test_get_file_metadata_unexpected_error_wrapped_as_runtime_error(
+    hass: HomeAssistant, file_manager, mock_config_file
+):
+    """An unexpected error while stat'ing/hashing should be wrapped, not leaked raw."""
+    with patch.object(
+        file_manager,
+        "_get_file_stats_and_hash",
+        side_effect=OSError("simulated stat failure"),
+    ):
+        with pytest.raises(RuntimeError, match="Error getting file metadata"):
+            await file_manager.get_file_metadata("configuration.yaml")

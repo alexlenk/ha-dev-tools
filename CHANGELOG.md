@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.1] - 2026-09-18
+
+### Fixed
+- `read_file`'s `UnicodeDecodeError` handling was unreachable dead code - the broader `except (FileNotFoundError, PermissionError, ValueError):` clause was checked first, and since `UnicodeDecodeError` is itself a `ValueError` subclass, it always caught it first and re-raised the raw low-level decode error instead of the intended, friendlier "File encoding error: ..." message. Reordered so the specific clause runs first. Found and fixed while writing tests to close `file_manager.py`'s coverage gap (64% -> 98%).
+
+### Added
+- `custom_components/ha_dev_tools/quality_scale.yaml` - a self-declared, honest scorecard against Home Assistant's [Integration Quality Scale](https://www.home-assistant.io/docs/quality_scale/). This is a HACS-only custom integration and can never earn an official badge (hassfest's quality-scale validation only runs for integrations inside `home-assistant/core`, so it silently no-ops here despite hassfest otherwise running in this repo's CI) - this file exists purely to track real progress against the same bar, and lists the current genuine gaps (test coverage, `diagnostics.py`, `strict-typing`, and others) rather than a good-looking score.
+
 ## [2.16.0] - 2026-09-18
 
 ### Added
