@@ -1521,6 +1521,10 @@ async def test_create_helper_tool_mirrors_reconstructed_content(
         [
             _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            # before_content is non-None but the mirror repo has nothing
+            # recorded yet (previous GET was 404) - _sync_before treats
+            # that as drift and pushes a before-commit first.
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-before"}}),  # PUT before
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
         ]
     )
@@ -1549,7 +1553,7 @@ async def test_create_helper_tool_mirrors_reconstructed_content(
         )
 
     assert result["mirror"]["mirrored"] is True
-    assert result["mirror"]["commits"] == ["after"]
+    assert result["mirror"]["commits"] == ["before", "after"]
     put_after_json = fake_session.calls[-1][2]["json"]["content"]
 
     after_content = json.loads(base64.b64decode(put_after_json))
@@ -1581,6 +1585,7 @@ async def test_update_helper_tool_mirrors_reconstructed_content(
         [
             _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-before"}}),  # PUT before
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
         ]
     )
@@ -1647,6 +1652,7 @@ async def test_delete_helper_tool_mirrors_reconstructed_content(
         [
             _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
             _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-before"}}),  # PUT before
             _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
         ]
     )
