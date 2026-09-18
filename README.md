@@ -33,6 +33,13 @@ a live instance.
 - *"Clean up the 40 leftover entities from the Zigbee device I just
   removed."*
 
+> **⚠️ Use at your own risk.** This is a community project, built and
+> maintained in spare time - no SLA, no guaranteed support, and no guarantee
+> that dry-run, the confirm step, or git mirroring catch every mistake
+> before it reaches your live instance. AI can be wrong, and this is all
+> still a work in progress. Provided as-is, with no warranty - see
+> [LICENSE](LICENSE).
+
 ## Quick start
 
 Needs Home Assistant **2026.8.2+** (see [Requirements](#requirements) below
@@ -108,13 +115,6 @@ See [Setup](#setup---optional-hardening) below for how to enable each, and
 what these gates do *not* protect against (this integration isn't
 sandboxed; a confirmed, non-dry-run write has the same power as your admin
 account, full stop).
-
-> **⚠️ Use at your own risk.** This is a community project, built and
-> maintained in spare time - no SLA, no guaranteed support, and no guarantee
-> that dry-run, the confirm step, or git mirroring catch every mistake
-> before it reaches your live instance. AI can be wrong, and this is all
-> still a work in progress. Provided as-is, with no warranty - see
-> [LICENSE](LICENSE).
 
 ## Requirements
 
