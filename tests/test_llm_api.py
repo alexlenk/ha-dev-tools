@@ -1221,18 +1221,23 @@ class _FakeMirrorRequestContext:
 class _FakeMirrorSession:
     def __init__(self, responses):
         self._responses = list(responses)
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def _next(self, method, url, kwargs):
+        self.calls.append((method, url, kwargs))
+        return _FakeMirrorRequestContext(self._responses.pop(0))
 
     def get(self, url, **kwargs):
-        return _FakeMirrorRequestContext(self._responses.pop(0))
+        return self._next("GET", url, kwargs)
 
     def put(self, url, **kwargs):
-        return _FakeMirrorRequestContext(self._responses.pop(0))
+        return self._next("PUT", url, kwargs)
 
     def post(self, url, **kwargs):
-        return _FakeMirrorRequestContext(self._responses.pop(0))
+        return self._next("POST", url, kwargs)
 
     def patch(self, url, **kwargs):
-        return _FakeMirrorRequestContext(self._responses.pop(0))
+        return self._next("PATCH", url, kwargs)
 
 
 @pytest.mark.asyncio
