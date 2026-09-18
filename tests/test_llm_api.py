@@ -30,7 +30,9 @@ installed version actually has, and treats the unsub-callable behavior as
 best-effort rather than asserting it unconditionally.
 """
 
+import base64
 import inspect
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -41,7 +43,7 @@ from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
-from custom_components.ha_dev_tools import access_control
+from custom_components.ha_dev_tools import access_control, helper_manager
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.automation_manager import AutomationManager
 from custom_components.ha_dev_tools.script_manager import ScriptManager
@@ -62,8 +64,10 @@ from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
     CreateDerivedSensorTool,
+    CreateHelperTool,
     CreateTemplateEntityTool,
     DeleteDerivedSensorTool,
+    DeleteHelperTool,
     DeleteTemplateEntityTool,
     DevToolsPingTool,
     FindEntitiesTool,
@@ -76,6 +80,7 @@ from custom_components.ha_dev_tools.llm_api import (
     ListScriptsTool,
     ReloadDerivedSensorTool,
     UpdateDerivedSensorTool,
+    UpdateHelperTool,
     UpdateTemplateEntityTool,
     WriteAutomationTool,
     WriteDashboardTool,
@@ -1477,6 +1482,230 @@ async def test_write_dashboard_tool_mirrors_when_enabled(
     # test) - only the after-commit pushes, matching mirror.py's own
     # "content_before is None -> no before-commit" rule.
     assert result["mirror"]["commits"] == ["after"]
+
+
+# --- helper mirroring: in-memory reconstruction, never re-reading the ------
+# --- debounced-save storage file (issue #43) --------------------------------
+
+
+@pytest.fixture
+async def _setup_websocket_api_for_helpers(hass: HomeAssistant):
+    """create/update/delete_helper go through the real WS command dispatch
+    (ws_call.py) - needs websocket_api registered, same as
+    test_helper_manager.py's identical fixture."""
+    assert await async_setup_component(hass, "websocket_api", {})
+
+
+@pytest.mark.asyncio
+async def test_create_helper_tool_mirrors_reconstructed_content(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    """create_helper's mirror push never re-reads .storage/input_boolean
+    after the write (HA's StorageCollection debounces that save 10s) -
+    the "after" content is spliced together in memory from the "before"
+    content plus the WS command's own returned item."""
+    assert await async_setup_component(hass, "input_boolean", {})
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    tool = CreateHelperTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+    before_content = (
+        '{"version": 1, "minor_version": 1, "key": "input_boolean", '
+        '"data": {"items": [{"id": "existing", "name": "Existing"}]}}'
+    )
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(return_value=before_content),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+            return_value=fake_session,
+        ),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="create_helper",
+                tool_args={"domain": "input_boolean", "config": {"name": "New"}},
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["after"]
+    put_after_json = fake_session.calls[-1][2]["json"]["content"]
+
+    after_content = json.loads(base64.b64decode(put_after_json))
+    item_ids = {item["id"] for item in after_content["data"]["items"]}
+    assert item_ids == {"existing", result["id"]}
+
+
+@pytest.mark.asyncio
+async def test_update_helper_tool_mirrors_reconstructed_content(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    assert await async_setup_component(hass, "input_boolean", {})
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    created = await helper_manager.create_helper(
+        hass, admin_user, "input_boolean", {"name": "Original"}
+    )
+    tool = UpdateHelperTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+    before_content = json.dumps(
+        {
+            "version": 1,
+            "minor_version": 1,
+            "key": "input_boolean",
+            "data": {"items": [created]},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(return_value=before_content),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+            return_value=fake_session,
+        ),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_helper",
+                tool_args={
+                    "domain": "input_boolean",
+                    "item_id": created["id"],
+                    "config": {"name": "Renamed"},
+                },
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    put_after_json = fake_session.calls[-1][2]["json"]["content"]
+
+    after_content = json.loads(base64.b64decode(put_after_json))
+    assert after_content["data"]["items"] == [{"id": created["id"], "name": "Renamed"}]
+
+
+@pytest.mark.asyncio
+async def test_delete_helper_tool_mirrors_reconstructed_content(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    assert await async_setup_component(hass, "input_boolean", {})
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    created = await helper_manager.create_helper(
+        hass, admin_user, "input_boolean", {"name": "Doomed"}
+    )
+    tool = DeleteHelperTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+    before_content = json.dumps(
+        {
+            "version": 1,
+            "minor_version": 1,
+            "key": "input_boolean",
+            "data": {"items": [created]},
+        }
+    )
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(return_value=before_content),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+            return_value=fake_session,
+        ),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_helper",
+                tool_args={"domain": "input_boolean", "item_id": created["id"]},
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    put_after_json = fake_session.calls[-1][2]["json"]["content"]
+
+    after_content = json.loads(base64.b64decode(put_after_json))
+    assert after_content["data"]["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_helper_tool_no_mirror_key_when_disabled(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    """Mirroring off (the default) - no 'mirror' key at all, not even an attempt."""
+    assert await async_setup_component(hass, "input_boolean", {})
+    tool = CreateHelperTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="create_helper",
+            tool_args={"domain": "input_boolean", "config": {"name": "New"}},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert "mirror" not in result
 
 
 # --- dry-run + mirroring: proposed/<kind>-<id> branches (issue #35) ---------

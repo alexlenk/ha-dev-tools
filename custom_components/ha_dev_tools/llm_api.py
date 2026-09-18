@@ -11,6 +11,7 @@ why every tool but the diagnostic ping is gated.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, override
 
@@ -117,11 +118,13 @@ async def _mirror_file_write(
     create/update/delete_template_entity) or a .storage/* file HA core
     wrote on its behalf and saves immediately
     (write_dashboard - see _storage_file_manager/_read_storage_file below).
-    Deliberately not used for helpers (create/update/delete_helper): HA's
+    Not used for helpers (create/update/delete_helper): HA's
     StorageCollection debounces those writes 10 seconds
     (helpers/collection.py's async_delay_save), so a read right after the
-    call would capture stale, pre-write content - see issue tracking that
-    gap rather than mirroring something silently wrong."""
+    call would capture stale, pre-write content (issue #43) - those mirror
+    via _reconstruct_helper_storage_json() instead, splicing the WS
+    command's own known result into the "before" content in memory rather
+    than ever reading the file again after the write."""
     if mirror.is_mirror_enabled(hass):
         mirror_result = await mirror.mirror_write(
             hass,
@@ -152,6 +155,59 @@ async def _read_storage_file(hass: HomeAssistant, path: str) -> str | None:
         return await _storage_file_manager(hass).read_file(path)
     except FileNotFoundError:
         return None
+
+
+def _reconstruct_helper_storage_json(
+    before_content: str | None,
+    *,
+    upsert: JsonObjectType | None = None,
+    remove_id: str | None = None,
+) -> str:
+    """Build a helper's .storage/<domain> "after" content in memory, never
+    by reading the file again after the write (issue #43).
+
+    HA's generic helper storage collection (helpers/collection.py's
+    StorageCollection) debounces its own save 10 seconds
+    (_async_schedule_save() -> Store.async_delay_save()), so a read right
+    after create/update/delete would almost always capture stale,
+    pre-write content - worse than not mirroring at all for something
+    meant to be a rollback source. Instead, splice the one known change
+    (the WS command's own returned item, for create/update; just the
+    deleted id, for delete) directly into the "before" document's own
+    items list - reproducing exactly what the debounced save will
+    eventually persist, without ever depending on the file's actual
+    on-disk state for "after".
+
+    Every helper storage file shares the same {"version", "minor_version",
+    "data": {"items": [...]}} shape, and every item's own identifier key
+    is "id" (collection.py's CONF_ID) - confirmed directly against
+    home-assistant/core source (collection.py's StorageCollection,
+    input_boolean/__init__.py's InputBooleanStorageCollection - neither
+    overrides the base "id" key), not assumed. Exactly one of
+    upsert/remove_id is ever passed.
+    """
+    document: dict[str, Any] = (
+        json.loads(before_content)
+        if before_content is not None
+        else {"version": 1, "minor_version": 1, "data": {"items": []}}
+    )
+    items: list[dict[str, Any]] = document.setdefault("data", {}).setdefault(
+        "items", []
+    )
+
+    if upsert is not None:
+        for i, existing in enumerate(items):
+            if existing.get("id") == upsert.get("id"):
+                items[i] = upsert
+                break
+        else:
+            items.append(upsert)
+    else:
+        document["data"]["items"] = [
+            item for item in items if item.get("id") != remove_id
+        ]
+
+    return json.dumps(document)
 
 
 def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
@@ -988,7 +1044,9 @@ class CreateHelperTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Create the helper."""
         args = tool_input.tool_args
+        storage_path = f".storage/{args['domain']}"
         try:
+            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
             created = await helper_manager.create_helper(
                 hass, user, args["domain"], args["config"]
@@ -999,7 +1057,20 @@ class CreateHelperTool(WriteGatedTool):
             WebSocketCommandError,
         ) as exc:
             return _tool_error(exc)
-        return created
+        response: JsonObjectType = dict(created)
+        if mirror.is_mirror_enabled(hass):
+            content_after = _reconstruct_helper_storage_json(
+                content_before, upsert=created
+            )
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=storage_path,
+                content_before=content_before,
+                content_after=content_after,
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 class UpdateHelperTool(WriteGatedTool):
@@ -1029,7 +1100,9 @@ class UpdateHelperTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Update the helper."""
         args = tool_input.tool_args
+        storage_path = f".storage/{args['domain']}"
         try:
+            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
             updated = await helper_manager.update_helper(
                 hass, user, args["domain"], args["item_id"], args["config"]
@@ -1040,7 +1113,20 @@ class UpdateHelperTool(WriteGatedTool):
             WebSocketCommandError,
         ) as exc:
             return _tool_error(exc)
-        return updated
+        response: JsonObjectType = dict(updated)
+        if mirror.is_mirror_enabled(hass):
+            content_after = _reconstruct_helper_storage_json(
+                content_before, upsert=updated
+            )
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=storage_path,
+                content_before=content_before,
+                content_after=content_after,
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 class DeleteHelperTool(WriteGatedTool):
@@ -1061,7 +1147,9 @@ class DeleteHelperTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Delete the helper."""
         args = tool_input.tool_args
+        storage_path = f".storage/{args['domain']}"
         try:
+            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
             await helper_manager.delete_helper(
                 hass, user, args["domain"], args["item_id"]
@@ -1072,7 +1160,24 @@ class DeleteHelperTool(WriteGatedTool):
             WebSocketCommandError,
         ) as exc:
             return _tool_error(exc)
-        return {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
+        response: JsonObjectType = {
+            "deleted": True,
+            "domain": args["domain"],
+            "item_id": args["item_id"],
+        }
+        if mirror.is_mirror_enabled(hass):
+            content_after = _reconstruct_helper_storage_json(
+                content_before, remove_id=args["item_id"]
+            )
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=storage_path,
+                content_before=content_before,
+                content_after=content_after,
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 def _derived_sensor_domain_schema() -> vol.Schema:

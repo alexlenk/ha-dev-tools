@@ -126,10 +126,13 @@ repository.
 
    Supported today: `write_automation`, `write_script`,
    `create_template_entity`/`update_template_entity`/`delete_template_entity`,
-   `write_dashboard`. `create_helper`/`update_helper`/`delete_helper` are
-   intentionally not yet covered - HA's helper storage debounces its save
-   10 seconds, which would silently mirror stale content (tracked in
-   issue #43); derived-sensor mirroring hasn't been built yet either.
+   `write_dashboard`, `create_helper`/`update_helper`/`delete_helper`.
+   HA's helper storage debounces its save 10 seconds, so reading the
+   file right after a helper write would capture stale, pre-write
+   content - instead, the mirrored "after" content is reconstructed in
+   memory from the file's last-known state plus the write's own known
+   result, never by reading the file again. Derived-sensor mirroring
+   hasn't been built yet.
 
    **With dry-run mode also on:** `write_automation`, `write_script`, and
    the template-entity tools still mirror something even though nothing
