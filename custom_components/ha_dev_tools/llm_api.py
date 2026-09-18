@@ -56,6 +56,11 @@ from .helper_manager import (
 )
 from .history_manager import RecorderNotAvailableError
 from .log_manager import LogFilters, LogManager
+from .script_manager import (
+    DuplicateScriptIdError,
+    ScriptManager,
+    ScriptNotFoundError,
+)
 from .supervisor_manager import SupervisorNotAvailableError
 from .template_yaml_manager import (
     DuplicateTemplateUniqueIdError,
@@ -108,8 +113,9 @@ async def _mirror_file_write(
     """Mirror a write's before/after content into response['mirror'], if
     mirroring is enabled - shared by every WriteGatedTool whose _write()
     resolves to a single file's content, whether that's a real YAML config
-    file it wrote itself (write_automation, create/update/delete_template_entity)
-    or a .storage/* file HA core wrote on its behalf and saves immediately
+    file it wrote itself (write_automation, write_script,
+    create/update/delete_template_entity) or a .storage/* file HA core
+    wrote on its behalf and saves immediately
     (write_dashboard - see _storage_file_manager/_read_storage_file below).
     Deliberately not used for helpers (create/update/delete_helper): HA's
     StorageCollection debounces those writes 10 seconds
@@ -1714,12 +1720,178 @@ class AuditAutomationsTool(GatedTool):
         return await audit_manager.audit_automations(hass, self._manager)
 
 
+class ListScriptsTool(GatedTool):
+    """List every script across scripts.yaml and packages."""
+
+    name = "list_scripts"
+    description = (
+        "List every script (the default scripts.yaml and every "
+        "packages/*.yaml file), each with its id, source file, and full "
+        "config. Same layout-aware, package-safe file resolution as "
+        "write_script - a plain file read can silently miss "
+        "package-defined scripts."
+    )
+    parameters = vol.Schema({})
+
+    def __init__(self, script_manager: ScriptManager) -> None:
+        """Init with the ScriptManager backing this tool."""
+        self._manager = script_manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List every script."""
+        items = [
+            {
+                "script_id": script_id,
+                "file_path": location.file_path,
+                "is_package": location.is_package,
+                "config": config,
+            }
+            for location, script_id, config in await self._manager.all_scripts()
+        ]
+        return {"items": items}
+
+
+class GetScriptTool(GatedTool):
+    """Layout-aware script read - resolves the file that actually defines it."""
+
+    name = "get_script"
+    description = (
+        "Read a script's config by id, resolving which file actually "
+        "defines it (the default scripts.yaml, or a packages/*.yaml "
+        "file) - a plain file read can silently miss package-defined "
+        "scripts. Fails clearly if the id isn't found or is defined in "
+        "more than one file, rather than guessing."
+    )
+    parameters = vol.Schema({vol.Required("script_id"): str})
+
+    def __init__(self, script_manager: ScriptManager) -> None:
+        """Init with the ScriptManager backing this tool."""
+        self._manager = script_manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Resolve and return a script's config and source file."""
+        try:
+            location, config = await self._manager.get_script(
+                tool_input.tool_args["script_id"]
+            )
+        except (ScriptNotFoundError, DuplicateScriptIdError) as exc:
+            return _tool_error(exc)
+        return {
+            "file_path": location.file_path,
+            "is_package": location.is_package,
+            "config": config,
+        }
+
+
+class WriteScriptTool(WriteGatedTool):
+    """Layout-aware, package-safe script write - see script_manager.py."""
+
+    name = "write_script"
+    description = (
+        "Create or update a script. If the id already exists, it's "
+        "updated in place in whichever file actually defines it (default "
+        "file or a package) - never blindly appended to scripts.yaml, "
+        "which would create a silent duplicate for package-defined "
+        "scripts. For a brand new script, pass 'package' to target an "
+        "existing packages/*.yaml file, or omit it for the default "
+        "scripts.yaml. Always reloads scripts afterward - never requires "
+        "a restart. Pass expected_hash (from get_file_metadata or a prior "
+        "read) to detect concurrent edits."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("script_id"): str,
+            vol.Required("config"): dict,
+            vol.Optional("package"): str,
+            vol.Optional("expected_hash"): str,
+        }
+    )
+
+    def __init__(self, script_manager: ScriptManager) -> None:
+        """Init with the ScriptManager backing this tool."""
+        self._manager = script_manager
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Write the script through its correct file and reload."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.write_script(
+                args["script_id"],
+                args["config"],
+                package=args.get("package"),
+                expected_hash=args.get("expected_hash"),
+            )
+        except (ScriptNotFoundError, DuplicateScriptIdError, ValueError) as exc:
+            return _tool_error(exc)
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "is_package": result.location.is_package,
+        }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
+
+    @override
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """Compute this call's would-be script content and mirror it to a
+        proposed/script-<id> branch (same pattern as write_automation's
+        equivalent hook, issue #35) - reuses write_script's own
+        resolve+build logic via dry_run=True."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.write_script(
+                args["script_id"],
+                args["config"],
+                package=args.get("package"),
+                expected_hash=args.get("expected_hash"),
+                dry_run=True,
+            )
+        except (ScriptNotFoundError, DuplicateScriptIdError, ValueError) as exc:
+            return mirror.MirrorResult(mirrored=False, reason=str(exc))
+        return await mirror.mirror_dry_run(
+            hass,
+            path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+            kind="script",
+            entity_id=args["script_id"],
+        )
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
 
     log_manager: LogManager
     automation_manager: AutomationManager
+    script_manager: ScriptManager
     template_yaml_manager: TemplateYamlManager
 
     @override
@@ -1747,6 +1919,9 @@ class DevToolsAPI(llm.API):
                 GetAutomationTool(self.automation_manager),
                 WriteAutomationTool(self.automation_manager),
                 AuditAutomationsTool(self.automation_manager),
+                ListScriptsTool(self.script_manager),
+                GetScriptTool(self.script_manager),
+                WriteScriptTool(self.script_manager),
                 ListHelpersTool(),
                 CreateHelperTool(),
                 UpdateHelperTool(),
@@ -1773,6 +1948,7 @@ def async_register(
     *,
     log_manager: LogManager,
     automation_manager: AutomationManager,
+    script_manager: ScriptManager,
     template_yaml_manager: TemplateYamlManager,
 ) -> Any:
     """Register the dev_tools API and return its unsubscribe callable."""
@@ -1784,6 +1960,7 @@ def async_register(
             name=API_NAME,
             log_manager=log_manager,
             automation_manager=automation_manager,
+            script_manager=script_manager,
             template_yaml_manager=template_yaml_manager,
         ),
     )

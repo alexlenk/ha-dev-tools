@@ -44,6 +44,7 @@ from pytest_homeassistant_custom_component.common import MockUser
 from custom_components.ha_dev_tools import access_control
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.automation_manager import AutomationManager
+from custom_components.ha_dev_tools.script_manager import ScriptManager
 from custom_components.ha_dev_tools.const import (
     OPT_DRY_RUN,
     OPT_MIRROR_ENABLED,
@@ -70,13 +71,16 @@ from custom_components.ha_dev_tools.llm_api import (
     GetDerivedSensorTool,
     GetEntityHistoryTool,
     GetLogbookTool,
+    GetScriptTool,
     ListDerivedSensorsTool,
+    ListScriptsTool,
     ReloadDerivedSensorTool,
     UpdateDerivedSensorTool,
     UpdateTemplateEntityTool,
     WriteAutomationTool,
     WriteDashboardTool,
     WriteGatedTool,
+    WriteScriptTool,
 )
 from custom_components.ha_dev_tools.security import SecurityManager
 from custom_components.ha_dev_tools.template_yaml_manager import TemplateYamlManager
@@ -366,6 +370,110 @@ async def test_get_automation_returns_error_for_missing_id(
     )
 
     assert "error" in result
+
+
+# --- GetScriptTool / WriteScriptTool / ListScriptsTool (issue #42) ----------
+
+
+def _script_manager(hass: HomeAssistant, tmp_path) -> ScriptManager:
+    hass.config.config_dir = str(tmp_path)
+    security_manager = SecurityManager(
+        hass,
+        {
+            "read_paths": ["scripts.yaml", "packages/**/*.yaml"],
+            "write_paths": ["scripts.yaml", "packages/**/*.yaml"],
+            "denied_paths": [],
+        },
+    )
+    file_manager = FileManager(hass, security_manager)
+    return ScriptManager(hass, file_manager)
+
+
+@pytest.mark.asyncio
+async def test_get_script_returns_config(hass: HomeAssistant, admin_user, tmp_path):
+    manager = _script_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "scripts.yaml").write_text(
+        "my_script:\n  alias: Mine\n  sequence: []\n"
+    )
+
+    result = await GetScriptTool(manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "my_script"}),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["file_path"] == "scripts.yaml"
+    assert result["config"]["alias"] == "Mine"
+
+
+@pytest.mark.asyncio
+async def test_get_script_returns_error_for_missing_id(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _script_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "scripts.yaml").write_text("other_id:\n  sequence: []\n")
+
+    result = await GetScriptTool(manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "missing"}),
+        _llm_context(admin_user.id),
+    )
+
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_list_scripts_returns_every_script(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _script_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "scripts.yaml").write_text("a:\n  sequence: []\n")
+    (tmp_path / "packages").mkdir()
+    (tmp_path / "packages" / "emhas.yaml").write_text(
+        "script:\n  b:\n    sequence: []\n"
+    )
+
+    result = await ListScriptsTool(manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="list_scripts", tool_args={}),
+        _llm_context(admin_user.id),
+    )
+
+    ids = {item["script_id"] for item in result["items"]}
+    assert ids == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_write_script_tool_confirm_flow_writes_and_reloads(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _script_manager(hass, tmp_path)
+    _arm(hass)
+    reload_mock = AsyncMock()
+    hass.services.async_register("script", "reload", reload_mock)
+    tool = WriteScriptTool(manager)
+    args = {"script_id": "new_script", "config": {"alias": "New", "sequence": []}}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="write_script", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="write_script", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["file_path"] == "scripts.yaml"
+    reload_mock.assert_called_once()
+    assert "new_script" in (tmp_path / "scripts.yaml").read_text()
 
 
 # --- WriteGatedTool / dry-run ------------------------------------------------
@@ -1482,6 +1590,84 @@ async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabl
 
     assert result["dry_run"] is True
     assert "mirror" not in result
+
+
+def _write_script_manager(hass: HomeAssistant, tmp_path) -> ScriptManager:
+    hass.config.config_dir = str(tmp_path)
+    security_manager = SecurityManager(
+        hass,
+        {
+            "read_paths": ["scripts.yaml", "packages/**/*.yaml"],
+            "write_paths": ["scripts.yaml", "packages/**/*.yaml"],
+            "denied_paths": [],
+        },
+    )
+    file_manager = FileManager(hass, security_manager)
+    return ScriptManager(hass, file_manager)
+
+
+@pytest.mark.asyncio
+async def test_write_script_tool_dry_run_mirrors_to_proposed_branch(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    """Same dry-run + mirroring behavior as write_automation's equivalent
+    test (issue #35) - write_script's _dry_run_mirror hook reuses
+    write_script's own resolve+build logic via dry_run=True."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_DRY_RUN: True,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    manager = _write_script_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "scripts.yaml").write_text("my_script:\n  alias: Old\n  sequence: []\n")
+    tool = WriteScriptTool(manager)
+    args = {
+        "script_id": "my_script",
+        "config": {"alias": "New", "sequence": []},
+    }
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="write_script", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # _sync_before GET current -> none
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
+            _FakeMirrorResponse(404),  # GET ref/proposed -> doesn't exist
+            _FakeMirrorResponse(201),  # POST create ref
+            _FakeMirrorResponse(404),  # GET current on proposed branch
+            _FakeMirrorResponse(201, {"content": {"sha": "sha-2"}}),  # PUT proposed
+        ]
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_script", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["dry_run"] is True
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["branch"] == "proposed/script-my_script"
+    assert result["mirror"]["commits"] == ["before", "proposed"]
+    # Nothing live actually changed:
+    assert "Old" in (tmp_path / "scripts.yaml").read_text()
+    assert "New" not in (tmp_path / "scripts.yaml").read_text()
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from .file_manager import FileManager
 from .llm_api import async_register as async_register_llm_api
 from .log_manager import LogManager
 from .mcp_repair import async_setup_repair as async_setup_mcp_repair
+from .script_manager import ScriptManager
 from .security import SecurityManager
 from .template_yaml_manager import TemplateYamlManager
 
@@ -36,6 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     file_manager = FileManager(hass, security_manager)
     log_manager = LogManager(hass, security_manager)
     automation_manager = AutomationManager(hass, file_manager)
+    script_manager = ScriptManager(hass, file_manager)
     template_yaml_manager = TemplateYamlManager(hass, file_manager)
 
     # Register the dev_tools LLM API, exposed over MCP by HA's native
@@ -44,6 +46,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         log_manager=log_manager,
         automation_manager=automation_manager,
+        script_manager=script_manager,
         template_yaml_manager=template_yaml_manager,
     )
 

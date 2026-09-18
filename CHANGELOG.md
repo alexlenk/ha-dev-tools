@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-09-18
+
+### Added
+- Script support (issue #42): `list_scripts`, `get_script`, `write_script` - the same layout-aware, package-safe pattern `get_automation`/`write_automation` already have, applied to `script:`. `scripts.yaml` (the default file, a bare mapping of script id -> config at its document root) or a specific `packages/*.yaml` file (a `script:` key holding that same mapping) - resolved before any read or write, always written through the same file found. `write_script` gets the full write-tool treatment: propose/confirm token gate, dry-run preview, and dry-run + mirroring support (pushes to its own `proposed/script-<id>` branch, same as `write_automation`). `scripts.yaml` moved from `DEFAULT_READ_ONLY_PATHS`-only to also being in `DEFAULT_WRITE_PATHS`, matching `automations.yaml`'s status.
+
+### Fixed
+- README's mirroring section still said mirrored writes went to the mirror repo's `main` branch, and dry-run's proposed branch was described as branching off `main` - both now say "the mirror repo's actual default branch", matching 2.9.3's fix below (not pushed with that release, folded in here instead).
+
 ## [2.9.3] - 2026-09-18
 
 ### Fixed
