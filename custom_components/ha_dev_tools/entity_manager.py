@@ -12,10 +12,29 @@ turn "hundreds of entities" into a scannable per-integration summary
 instead of a wall of text - it reports problem entities (disabled,
 unavailable, unknown, or registered with no state at all) rather than
 listing everything.
+
+`delete_entity` removes an entity from the registry via
+`EntityRegistry.async_remove` - the same in-process API HA's own UI uses,
+never a direct write to `.storage/core.entity_registry` (that file is
+unconditionally denylisted - see security.py - and shared across every
+integration, so hand-editing it is never on the table here). This is a
+soft delete on HA's own side: it moves the entry into the registry's
+`deleted_entities` table rather than erasing it, so if the same
+(platform, unique_id) re-registers later (integration reload/restart)
+HA reconnects it automatically with its old entity_id and customizations
+- no restore needed for that common case. Only entries with no
+config_entry_id (truly orphaned - the entity's owning integration is
+already gone) get a 30-day countdown before HA purges them for good;
+`entity_registry_snapshot` exists so a caller (see llm_api.py's
+DeleteEntityTool) can mirror a durable backup of that data before it
+ages out, using the exact field set HA's own `RegistryEntry.
+as_storage_fragment` persists to storage, so a snapshot has everything a
+future restore would need.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -25,6 +44,10 @@ from homeassistant.helpers import entity_registry as er
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
+
+
+class EntityNotFoundError(Exception):
+    """Raised when an entity_id doesn't resolve to a registry entry."""
 
 
 def resolve_area_id(area_reg: ar.AreaRegistry, area: str) -> str | None:
@@ -218,3 +241,70 @@ def entity_health_report(
         "problem_entities": problems,
         "truncated": truncated,
     }
+
+
+def _isoformat(value: datetime) -> str:
+    return value.isoformat()
+
+
+def entity_registry_snapshot(entry: er.RegistryEntry) -> dict[str, Any]:
+    """JSON-safe snapshot of a registry entry, for mirroring before a delete.
+
+    Field set matches what HA's own `RegistryEntry.as_storage_fragment`
+    persists to `.storage/core.entity_registry` (confirmed by reading that
+    property directly), plus `domain` (not in storage, but cheap and
+    useful for a future restore's `async_get_or_create(domain, ...)`
+    call) - so this snapshot has everything a real restore would need,
+    not just what happens to be convenient to read here.
+    """
+    return {
+        "entity_id": entry.entity_id,
+        "unique_id": entry.unique_id,
+        "previous_unique_id": entry.previous_unique_id,
+        "platform": entry.platform,
+        "domain": entry.domain,
+        "aliases": list(entry.compat_aliases),
+        "area_id": entry.area_id,
+        "categories": dict(entry.categories),
+        "capabilities": (
+            dict(entry.capabilities) if entry.capabilities is not None else None
+        ),
+        "config_entry_id": entry.config_entry_id,
+        "config_subentry_id": entry.config_subentry_id,
+        "created_at": _isoformat(entry.created_at),
+        "modified_at": _isoformat(entry.modified_at),
+        "device_class": entry.device_class,
+        "device_id": entry.device_id,
+        "disabled_by": entry.disabled_by.value if entry.disabled_by else None,
+        "entity_category": (
+            entry.entity_category.value if entry.entity_category else None
+        ),
+        "has_entity_name": entry.has_entity_name,
+        "hidden_by": entry.hidden_by.value if entry.hidden_by else None,
+        "icon": entry.icon,
+        "id": entry.id,
+        "labels": sorted(entry.labels),
+        "name": entry.name,
+        "object_id_base": entry.object_id_base,
+        "options": dict(entry.options),
+        "original_device_class": entry.original_device_class,
+        "original_icon": entry.original_icon,
+        "original_name": entry.original_name,
+        "suggested_object_id": entry.suggested_object_id,
+        "supported_features": entry.supported_features,
+        "translation_key": entry.translation_key,
+        "unit_of_measurement": entry.unit_of_measurement,
+    }
+
+
+def delete_entity(hass: HomeAssistant, entity_id: str) -> dict[str, Any]:
+    """Soft-delete an entity from the entity registry by entity_id.
+
+    Uses EntityRegistry.async_remove - see this module's docstring for
+    why that's a soft delete on HA's own side, not a hard erase.
+    """
+    entity_reg = er.async_get(hass)
+    if entity_reg.async_get(entity_id) is None:
+        raise EntityNotFoundError(f"No entity with id '{entity_id}' found")
+    entity_reg.async_remove(entity_id)
+    return {"deleted": True, "entity_id": entity_id}

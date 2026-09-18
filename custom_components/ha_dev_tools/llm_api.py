@@ -17,6 +17,7 @@ from typing import Any, override
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonObjectType
@@ -503,6 +504,65 @@ class EntityHealthReportTool(GatedTool):
     ) -> JsonObjectType:
         """Run the health report."""
         return entity_manager.entity_health_report(hass, **tool_input.tool_args)
+
+
+def _entity_mirror_path(entity_id: str) -> str:
+    return f"entities/{entity_id}.json"
+
+
+class DeleteEntityTool(WriteGatedTool):
+    """Soft-delete an entity from the entity registry - see entity_manager.py."""
+
+    name = "delete_entity"
+    description = (
+        "Remove an entity from the entity registry by entity_id (e.g. a "
+        "stale entity left behind by a removed/renamed device or "
+        "integration). This is a soft delete on Home Assistant's own "
+        "side, not a hard erase: if the same integration re-registers "
+        "this entity later, HA reconnects it automatically with its old "
+        "entity_id and customizations - no restore needed for that case. "
+        "Only entities with no owning config entry (truly orphaned) get "
+        "purged for good, and only after 30 days. If mirroring is "
+        "enabled, this entity's current registry data (name, area, "
+        "labels, options, ...) is pushed to a private backup path first, "
+        "so it isn't lost once that 30-day window passes."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema({vol.Required("entity_id"): str})
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete the entity from the registry, mirroring a backup first if enabled."""
+        entity_id = tool_input.tool_args["entity_id"]
+        entity_reg = er.async_get(hass)
+        # Only fetched when mirroring is on - same reasoning as
+        # DeleteDerivedSensorTool's identical guard.
+        before = (
+            entity_reg.async_get(entity_id) if mirror.is_mirror_enabled(hass) else None
+        )
+        try:
+            result = entity_manager.delete_entity(hass, entity_id)
+        except entity_manager.EntityNotFoundError as exc:
+            return _tool_error(exc)
+        response: JsonObjectType = dict(result)
+        if mirror.is_mirror_enabled(hass):
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=_entity_mirror_path(entity_id),
+                content_before=(
+                    json.dumps(entity_manager.entity_registry_snapshot(before))
+                    if before is not None
+                    else None
+                ),
+                content_after=json.dumps({"deleted": True, "entity_id": entity_id}),
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 class RenderTemplateTool(GatedTool):
@@ -2159,6 +2219,7 @@ class DevToolsAPI(llm.API):
                 DevToolsPingTool(),
                 FindEntitiesTool(),
                 EntityHealthReportTool(),
+                DeleteEntityTool(),
                 RenderTemplateTool(),
                 ValidateTemplateTool(),
                 GetLogsTool(self.log_manager),

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-09-18
+
+### Added
+- `delete_entity` - a real gap: entities registered by a removed/renamed device or integration had no supported way to clean up, short of hand-editing the denylisted `.storage/core.entity_registry`. Deletes through `EntityRegistry.async_remove` - the same in-process API HA's own UI uses. This is a soft delete on Home Assistant's own side (confirmed by reading `entity_registry.py` directly): the entry moves into the registry's own `deleted_entities` table, so HA reconnects it automatically with its old entity_id and customizations if the same integration re-registers it later; only truly orphaned entries (no owning config entry) get purged for good, after 30 days. If git mirroring is enabled, the entity's full registry snapshot (name, area, labels, options, ...) is pushed to a synthetic `entities/<entity_id>.json` path before removal, and a small deletion marker after - same tombstone pattern as `delete_derived_sensor` - so that data survives past HA's own 30-day window. Gets the full write-tool treatment (propose/confirm token gate); no dry-run preview mirror hook, matching every other non-file-backed write tool (helpers, derived sensors).
+
 ## [2.13.0] - 2026-09-18
 
 ### Added

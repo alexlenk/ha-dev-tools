@@ -1,5 +1,7 @@
 """Tests for area/domain-scoped entity lookup (entity_manager.py)."""
 
+import json
+
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
@@ -8,7 +10,10 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_dev_tools.entity_manager import (
+    EntityNotFoundError,
+    delete_entity,
     entity_health_report,
+    entity_registry_snapshot,
     find_entities,
 )
 
@@ -236,3 +241,73 @@ async def test_entity_health_report_truncates_problem_entities(hass: HomeAssista
     assert report["truncated"] is True
     # Counts in by_integration still reflect everything, only the sample list is capped.
     assert report["by_integration"]["hue"]["unavailable"] == 5
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_removes_from_registry(hass: HomeAssistant):
+    _register_entity(hass, "light.kitchen")
+
+    result = delete_entity(hass, "light.kitchen")
+
+    assert result == {"deleted": True, "entity_id": "light.kitchen"}
+    assert er.async_get(hass).async_get("light.kitchen") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_not_found_raises(hass: HomeAssistant):
+    with pytest.raises(EntityNotFoundError):
+        delete_entity(hass, "light.does_not_exist")
+
+
+@pytest.mark.asyncio
+async def test_delete_entity_is_a_soft_delete_ha_reconnects_on_reregister(
+    hass: HomeAssistant,
+):
+    """Regression test for the exact HA behavior this whole feature leans on:
+    async_remove() doesn't erase the entry, it moves it into the registry's
+    own deleted_entities table, so a matching (platform, unique_id)
+    re-registering later reconnects to the same entity_id and
+    customizations rather than getting a fresh one."""
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen"
+    )
+    entity_reg.async_update_entity("light.kitchen", name="Kitchen Light")
+
+    delete_entity(hass, "light.kitchen")
+    assert entity_reg.async_get("light.kitchen") is None
+
+    restored = entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen"
+    )
+
+    assert restored.entity_id == "light.kitchen"
+    assert restored.name == "Kitchen Light"
+
+
+@pytest.mark.asyncio
+async def test_entity_registry_snapshot_captures_key_fields(
+    hass: HomeAssistant, bedroom_area
+):
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen"
+    )
+    entity_reg.async_update_entity(
+        "light.kitchen", name="Kitchen Light", area_id=bedroom_area.id
+    )
+    entry = entity_reg.async_get("light.kitchen")
+
+    snapshot = entity_registry_snapshot(entry)
+
+    assert snapshot["entity_id"] == "light.kitchen"
+    assert snapshot["unique_id"] == "kitchen_light"
+    assert snapshot["platform"] == "test"
+    assert snapshot["domain"] == "light"
+    assert snapshot["name"] == "Kitchen Light"
+    assert snapshot["area_id"] == bedroom_area.id
+    assert snapshot["disabled_by"] is None
+    assert snapshot["labels"] == []
+    assert isinstance(snapshot["created_at"], str)
+    # JSON-safe: no bare RegistryEntry/set/datetime objects escape.
+    json.dumps(snapshot)
