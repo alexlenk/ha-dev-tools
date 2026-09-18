@@ -4,6 +4,7 @@
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
+[![codecov][codecov-shield]][codecov]
 [![License][license-shield]](LICENSE)
 [![hacs][hacsbadge]][hacs]
 
@@ -313,6 +314,8 @@ MIT - see [LICENSE](LICENSE).
 [releases]: https://github.com/alexlenk/ha-dev-tools/releases
 [commits-shield]: https://img.shields.io/github/commit-activity/y/alexlenk/ha-dev-tools.svg
 [commits]: https://github.com/alexlenk/ha-dev-tools/commits/main
+[codecov-shield]: https://codecov.io/gh/alexlenk/ha-dev-tools/branch/main/graph/badge.svg
+[codecov]: https://codecov.io/gh/alexlenk/ha-dev-tools
 [license-shield]: https://img.shields.io/github/license/alexlenk/ha-dev-tools.svg
 [hacs]: https://github.com/hacs/integration
 [hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg
