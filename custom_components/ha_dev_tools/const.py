@@ -38,13 +38,15 @@ DEFAULT_READ_ONLY_PATHS = [
     "/config/packages/**/*.yaml",
 ]
 
-# Default write paths - exactly what write_automation can actually target
-# (AutomationManager.candidate_files(): automations.yaml, packages/**/*.yaml).
-# No YAML/UI config currently populates SecurityManager with anything else, so
-# leaving this empty (as it was before) meant every write was silently
-# rejected out of the box - not a safety margin, just a broken default.
+# Default write paths - exactly what write_automation/write_script can
+# actually target (AutomationManager/ScriptManager.candidate_files():
+# automations.yaml/scripts.yaml, packages/**/*.yaml). No YAML/UI config
+# currently populates SecurityManager with anything else, so leaving this
+# empty (as it was before) meant every write was silently rejected out of
+# the box - not a safety margin, just a broken default.
 DEFAULT_WRITE_PATHS = [
     "/config/automations.yaml",
+    "/config/scripts.yaml",
     "/config/packages/**/*.yaml",
 ]
 

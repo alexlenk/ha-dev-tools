@@ -284,23 +284,25 @@ async def test_read_file_still_allowed_on_read_only_only_path(
 async def test_delete_file_denied_on_read_only_only_path(
     hass: HomeAssistant, default_file_manager
 ):
-    """scripts.yaml is in DEFAULT_READ_ONLY_PATHS but not DEFAULT_WRITE_PATHS.
+    """scenes.yaml is in DEFAULT_READ_ONLY_PATHS but not DEFAULT_WRITE_PATHS.
 
     Same regression as write_file's test above, for delete_file's identical
-    missing operation=OPERATION_WRITE.
+    missing operation=OPERATION_WRITE. Was scripts.yaml until issue #42 gave
+    write_script a reason to make that one writable - scenes.yaml is still a
+    read-only-only path so it took over as this regression's example.
     """
-    scripts_file = Path(hass.config.config_dir) / "scripts.yaml"
-    scripts_file.write_text("{}\n")
+    scenes_file = Path(hass.config.config_dir) / "scenes.yaml"
+    scenes_file.write_text("[]\n")
     try:
         with pytest.raises(PermissionError, match="Write access to file denied"):
-            await default_file_manager.delete_file("scripts.yaml")
+            await default_file_manager.delete_file("scenes.yaml")
 
-        assert scripts_file.exists()
+        assert scenes_file.exists()
     finally:
         # testing_config is a shared, non-per-test directory - clean up so a
         # second suite run doesn't see a stale file (see
         # test_read_directory_as_file's identical reasoning above).
-        scripts_file.unlink(missing_ok=True)
+        scenes_file.unlink(missing_ok=True)
 
 
 async def test_write_file_still_allowed_on_write_permitted_path(

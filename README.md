@@ -77,11 +77,12 @@ repository.
    a Bearer token - see [Connecting an MCP client](#connecting-an-mcp-client)
    below for exactly how to do that in Claude Code and Claude Desktop.
 5. **Every write tool now requires two calls, always.** `write_automation`,
-   `create_helper`/`update_helper`/`delete_helper`, `create_derived_sensor`/
-   `update_derived_sensor`/`delete_derived_sensor`, `create_template_entity`/
-   `update_template_entity`/`delete_template_entity`, and `write_dashboard`
-   never write on their first call - they return a preview of what would be
-   applied plus a short-lived `confirm_token`. Only a second call with the
+   `write_script`, `create_helper`/`update_helper`/`delete_helper`,
+   `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`,
+   `create_template_entity`/`update_template_entity`/`delete_template_entity`,
+   and `write_dashboard` never write on their first call - they return a
+   preview of what would be applied plus a short-lived `confirm_token`.
+   Only a second call with the
    identical arguments plus that `confirm_token` actually proceeds. This
    applies whether dry-run mode (below) is on or off - it's a separate,
    always-on step meant to give you a chance to review before anything
@@ -102,10 +103,12 @@ repository.
    doesn't exist yet, private, empty is fine), and paste a **Mirror
    repository access token** scoped to only that repo. Every confirmed
    write from a supported tool then pushes the touched file's before/after
-   content to that repo's `main` branch - a private, push-only audit trail
-   for manual rollback. Content that looks like it holds a literal
-   credential (not routed through `!secret`) is never pushed; the tool's
-   response reports that back instead.
+   content to that repo's actual default branch (whatever it's really
+   named - resolved fresh from the repo itself, never assumed to be
+   `main`) - a private, push-only audit trail for manual rollback.
+   Content that looks like it holds a literal credential (not routed
+   through `!secret`) is never pushed; the tool's response reports that
+   back instead.
 
    To create the access token:
    1. GitHub → your avatar (top right) → **Settings** → **Developer
@@ -121,20 +124,21 @@ repository.
       again), and paste it into the **Mirror repository access token**
       field. It's stored as a password-type field.
 
-   Supported today: `write_automation`, `create_template_entity`/
-   `update_template_entity`/`delete_template_entity`, `write_dashboard`.
-   `create_helper`/`update_helper`/`delete_helper` are intentionally not
-   yet covered - HA's helper storage debounces its save 10 seconds, which
-   would silently mirror stale content (tracked in issue #43); derived-
-   sensor mirroring hasn't been built yet either.
+   Supported today: `write_automation`, `write_script`,
+   `create_template_entity`/`update_template_entity`/`delete_template_entity`,
+   `write_dashboard`. `create_helper`/`update_helper`/`delete_helper` are
+   intentionally not yet covered - HA's helper storage debounces its save
+   10 seconds, which would silently mirror stale content (tracked in
+   issue #43); derived-sensor mirroring hasn't been built yet either.
 
-   **With dry-run mode also on:** `write_automation` and the
-   template-entity tools still mirror something even though nothing live
-   changed - the resolved would-be content goes to its own
-   `proposed/<kind>-<id>` branch (e.g. `proposed/automation-my_automation`),
-   freshly branched from `main`'s current tip each time, rather than to
-   `main` itself. That lets you review a dry-run's actual diff on GitHub
-   before ever turning dry-run off. `write_dashboard` has no such
+   **With dry-run mode also on:** `write_automation`, `write_script`, and
+   the template-entity tools still mirror something even though nothing
+   live changed - the resolved would-be content goes to its own
+   `proposed/<kind>-<id>` branch (e.g. `proposed/automation-my_automation`,
+   `proposed/script-my_script`), freshly branched from the default
+   branch's current tip each time, rather than to the default branch
+   itself. That lets you review a dry-run's actual diff on GitHub before
+   ever turning dry-run off. `write_dashboard` has no such
    compute-without-writing path (the real write is the only way to resolve
    its storage JSON), so it mirrors nothing while dry-run is on.
 
@@ -196,6 +200,7 @@ matters for setup, covered below.
 | `validate_template` | Check template syntax and flag referenced entities that don't exist |
 | `get_automation` | Layout-aware read: resolves whether an automation lives in `automations.yaml` or a `packages/*.yaml` file, and reports whether it's currently enabled - that's runtime-only state the YAML itself never shows |
 | `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward |
+| `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
 | `check_config` | Home Assistant's own full config validation |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
 
