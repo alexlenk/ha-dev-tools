@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import TaggedScalar
 from ruamel.yaml.scalarstring import ScalarString
 
 # Substrings, not exact matches - "api_key", "wifi_password", "client_secret",
@@ -53,7 +54,7 @@ def _walk(node: Any, *, path: str, findings: list[str]) -> None:
             child_path = f"{path}.{key}" if path else str(key)
             if (
                 _is_sensitive_key(key)
-                and isinstance(value, (str, ScalarString))
+                and isinstance(value, (str, ScalarString, TaggedScalar))
                 and not _is_secret_tagged(value)
             ):
                 findings.append(child_path)

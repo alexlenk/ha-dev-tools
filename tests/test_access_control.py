@@ -8,6 +8,8 @@ are pure comparisons against time.time() and don't need a frozen clock.
 """
 
 import time
+from pathlib import Path
+from unittest.mock import patch
 
 import homeassistant.util.dt as dt_util
 import pytest
@@ -227,6 +229,19 @@ async def test_cleanup_leaves_valid_file_alone(hass: HomeAssistant):
         assert path.exists()
     finally:
         unsub()
+
+
+def test_cleanup_swallows_unlink_failure(hass: HomeAssistant):
+    """The cleanup is explicitly best-effort - a failure removing the
+    expired file (e.g. a permissions issue, concurrent removal) must be
+    logged and swallowed, never raised out of the periodic tick."""
+    now = time.time()
+    _write_arm_file(
+        hass, armed_at=now, mtime=now - access_control.IDLE_TIMEOUT.total_seconds() - 1
+    )
+
+    with patch.object(Path, "unlink", side_effect=OSError("simulated unlink failure")):
+        access_control._cleanup_if_expired(hass)  # must not raise
 
 
 @pytest.mark.asyncio

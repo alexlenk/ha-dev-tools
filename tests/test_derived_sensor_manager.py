@@ -10,6 +10,7 @@ from custom_components.ha_dev_tools.derived_sensor_manager import (
     FlowAbortedError,
     FlowStepRequiredError,
     InvalidDerivedSensorDomainError,
+    _serialize_schema,
     create_derived_sensor,
     delete_derived_sensor,
     get_derived_sensor,
@@ -219,6 +220,30 @@ async def test_statistics_multi_step(hass: HomeAssistant):
                 raise AssertionError(f"unexpected step {err.step_id}") from err
     assert result is not None, "statistics flow did not finish within bound"
     assert result["domain"] == "statistics"
+
+
+def test_serialize_schema_none_returns_empty_list():
+    """A flow step result with no data_schema at all (FlowStepRequiredError's
+    schema is optional) must serialize to an empty list, not raise on a
+    None input - every flow step exercised elsewhere in this file happens
+    to carry a real schema, so this is exercised directly."""
+    assert _serialize_schema(None) == []
+
+
+async def test_statistics_duplicate_entry_raises_flow_aborted(hass: HomeAssistant):
+    """A real ABORT flow result (not the VoluptuousInvalid path the other
+    FlowAbortedError tests exercise) - HA's own schema-flow config entries
+    abort on an exact duplicate via _async_abort_entries_match."""
+    steps = {
+        "user": {"entity_id": "sensor.a", "name": "Test Statistics"},
+        "state_characteristic": {"state_characteristic": "mean"},
+        "options": {"sampling_size": 20, "precision": 2},
+    }
+    created = await create_derived_sensor(hass, "statistics", steps)
+    assert created["domain"] == "statistics"
+
+    with pytest.raises(FlowAbortedError, match="already_configured"):
+        await create_derived_sensor(hass, "statistics", steps)
 
 
 async def test_threshold_single_step(hass: HomeAssistant):

@@ -35,9 +35,11 @@ rules:
   config-flow-test-coverage:
     status: todo
     comment: >-
-      tests/test_config_flow.py covers the user and options flows well, but
-      the most recent CI coverage report shows config_flow.py at 94%, not
-      the 100% this rule expects.
+      config_flow.py is at 94% (1 line, 35), and it's not a missing test:
+      that line is dead code, made unreachable now that manifest.json's
+      single_config_entry causes HA core to abort a duplicate entry before
+      async_step_user ever runs. Reaching 100% needs a small cleanup PR to
+      remove the now-redundant abort branch, not another test.
   dependency-transparency: done
   docs-actions:
     status: exempt
@@ -108,20 +110,24 @@ rules:
       No credentials are required to set up or use the integration itself
       (the optional git-mirroring token lives in the options flow and is
       not needed for the integration to function).
-  test-coverage:
-    status: todo
-    comment: >-
-      Overall coverage is ~91% per the latest CI run, with some modules well
-      below that (file_manager.py ~64%, dashboard_manager.py ~71%) - not the
-      comprehensive coverage this rule expects.
+  test-coverage: done
+  # 99% overall (2796 stmts, 9 missing). Every module is at 100% except:
+  # file_manager.py (98%, 5 lines - confirmed dead/unreachable: an error
+  # code SecurityManager never actually returns, an unused private helper,
+  # and a double-failure cleanup path impractical to simulate),
+  # automation_manager.py/script_manager.py (99% each, 1 line - a
+  # "shouldn't happen" fallback after find_automation/find_script already
+  # confirmed presence, only reachable via a file-changing race), and
+  # derived_sensor_manager.py (99%, 1 line - a catch-all for a flow result
+  # type HA's SchemaConfigFlowHandler never actually produces for these
+  # domains). None of these are missing tests - see each one's own comment
+  # for why writing a test for it would be contrived.
 
   # Gold
   devices:
     status: exempt
     comment: No entity platforms are registered; nothing to attach to a device.
-  diagnostics:
-    status: todo
-    comment: No diagnostics.py exists yet.
+  diagnostics: done
   discovery-update-info:
     status: exempt
     comment: No discovery is possible or applicable for this integration type.

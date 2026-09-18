@@ -443,3 +443,140 @@ async def test_delete_automation_hash_conflict_raises(automation_manager, tmp_pa
             "abc",
             expected_hash="0000000000000000000000000000000000000000000000000000000000000000",
         )
+
+
+# --- _automation_list edge cases (via all_automations) ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_automations_empty_default_file_yields_nothing(
+    automation_manager, tmp_path
+):
+    """An empty automations.yaml parses to None, not []: _automation_list
+    must treat that as an empty list rather than raising or crashing."""
+    _write(tmp_path, "automations.yaml", "")
+
+    results = await automation_manager.all_automations()
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_all_automations_default_file_not_a_list_raises(
+    automation_manager, tmp_path
+):
+    """automations.yaml must be a list at its root - a mapping there is an
+    invalid configuration, and should be reported rather than silently
+    treated as having zero automations."""
+    _write(tmp_path, "automations.yaml", "homeassistant:\n  name: Test\n")
+
+    with pytest.raises(ValueError, match="does not contain a YAML list"):
+        await automation_manager.all_automations()
+
+
+@pytest.mark.asyncio
+async def test_all_automations_package_without_automation_key_yields_nothing(
+    automation_manager, tmp_path
+):
+    """A package file that doesn't define the `automation:` domain at all
+    (e.g. only helpers) contributes nothing, rather than erroring."""
+    _write(tmp_path, "packages/helpers_only.yaml", "input_boolean:\n  foo: {}\n")
+
+    results = await automation_manager.all_automations()
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_all_automations_package_automation_key_wrong_type_raises(
+    automation_manager, tmp_path
+):
+    """A package's `automation:` key must be a list or single mapping - any
+    other type (here, a bare scalar) is an invalid configuration."""
+    _write(tmp_path, "packages/broken.yaml", "automation: not_a_list_or_mapping\n")
+
+    with pytest.raises(ValueError, match="is not a list or mapping"):
+        await automation_manager.all_automations()
+
+
+# --- _load_document direct coverage -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_document_returns_none_for_missing_file(
+    automation_manager, tmp_path
+):
+    """_load_document's FileNotFoundError->None fallback exists for callers
+    reading a candidate file that may not have been created yet - exercised
+    directly since candidate_files() itself never returns a nonexistent path."""
+    document = await automation_manager._load_document("automations.yaml")
+
+    assert document is None
+
+
+# --- _build_content edge cases (via write_automation) -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_automation_into_empty_package_file(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Writing a new automation into a package file that exists but is
+    empty (no parsed document at all yet) must build a fresh document
+    rather than crashing on a None document."""
+    _write(tmp_path, "packages/empty.yaml", "")
+
+    result = await automation_manager.write_automation(
+        "first_one",
+        {"alias": "First", "trigger": [], "action": []},
+        package="empty.yaml",
+    )
+
+    assert result.location.file_path == "packages/empty.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/empty.yaml").read_text())
+    assert parsed["automation"][0]["id"] == "first_one"
+
+
+@pytest.mark.asyncio
+async def test_write_automation_appends_to_package_with_single_mapping_automation(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """A package whose `automation:` key is still a single mapping (not yet
+    a list) must be normalized to a list before appending the new automation,
+    rather than the new entry clobbering or corrupting the existing one."""
+    _write(
+        tmp_path,
+        "packages/single.yaml",
+        "automation:\n  id: existing_single\n  trigger: []\n  action: []\n",
+    )
+
+    result = await automation_manager.write_automation(
+        "new_id",
+        {"alias": "New", "trigger": [], "action": []},
+        package="single.yaml",
+    )
+
+    assert result.location.file_path == "packages/single.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/single.yaml").read_text())
+    ids = {entry["id"] for entry in parsed["automation"]}
+    assert ids == {"existing_single", "new_id"}
+
+
+@pytest.mark.asyncio
+async def test_write_automation_into_package_missing_automation_key(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """A package file with content but no `automation:` key at all must get
+    a fresh automation list built for it, alongside its existing content."""
+    _write(tmp_path, "packages/other_domain.yaml", "input_boolean:\n  foo: {}\n")
+
+    result = await automation_manager.write_automation(
+        "brand_new",
+        {"alias": "Brand new", "trigger": [], "action": []},
+        package="other_domain.yaml",
+    )
+
+    assert result.location.file_path == "packages/other_domain.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/other_domain.yaml").read_text())
+    assert parsed["automation"][0]["id"] == "brand_new"
+    assert parsed["input_boolean"]["foo"] == {}

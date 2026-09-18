@@ -3,6 +3,7 @@
 import logging
 
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -203,3 +204,18 @@ async def test_log_filters_offset_and_limit(hass: HomeAssistant, log_manager):
     # Pages should not overlap
     if len(page1_logs) > 0 and len(page2_logs) > 0:
         assert page1_logs[0].timestamp != page2_logs[0].timestamp
+
+
+async def test_get_core_logs_unexpected_error_wrapped_as_runtime_error(
+    hass: HomeAssistant, log_manager
+):
+    """An unexpected error while filtering the buffer should be wrapped,
+    not leaked raw."""
+    await _setup_system_log(hass)
+    await _seed_log_entries(hass)
+
+    with patch.object(
+        log_manager, "_apply_filters", side_effect=OSError("simulated filter failure")
+    ):
+        with pytest.raises(RuntimeError, match="Error retrieving logs"):
+            await log_manager.get_core_logs(LogFilters())

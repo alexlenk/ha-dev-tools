@@ -279,3 +279,107 @@ async def test_write_script_hash_conflict_raises(script_manager, tmp_path):
         await script_manager.write_script(
             "abc", {"alias": "changed", "sequence": []}, expected_hash="wrong-hash"
         )
+
+
+# --- _script_map edge cases (via all_scripts) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_scripts_empty_default_file_yields_nothing(script_manager, tmp_path):
+    """An empty scripts.yaml parses to None, not {}: _script_map must treat
+    that as an empty mapping rather than raising or crashing."""
+    _write(tmp_path, "scripts.yaml", "")
+
+    results = await script_manager.all_scripts()
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_all_scripts_default_file_not_a_mapping_raises(script_manager, tmp_path):
+    """scripts.yaml must be a mapping at its root - a list there is an
+    invalid configuration, and should be reported rather than silently
+    treated as having zero scripts."""
+    _write(tmp_path, "scripts.yaml", "- not\n- a\n- mapping\n")
+
+    with pytest.raises(ValueError, match="does not contain a YAML mapping"):
+        await script_manager.all_scripts()
+
+
+@pytest.mark.asyncio
+async def test_all_scripts_package_without_script_key_yields_nothing(
+    script_manager, tmp_path
+):
+    """A package file that doesn't define the `script:` domain at all
+    (e.g. only helpers) contributes nothing, rather than erroring."""
+    _write(tmp_path, "packages/helpers_only.yaml", "input_boolean:\n  foo: {}\n")
+
+    results = await script_manager.all_scripts()
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_all_scripts_package_script_key_wrong_type_raises(
+    script_manager, tmp_path
+):
+    """A package's `script:` key must be a mapping - any other type (here,
+    a bare scalar) is an invalid configuration."""
+    _write(tmp_path, "packages/broken.yaml", "script: not_a_mapping\n")
+
+    with pytest.raises(ValueError, match="is not a mapping"):
+        await script_manager.all_scripts()
+
+
+# --- _load_document direct coverage -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_document_returns_none_for_missing_file(script_manager, tmp_path):
+    """_load_document's FileNotFoundError->None fallback exists for callers
+    reading a candidate file that may not have been created yet - exercised
+    directly since candidate_files() itself never returns a nonexistent path."""
+    document = await script_manager._load_document("scripts.yaml")
+
+    assert document is None
+
+
+# --- _build_content edge cases (via write_script) ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_script_into_empty_package_file(
+    script_manager, tmp_path, mock_reload_service
+):
+    """Writing a new script into a package file that exists but is empty
+    (no parsed document at all yet) must build a fresh document rather
+    than crashing on a None document."""
+    _write(tmp_path, "packages/empty.yaml", "")
+
+    result = await script_manager.write_script(
+        "first_one", {"alias": "First", "sequence": []}, package="empty.yaml"
+    )
+
+    assert result.location.file_path == "packages/empty.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/empty.yaml").read_text())
+    assert parsed["script"]["first_one"]["alias"] == "First"
+
+
+@pytest.mark.asyncio
+async def test_write_script_into_package_missing_script_key(
+    script_manager, tmp_path, mock_reload_service
+):
+    """A package file with content but no `script:` key at all must get a
+    fresh script mapping built for it, alongside its existing content."""
+    _write(tmp_path, "packages/other_domain.yaml", "input_boolean:\n  foo: {}\n")
+
+    result = await script_manager.write_script(
+        "brand_new",
+        {"alias": "Brand new", "sequence": []},
+        package="other_domain.yaml",
+    )
+
+    assert result.location.file_path == "packages/other_domain.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/other_domain.yaml").read_text())
+    assert parsed["script"]["brand_new"]["alias"] == "Brand new"
+    assert parsed["input_boolean"]["foo"] == {}

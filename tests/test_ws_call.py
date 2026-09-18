@@ -9,6 +9,8 @@ mechanics, then a real
 class of component (helpers) this exists for.
 """
 
+import inspect
+
 import pytest
 import voluptuous as vol
 from homeassistant.components import websocket_api
@@ -16,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
+from custom_components.ha_dev_tools import ws_call
 from custom_components.ha_dev_tools.ws_call import (
     WebSocketCommandError,
     call_ws_command,
@@ -56,6 +59,13 @@ async def _echo_command(hass, connection, msg):
 @websocket_api.async_response
 async def _admin_only_command(hass, connection, msg):
     connection.send_result(msg["id"], {"ok": True})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "test/never_responds"})
+@websocket_api.async_response
+async def _never_responds_command(hass, connection, msg):
+    """A subscription-style handler that never resolves - the one case
+    call_ws_command explicitly doesn't support (see its docstring)."""
 
 
 @pytest.mark.asyncio
@@ -119,3 +129,41 @@ async def test_call_ws_command_against_real_input_boolean_crud(
 
     listed_after = await call_ws_command(hass, admin_user, "input_boolean/list")
     assert not any(item["id"] == item_id for item in listed_after)
+
+
+@pytest.mark.asyncio
+async def test_call_ws_command_times_out_for_a_handler_that_never_responds(
+    hass: HomeAssistant, admin_user
+):
+    """A streaming/subscription-style handler that never resolves must
+    raise TimeoutError with a clear message, not hang forever."""
+    websocket_api.async_register_command(hass, _never_responds_command)
+
+    with pytest.raises(TimeoutError, match="did not respond within"):
+        await call_ws_command(
+            hass, admin_user, "test/never_responds", timeout=0.01
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_ws_command_falls_back_without_annotation_format(
+    hass: HomeAssistant, admin_user, monkeypatch
+):
+    """Older Python interpreters (pre-3.14) have no inspect.Format at all -
+    this must fall back to a plain inspect.signature() call rather than
+    referencing inspect.Format unconditionally (see the module's own
+    comment on why a bare try/except doesn't work here)."""
+    websocket_api.async_register_command(hass, _echo_command)
+    real_signature = inspect.signature
+    forwardref = inspect.Format.FORWARDREF
+
+    def fake_signature(callable_, **kwargs):
+        assert kwargs == {}, "the no-Format fallback must not pass annotation_format"
+        return real_signature(callable_, annotation_format=forwardref)
+
+    monkeypatch.setattr(ws_call.inspect, "Format", None)
+    monkeypatch.setattr(ws_call.inspect, "signature", fake_signature)
+
+    result = await call_ws_command(hass, admin_user, "test/echo", value="hello")
+
+    assert result == {"echoed": "hello"}

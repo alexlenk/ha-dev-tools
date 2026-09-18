@@ -113,6 +113,76 @@ async def test_list_entities_includes_entities_without_unique_id(
 
 
 @pytest.mark.asyncio
+async def test_list_entities_ignores_non_dict_blocks_and_entities(
+    template_manager, tmp_path
+):
+    """A malformed template: block (a bare string instead of a mapping) or a
+    malformed entity entry (a bare string instead of a mapping) must be
+    skipped, not crash the whole listing - real config can be malformed
+    without HA itself having rejected it yet."""
+    _write(
+        tmp_path,
+        "configuration.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Good\n"
+        '        unique_id: good\n        state: "{{ 1 }}"\n'
+        "      - not_a_dict_entity\n"
+        "  - not_a_dict_block\n",
+    )
+
+    entities = await template_manager.list_entities()
+
+    assert [e["unique_id"] for e in entities] == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_find_entity_ignores_non_dict_blocks(template_manager, tmp_path):
+    """Same malformed-block tolerance as list_entities, for the
+    find_all_locations path used by find_entity/create_entity's duplicate check."""
+    _write(
+        tmp_path,
+        "configuration.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        '      - name: Good\n        unique_id: good\n        state: "{{ 1 }}"\n'
+        "  - not_a_dict_block\n",
+    )
+
+    location = await template_manager.find_entity("good")
+
+    assert location.file_path == "configuration.yaml"
+
+
+@pytest.mark.asyncio
+async def test_template_blocks_normalizes_single_mapping(template_manager, tmp_path):
+    """A `template:` key that's a single mapping (not yet a list) must be
+    normalized the same way automation_manager normalizes a single-mapping
+    `automation:` key."""
+    _write(
+        tmp_path,
+        "configuration.yaml",
+        "template:\n"
+        "  sensor:\n"
+        '    - name: Solo\n      unique_id: solo\n      state: "{{ 1 }}"\n',
+    )
+
+    entities = await template_manager.list_entities()
+
+    assert [e["unique_id"] for e in entities] == ["solo"]
+
+
+@pytest.mark.asyncio
+async def test_template_blocks_wrong_type_raises(template_manager, tmp_path):
+    """A `template:` key that's neither a list nor a mapping is an invalid
+    configuration, and should be reported rather than silently ignored."""
+    _write(tmp_path, "configuration.yaml", "template: not_a_list_or_mapping\n")
+
+    with pytest.raises(ValueError, match="is not a list or mapping"):
+        await template_manager.list_entities()
+
+
+@pytest.mark.asyncio
 async def test_list_entities_sanitizes_custom_yaml_tags(template_manager, tmp_path):
     """A !secret (or similar) value inside a template entity must not break JSON output."""
     _write(
@@ -129,6 +199,34 @@ async def test_list_entities_sanitizes_custom_yaml_tags(template_manager, tmp_pa
     entities = await template_manager.list_entities()
 
     assert entities[0]["config"]["state"] == "!secret my_secret_template"
+
+
+@pytest.mark.asyncio
+async def test_list_entities_sanitizes_custom_yaml_tags_inside_a_list(
+    template_manager, tmp_path
+):
+    """_to_plain must recurse into list values too, not just dict values -
+    a custom tag nested inside a list-typed config field (e.g. attributes)
+    must be sanitized the same way as one at the top level."""
+    _write(
+        tmp_path,
+        "configuration.yaml",
+        "template:\n"
+        "  - sensor:\n"
+        "      - name: Listy\n"
+        "        unique_id: listy\n"
+        '        state: "{{ 1 }}"\n'
+        "        attributes:\n"
+        "          - !secret my_secret_template\n"
+        "          - plain_value\n",
+    )
+
+    entities = await template_manager.list_entities()
+
+    assert entities[0]["config"]["attributes"] == [
+        "!secret my_secret_template",
+        "plain_value",
+    ]
 
 
 @pytest.mark.asyncio
@@ -335,6 +433,72 @@ async def test_create_entity_quotes_ambiguous_scalars(
 
     parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
     assert parsed["template"][-1]["triggers"][0]["to"] == "off"
+
+
+@pytest.mark.asyncio
+async def test_create_entity_into_empty_package_file(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Creating the first entity in a package file that exists but is
+    empty (no parsed document at all yet) must build a fresh document
+    rather than crashing on a None document."""
+    _write(tmp_path, "packages/empty.yaml", "")
+
+    result = await template_manager.create_entity(
+        "sensor",
+        {"name": "First", "unique_id": "first_one", "state": "{{ 1 }}"},
+        package="empty.yaml",
+    )
+
+    assert result.location.file_path == "packages/empty.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/empty.yaml").read_text())
+    assert parsed["template"][0]["sensor"][0]["unique_id"] == "first_one"
+
+
+@pytest.mark.asyncio
+async def test_create_entity_appends_to_package_with_single_mapping_template(
+    template_manager, tmp_path, mock_reload_service
+):
+    """A package whose `template:` key is still a single mapping (not yet
+    a list) must be normalized to a list before appending the new block,
+    same as _template_blocks does for reads."""
+    _write(
+        tmp_path,
+        "packages/single.yaml",
+        "template:\n"
+        "  sensor:\n"
+        '    - name: Existing\n      unique_id: existing\n      state: "{{ 1 }}"\n',
+    )
+
+    await template_manager.create_entity(
+        "sensor",
+        {"name": "New", "unique_id": "new_one", "state": "{{ 2 }}"},
+        package="single.yaml",
+    )
+
+    entities = await template_manager.list_entities()
+    unique_ids = {e["unique_id"] for e in entities}
+    assert unique_ids == {"existing", "new_one"}
+
+
+@pytest.mark.asyncio
+async def test_create_entity_reload_not_registered_returns_false(
+    template_manager, tmp_path, hass: HomeAssistant
+):
+    """When nothing has loaded the template integration yet (no prior
+    template: config or Template helper), the write must still succeed but
+    report reloaded=False rather than raising - see _reload_template's
+    docstring for why this is the expected first-ever-entity edge case."""
+    hass.services.async_remove("template", "reload")
+    _write(tmp_path, "packages/emhas.yaml", "template: []\n")
+
+    result = await template_manager.create_entity(
+        "sensor",
+        {"name": "New", "unique_id": "new_one", "state": "{{ 1 }}"},
+        package="emhas.yaml",
+    )
+
+    assert result.reloaded is False
 
 
 # --- update_entity ---------------------------------------------------------

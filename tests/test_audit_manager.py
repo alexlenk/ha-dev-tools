@@ -97,6 +97,55 @@ async def test_audit_finds_unavailable_entity_references(automation_manager, tmp
 
 
 @pytest.mark.asyncio
+async def test_audit_finds_unavailable_entities_in_entity_id_list(
+    automation_manager, tmp_path
+):
+    """entity_id can be a list of entity ids (e.g. a trigger watching
+    several entities at once), not just a single string - every unavailable
+    one in that list must be reported."""
+    automation_manager.hass.states.async_set("light.broken", "unavailable")
+    automation_manager.hass.states.async_set("light.fine", "on")
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: uses_broken_list\n"
+        "  trigger:\n"
+        "    - platform: state\n"
+        "      entity_id:\n"
+        "        - light.broken\n"
+        "        - light.fine\n"
+        "  action: []\n",
+    )
+
+    result = await audit_automations(automation_manager.hass, automation_manager)
+
+    finding = result["references_unavailable_entities"][0]
+    assert finding["unavailable_entities"] == ["light.broken"]
+
+
+@pytest.mark.asyncio
+async def test_audit_skips_automations_without_an_id(automation_manager, tmp_path):
+    """An automation entry with no `id:` at all can't be tracked for
+    duplicates or matched to a live automation.* entity - it's skipped
+    rather than crashing on a None key."""
+    automation_manager.hass.states.async_set("light.fine", "on")
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- alias: No id here\n"
+        "  trigger:\n"
+        "    - platform: state\n"
+        "      entity_id: light.fine\n"
+        "  action: []\n",
+    )
+
+    result = await audit_automations(automation_manager.hass, automation_manager)
+
+    assert result["automations_checked"] == 1
+    assert result["duplicate_ids"] == []
+
+
+@pytest.mark.asyncio
 async def test_audit_ignores_available_and_unknown_entities_not_referenced(
     automation_manager, tmp_path
 ):
