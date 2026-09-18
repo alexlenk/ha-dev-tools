@@ -32,6 +32,7 @@ from . import (
     helper_manager,
     history_manager,
     mirror,
+    mqtt_manager,
     supervisor_manager,
     template_manager,
     write_confirmation,
@@ -628,6 +629,52 @@ class DeleteEntitiesTool(WriteGatedTool):
             )
             response["mirror"] = _mirror_result_payload(mirror_result)
         return response
+
+
+class ListMqttTopicsTool(GatedTool):
+    """Read-only, time-bounded MQTT topic snapshot - see mqtt_manager.py."""
+
+    name = "list_mqtt_topics"
+    description = (
+        "Subscribe to an MQTT topic filter for a short window and report "
+        "the last message seen on each matching topic - the only way to "
+        "discover a *retained* MQTT message's existence, since MQTT has "
+        "no 'list retained messages' query; retained messages are always "
+        "delivered immediately on subscribe, before any new live "
+        "traffic, which is what this relies on. Useful for tracing a "
+        "'ghost' entity (a live state with no entity registry entry - "
+        "delete_entity/delete_entities can't touch these, there's no "
+        "registry entry to remove) back to the MQTT topic keeping it "
+        "alive. Read-only - never publishes anything. The default topic "
+        "'homeassistant/#' is Home Assistant's own MQTT *discovery* "
+        "prefix, not where a plain YAML-configured MQTT sensor's state "
+        "lives - point `topic` at the actual topic tree instead (e.g. "
+        "'watermeter/#') once you know or suspect it from the entity's "
+        "own naming. Raises if the mqtt integration isn't configured on "
+        "this instance."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("topic", default=mqtt_manager.DEFAULT_TOPIC): str,
+            vol.Optional("timeout", default=mqtt_manager.DEFAULT_TIMEOUT): vol.All(
+                vol.Coerce(float), vol.Range(min=0.5, max=mqtt_manager.MAX_TIMEOUT)
+            ),
+            vol.Optional("limit", default=mqtt_manager.DEFAULT_LIMIT): int,
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Listen on the given topic filter and report what showed up."""
+        try:
+            return await mqtt_manager.list_topics(hass, **tool_input.tool_args)
+        except mqtt_manager.MqttNotAvailableError as exc:
+            return _tool_error(exc)
 
 
 class RenderTemplateTool(GatedTool):
@@ -2286,6 +2333,7 @@ class DevToolsAPI(llm.API):
                 EntityHealthReportTool(),
                 DeleteEntityTool(),
                 DeleteEntitiesTool(),
+                ListMqttTopicsTool(),
                 RenderTemplateTool(),
                 ValidateTemplateTool(),
                 GetLogsTool(self.log_manager),

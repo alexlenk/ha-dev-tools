@@ -61,6 +61,7 @@ from custom_components.ha_dev_tools.derived_sensor_manager import (
 )
 from custom_components.ha_dev_tools.file_manager import FileManager
 from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
+from custom_components.ha_dev_tools.mqtt_manager import MqttNotAvailableError
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
@@ -81,6 +82,7 @@ from custom_components.ha_dev_tools.llm_api import (
     GetLogbookTool,
     GetScriptTool,
     ListDerivedSensorsTool,
+    ListMqttTopicsTool,
     ListScriptsTool,
     ReloadDerivedSensorTool,
     UpdateDerivedSensorTool,
@@ -175,6 +177,7 @@ async def test_dev_tools_real_tools_registered(
         "entity_health_report",
         "delete_entity",
         "delete_entities",
+        "list_mqtt_topics",
         "render_template",
         "validate_template",
         "get_logs",
@@ -564,6 +567,59 @@ async def test_delete_entities_tool_mirrors_one_combined_commit_pair(
         {"deleted": True, "entity_id": "light.kitchen_light"},
         {"deleted": True, "entity_id": "light.bedroom_light"},
     ]
+
+
+# --- ListMqttTopicsTool -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_mqtt_topics_tool_calls_manager(hass: HomeAssistant):
+    tool = ListMqttTopicsTool()
+    mock_list_topics = AsyncMock(
+        return_value={
+            "topic_filter": "watermeter/#",
+            "topics": {
+                "watermeter/uptime": {"payload": "1234", "retain": True, "qos": 0}
+            },
+            "count": 1,
+            "truncated": False,
+        }
+    )
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.mqtt_manager.list_topics",
+        mock_list_topics,
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(
+                tool_name="list_mqtt_topics",
+                tool_args={"topic": "watermeter/#", "timeout": 3.0, "limit": 200},
+            ),
+            _llm_context(),
+        )
+
+    assert result["count"] == 1
+    mock_list_topics.assert_called_once_with(
+        hass, topic="watermeter/#", timeout=3.0, limit=200
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_mqtt_topics_tool_not_available_returns_tool_error(
+    hass: HomeAssistant,
+):
+    tool = ListMqttTopicsTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.mqtt_manager.list_topics",
+        AsyncMock(side_effect=MqttNotAvailableError("mqtt isn't configured")),
+    ):
+        result = await tool._run(
+            hass,
+            llm.ToolInput(tool_name="list_mqtt_topics", tool_args={}),
+            _llm_context(),
+        )
+
+    assert result["error_type"] == "MqttNotAvailableError"
 
 
 # --- GetAutomationTool / currently_enabled ----------------------------------
