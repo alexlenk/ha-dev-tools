@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-09-18
+
+### Added
+- Git mirroring now covers storage-defined helpers (issue #43): `create_helper`/`update_helper`/`delete_helper` push their `.storage/<domain>` before/after content the same as every other mirrored write tool. HA's generic helper storage collection debounces its own save 10 seconds (`helpers/collection.py`'s `StorageCollection._async_schedule_save()`), so reading the file again right after a write would almost always capture stale, pre-write content - worse than not mirroring at all for something meant to be a rollback source. Instead, the "after" content is reconstructed entirely in memory: the last-known "before" content (from `_read_storage_file`, read *before* the write) has the write's own known result (the WS command's returned item for create/update, just the deleted id for delete) spliced into its `data.items` list directly - never by reading the file again. Confirmed directly against `home-assistant/core` source that every helper storage file shares the same shape and that `"id"` (`CONF_ID`) is every item's identifier key uniformly, not domain-specific.
+
 ## [2.10.0] - 2026-09-18
 
 ### Added
