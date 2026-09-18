@@ -288,7 +288,9 @@ async def test_delete_entity_tool_confirm_flow_removes_from_registry(
 ):
     _arm(hass)
     entity_reg = er.async_get(hass)
-    entity_reg.async_get_or_create("light", "test", "kitchen_light")
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
     tool = DeleteEntityTool()
     args = {"entity_id": "light.kitchen_light"}
 
@@ -328,7 +330,9 @@ async def test_delete_entity_tool_not_found_returns_tool_error(hass: HomeAssista
 @pytest.mark.asyncio
 async def test_delete_entity_tool_no_mirror_key_when_disabled(hass: HomeAssistant):
     entity_reg = er.async_get(hass)
-    entity_reg.async_get_or_create("light", "test", "kitchen_light")
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
     tool = DeleteEntityTool()
 
     result = await tool._write(
@@ -360,7 +364,9 @@ async def test_delete_entity_tool_mirrors_registry_snapshot_then_tombstone(
         },
     )
     entity_reg = er.async_get(hass)
-    entity_reg.async_get_or_create("light", "test", "kitchen_light")
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
     entity_reg.async_update_entity("light.kitchen_light", name="Kitchen Light")
     tool = DeleteEntityTool()
     fake_session = _FakeMirrorSession(
