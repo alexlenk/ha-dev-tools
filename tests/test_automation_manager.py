@@ -317,3 +317,129 @@ async def test_write_automation_hash_conflict_raises(automation_manager, tmp_pat
             {"alias": "changed", "trigger": [], "action": []},
             expected_hash="0000000000000000000000000000000000000000000000000000000000000000",
         )
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_removes_from_default_file(
+    automation_manager, tmp_path, mock_reload_service
+):
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: keep\n  alias: Keep\n  trigger: []\n  action: []\n"
+        "- id: gone\n  alias: Gone\n  trigger: []\n  action: []\n",
+    )
+
+    result = await automation_manager.delete_automation("gone")
+
+    assert result.location.file_path == "automations.yaml"
+    assert "gone" not in result.content_after
+    mock_reload_service.assert_called_once()
+
+    parsed = pyyaml.safe_load((tmp_path / "automations.yaml").read_text())
+    ids = {entry["id"] for entry in parsed}
+    assert ids == {"keep"}
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_removes_from_package_preserves_other_content(
+    automation_manager, tmp_path, mock_reload_service
+):
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "# EMHAS package - hand maintained, do not reformat\n"
+        "automation:\n"
+        "  - id: keep\n    trigger: []\n    action: []\n"
+        "  - id: gone\n    trigger: []\n    action: []\n"
+        "input_boolean:\n  unrelated_helper: {}\n",
+    )
+
+    result = await automation_manager.delete_automation("gone")
+
+    assert result.location.file_path == "packages/emhas.yaml"
+    assert result.location.is_package is True
+
+    raw = (tmp_path / "packages/emhas.yaml").read_text()
+    assert "# EMHAS package - hand maintained, do not reformat" in raw
+    assert "unrelated_helper" in raw
+
+    parsed = pyyaml.safe_load(raw)
+    ids = {entry["id"] for entry in parsed["automation"]}
+    assert ids == {"keep"}
+    assert parsed["input_boolean"]["unrelated_helper"] == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_removes_single_mapping_automation_from_package(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """A package's `automation:` key can be a single mapping instead of a
+    list (HA allows both) - deleting the only automation there should
+    normalize it to a list the same way write_automation's _build_content
+    does, leaving an empty list rather than raising."""
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "automation:\n  id: gone\n  trigger: []\n  action: []\n"
+        "input_boolean:\n  unrelated_helper: {}\n",
+    )
+
+    result = await automation_manager.delete_automation("gone")
+
+    assert result.location.file_path == "packages/emhas.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
+    assert parsed["automation"] == []
+    assert parsed["input_boolean"]["unrelated_helper"] == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_dry_run_computes_content_without_writing(
+    automation_manager, tmp_path, mock_reload_service
+):
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: target\n  alias: Target\n  trigger: []\n  action: []\n",
+    )
+
+    result = await automation_manager.delete_automation("target", dry_run=True)
+
+    assert "target" not in result.content_after
+    # Nothing live actually changed:
+    assert "target" in (tmp_path / "automations.yaml").read_text()
+    mock_reload_service.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_not_found_raises(automation_manager, tmp_path):
+    _write(tmp_path, "automations.yaml", "- id: abc\n  trigger: []\n  action: []\n")
+
+    with pytest.raises(AutomationNotFoundError):
+        await automation_manager.delete_automation("does_not_exist")
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_duplicate_id_refuses_to_guess(
+    automation_manager, tmp_path
+):
+    _write(tmp_path, "automations.yaml", "- id: dup\n  trigger: []\n  action: []\n")
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "automation:\n  - id: dup\n    trigger: []\n    action: []\n",
+    )
+
+    with pytest.raises(DuplicateAutomationIdError):
+        await automation_manager.delete_automation("dup")
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_hash_conflict_raises(automation_manager, tmp_path):
+    _write(tmp_path, "automations.yaml", "- id: abc\n  trigger: []\n  action: []\n")
+
+    with pytest.raises(ValueError, match="Hash conflict"):
+        await automation_manager.delete_automation(
+            "abc",
+            expected_hash="0000000000000000000000000000000000000000000000000000000000000000",
+        )

@@ -980,6 +980,88 @@ class WriteAutomationTool(WriteGatedTool):
         )
 
 
+class DeleteAutomationTool(WriteGatedTool):
+    """Layout-aware, package-safe automation delete - see docs/ARCHITECTURE.md."""
+
+    name = "delete_automation"
+    description = (
+        "Delete an automation by id, resolving which file actually defines "
+        "it (default file or a package) first - refuses to guess if the id "
+        "isn't found or is defined in more than one file, rather than "
+        "silently no-oping or deleting the wrong one. Always reloads "
+        "automations afterward - never requires a restart. Pass "
+        "expected_hash (from get_file_metadata or a prior read) to detect "
+        "concurrent edits."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("automation_id"): str,
+            vol.Optional("expected_hash"): str,
+        }
+    )
+
+    def __init__(self, automation_manager: AutomationManager) -> None:
+        """Init with the AutomationManager backing this tool."""
+        self._manager = automation_manager
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete the automation from its correct file and reload."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.delete_automation(
+                args["automation_id"],
+                expected_hash=args.get("expected_hash"),
+            )
+        except (AutomationNotFoundError, DuplicateAutomationIdError, ValueError) as exc:
+            return _tool_error(exc)
+        response: JsonObjectType = {
+            "deleted": True,
+            "file_path": result.location.file_path,
+            "is_package": result.location.is_package,
+        }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
+
+    @override
+    async def _dry_run_mirror(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> mirror.MirrorResult | None:
+        """Compute this call's would-be (post-delete) content and mirror it
+        to a proposed/automation-<id> branch, same pattern as
+        WriteAutomationTool's identical hook."""
+        args = tool_input.tool_args
+        try:
+            result = await self._manager.delete_automation(
+                args["automation_id"],
+                expected_hash=args.get("expected_hash"),
+                dry_run=True,
+            )
+        except (AutomationNotFoundError, DuplicateAutomationIdError, ValueError) as exc:
+            return mirror.MirrorResult(mirrored=False, reason=str(exc))
+        return await mirror.mirror_dry_run(
+            hass,
+            path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+            kind="automation",
+            entity_id=args["automation_id"],
+        )
+
+
 def _helper_domain_schema() -> vol.Schema:
     return vol.In(HELPER_DOMAINS)
 
@@ -2088,6 +2170,7 @@ class DevToolsAPI(llm.API):
                 ReloadDomainTool(),
                 GetAutomationTool(self.automation_manager),
                 WriteAutomationTool(self.automation_manager),
+                DeleteAutomationTool(self.automation_manager),
                 AuditAutomationsTool(self.automation_manager),
                 ListScriptsTool(self.script_manager),
                 GetScriptTool(self.script_manager),

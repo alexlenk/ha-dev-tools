@@ -408,6 +408,91 @@ class AutomationManager:
             content_after=content_after,
         )
 
+    async def delete_automation(
+        self,
+        automation_id: str,
+        *,
+        expected_hash: str | None = None,
+        dry_run: bool = False,
+    ) -> AutomationWriteResult:
+        """Delete an automation by id, writing through the correct file.
+
+        Resolves which file actually defines it first (find_automation) -
+        raises AutomationNotFoundError if the id doesn't exist,
+        DuplicateAutomationIdError if it's defined in more than one file,
+        rather than guessing. `expected_hash` and `dry_run` behave exactly
+        the same as write_automation's identical parameters.
+        """
+        location = await self.find_automation(automation_id)
+        content_before = await self.file_manager.read_file(location.file_path)
+        document = await self.hass.async_add_executor_job(_load_yaml, content_before)
+        content_after = await self.hass.async_add_executor_job(
+            self._build_delete_content, location, document, automation_id
+        )
+
+        if dry_run:
+            return AutomationWriteResult(
+                location=location,
+                content_before=content_before,
+                content_after=content_after,
+            )
+
+        await self.file_manager.write_file(
+            location.file_path,
+            content_after,
+            expected_hash=expected_hash,
+            validate_before_write=True,
+        )
+
+        await self.hass.services.async_call("automation", "reload", blocking=True)
+        _LOGGER.info(
+            "Deleted automation '%s' from %s and reloaded automations",
+            automation_id,
+            location.file_path,
+        )
+        return AutomationWriteResult(
+            location=location,
+            content_before=content_before,
+            content_after=content_after,
+        )
+
+    def _build_delete_content(
+        self,
+        location: AutomationLocation,
+        document: Any,
+        automation_id: str,
+    ) -> str:
+        """Synchronous: remove the automation from its document, return the new file content.
+
+        Unlike _build_content, this never needs to handle a missing/empty
+        document or automation list - find_automation() (called by every
+        caller before this) already confirmed automation_id lives in
+        location.file_path, so document and its automation list are always
+        already there. The one normalization still needed is a package's
+        single-mapping `automation:` form (vs. a list) - see
+        _automation_list's docstring.
+        """
+        yaml = _new_yaml()
+
+        if location.file_path == DEFAULT_AUTOMATIONS_FILE:
+            automations = document
+        else:
+            automations = document.get("automation")
+            if isinstance(automations, dict):
+                automations = CommentedSeq([automations])
+                document["automation"] = automations
+
+        for i, entry in enumerate(automations):
+            if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
+                del automations[i]
+                break
+
+        from io import StringIO
+
+        buffer = StringIO()
+        yaml.dump(document, buffer)
+        return buffer.getvalue()
+
     def _build_content(
         self,
         location: AutomationLocation,

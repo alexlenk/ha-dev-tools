@@ -66,6 +66,7 @@ from custom_components.ha_dev_tools.llm_api import (
     CreateDerivedSensorTool,
     CreateHelperTool,
     CreateTemplateEntityTool,
+    DeleteAutomationTool,
     DeleteDerivedSensorTool,
     DeleteHelperTool,
     DeleteTemplateEntityTool,
@@ -180,6 +181,7 @@ async def test_dev_tools_real_tools_registered(
         "reload_domain",
         "get_automation",
         "write_automation",
+        "delete_automation",
         "audit_automations",
         "list_scripts",
         "get_script",
@@ -2034,6 +2036,226 @@ async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabl
 
     assert result["dry_run"] is True
     assert "mirror" not in result
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_confirm_flow_deletes_and_reloads(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    reload_mock = AsyncMock()
+    hass.services.async_register("automation", "reload", reload_mock)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: gone\n  alias: Gone\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "gone"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["deleted"] is True
+    assert result["file_path"] == "automations.yaml"
+    reload_mock.assert_called_once()
+    assert "gone" not in (tmp_path / "automations.yaml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_not_found_returns_tool_error(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """AutomationNotFoundError from the manager becomes a _tool_error()
+    payload, not a raw exception escaping the tool."""
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: keep\n  alias: Keep\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "does_not_exist"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["error_type"] == "AutomationNotFoundError"
+    assert "does_not_exist" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_dry_run_not_found_skips_mirror(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    """Same not-found handling in the dry-run + mirroring hook: the error
+    becomes a not-mirrored MirrorResult rather than escaping, and
+    mirror.mirror_dry_run is never reached."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_DRY_RUN: True,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: keep\n  alias: Keep\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "does_not_exist"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["dry_run"] is True
+    assert result["mirror"]["mirrored"] is False
+    assert "does_not_exist" in result["mirror"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_mirrors_when_enabled(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    hass.services.async_register("automation", "reload", AsyncMock())
+    (tmp_path / "automations.yaml").write_text(
+        "- id: gone\n  alias: Gone\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "gone"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            # content_before is the real (non-None) file content, and the
+            # mirror repo has nothing recorded yet (404 above) -
+            # _sync_before treats that as drift and pushes a before-commit
+            # first, same as any other mirrored write.
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-before"}}),  # PUT before
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["before", "after"]
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_dry_run_mirrors_to_proposed_branch(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    """Same dry-run + mirroring behavior as write_automation's equivalent
+    test (issue #35) - delete_automation's _dry_run_mirror hook reuses
+    delete_automation's own resolve+build logic via dry_run=True."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_DRY_RUN: True,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n  alias: Old\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "my_automation"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # _sync_before GET current -> none
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT before
+            _FakeMirrorResponse(200, {"object": {"sha": "main-sha"}}),  # GET ref/main
+            _FakeMirrorResponse(404),  # GET ref/proposed -> doesn't exist
+            _FakeMirrorResponse(201),  # POST create ref
+            _FakeMirrorResponse(404),  # GET current on proposed branch
+            _FakeMirrorResponse(201, {"content": {"sha": "sha-2"}}),  # PUT proposed
+        ]
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["dry_run"] is True
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["branch"] == "proposed/automation-my_automation"
+    assert result["mirror"]["commits"] == ["before", "proposed"]
+    # Nothing live actually changed:
+    assert "my_automation" in (tmp_path / "automations.yaml").read_text()
 
 
 def _write_script_manager(hass: HomeAssistant, tmp_path) -> ScriptManager:
