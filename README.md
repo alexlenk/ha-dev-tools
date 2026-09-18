@@ -151,10 +151,14 @@ repository.
    removing anything, so its last real config stays visible in the mirror
    repo's own git history. `delete_entity` works the same way for the
    entity registry: it's a soft delete on Home Assistant's own side (see
-   the tool's own description), but that only protects orphaned entries
-   for 30 days - the entry's full registry data (name, area, labels,
-   options, ...) gets pushed to a synthetic `entities/<entity_id>.json`
-   path first, so it isn't lost once that window passes.
+   the tool's own description) regardless of mirroring, but HA's own
+   safety net only protects orphaned entries for 30 days - that's true
+   whether or not you ever turn mirroring on. Only *with* mirroring
+   enabled does the entry's full registry data (name, area, labels,
+   options, ...) also get pushed to a synthetic
+   `entities/<entity_id>.json` path first, so it isn't lost once that
+   30-day window passes; with mirroring off, `delete_entity` has no
+   backup beyond that same 30-day window.
 
    **With dry-run mode also on:** `write_automation`, `delete_automation`,
    `write_script`, and the template-entity tools still mirror something
@@ -235,7 +239,7 @@ matters for setup, covered below.
 | Tool | What it does |
 |---|---|
 | `list_helpers` / `create_helper` / `update_helper` / `delete_helper` | CRUD for storage-defined helpers (`input_boolean`, `counter`, `timer`, ...) |
-| `delete_entity` | Soft-delete an entity from the entity registry - Home Assistant reconnects it automatically if the same integration re-registers it later; only truly orphaned entries are purged for good, after 30 days |
+| `delete_entity` | Soft-delete an entity from the entity registry - Home Assistant reconnects it automatically if the same integration re-registers it later; only truly orphaned entries are purged for good, after 30 days. That 30-day window is Home Assistant's own behavior, not something this tool adds - a backup past it only happens if git mirroring (below) is also turned on |
 | `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) plus the general-purpose Template helper (any entity domain - light, switch, sensor, ...) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create) |
 | `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. For the config-entry Template *helper* instead, see the row above |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction) |
