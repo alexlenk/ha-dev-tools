@@ -308,3 +308,21 @@ def delete_entity(hass: HomeAssistant, entity_id: str) -> dict[str, Any]:
         raise EntityNotFoundError(f"No entity with id '{entity_id}' found")
     entity_reg.async_remove(entity_id)
     return {"deleted": True, "entity_id": entity_id}
+
+
+def delete_entities(hass: HomeAssistant, entity_ids: list[str]) -> dict[str, Any]:
+    """Soft-delete multiple entities from the entity registry in one call.
+
+    Validates every id resolves before removing any of them - a typo
+    partway through a long list shouldn't silently delete everything up
+    to that point and stop; the caller finds out up front and can fix
+    the list, same "refuse to guess" philosophy as delete_automation's
+    duplicate/not-found handling.
+    """
+    entity_reg = er.async_get(hass)
+    missing = [eid for eid in entity_ids if entity_reg.async_get(eid) is None]
+    if missing:
+        raise EntityNotFoundError(f"No entity with id(s): {', '.join(missing)}")
+    for entity_id in entity_ids:
+        entity_reg.async_remove(entity_id)
+    return {"deleted": True, "entity_ids": list(entity_ids)}

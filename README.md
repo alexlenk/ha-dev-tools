@@ -91,7 +91,7 @@ repository.
    `create_helper`/`update_helper`/`delete_helper`,
    `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`,
    `create_template_entity`/`update_template_entity`/`delete_template_entity`,
-   `delete_entity`, and `write_dashboard` never write on their first call - they return a
+   `delete_entity`/`delete_entities`, and `write_dashboard` never write on their first call - they return a
    preview of what would be applied plus a short-lived `confirm_token`.
    Only a second call with the
    identical arguments plus that `confirm_token` actually proceeds. This
@@ -139,7 +139,7 @@ repository.
    `create_template_entity`/`update_template_entity`/`delete_template_entity`,
    `write_dashboard`, `create_helper`/`update_helper`/`delete_helper`,
    `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`,
-   `delete_entity`.
+   `delete_entity`/`delete_entities`.
    HA's helper storage debounces its save 10 seconds, so reading the
    file right after a helper write would capture stale, pre-write
    content - instead, the mirrored "after" content is reconstructed in
@@ -158,7 +158,12 @@ repository.
    options, ...) also get pushed to a synthetic
    `entities/<entity_id>.json` path first, so it isn't lost once that
    30-day window passes; with mirroring off, `delete_entity` has no
-   backup beyond that same 30-day window.
+   backup beyond that same 30-day window. `delete_entities` (plural)
+   does the same thing for a whole list of entity_ids in one propose/
+   confirm pair - a bulk cleanup (e.g. every leftover entity from a
+   replaced device) pushes exactly one combined before/after commit
+   pair for the entire batch, not one pair per entity, so a large batch
+   doesn't flood the mirror repo with commits.
 
    **With dry-run mode also on:** `write_automation`, `delete_automation`,
    `write_script`, and the template-entity tools still mirror something
@@ -240,6 +245,7 @@ matters for setup, covered below.
 |---|---|
 | `list_helpers` / `create_helper` / `update_helper` / `delete_helper` | CRUD for storage-defined helpers (`input_boolean`, `counter`, `timer`, ...) |
 | `delete_entity` | Soft-delete an entity from the entity registry - Home Assistant reconnects it automatically if the same integration re-registers it later; only truly orphaned entries are purged for good, after 30 days. That 30-day window is Home Assistant's own behavior, not something this tool adds - a backup past it only happens if git mirroring (below) is also turned on |
+| `delete_entities` | Same as `delete_entity`, for a list of entity_ids in one propose/confirm pair - for bulk cleanup, avoids one round trip (and one mirror commit pair) per entity |
 | `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) plus the general-purpose Template helper (any entity domain - light, switch, sensor, ...) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create) |
 | `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. For the config-entry Template *helper* instead, see the row above |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction) |
