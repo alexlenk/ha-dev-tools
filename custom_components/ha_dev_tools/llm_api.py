@@ -565,6 +565,71 @@ class DeleteEntityTool(WriteGatedTool):
         return response
 
 
+def _entities_batch_mirror_path() -> str:
+    return f"entities/batch-{dt_util.utcnow().strftime('%Y%m%dT%H%M%SZ')}.json"
+
+
+class DeleteEntitiesTool(WriteGatedTool):
+    """Batch soft-delete for multiple entities in one confirm - see entity_manager.py."""
+
+    name = "delete_entities"
+    description = (
+        "Delete multiple entities from the entity registry in a single "
+        "propose/confirm pair, for bulk cleanup (e.g. every leftover "
+        "entity from a replaced device) - avoids the round-trip cost of "
+        "calling delete_entity once per id. Same soft-delete behavior as "
+        "delete_entity (see its description) for each entity. Refuses to "
+        "delete any of them if even one entity_id in the list doesn't "
+        "resolve, rather than guessing which ones you meant - fix the "
+        "list and retry. If mirroring is enabled, every entity's "
+        "registry data is pushed together as one combined backup commit "
+        "(not one per entity), so a large batch doesn't flood the mirror "
+        "repo with commits."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {vol.Required("entity_ids"): vol.All([str], vol.Length(min=1))}
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete all entities from the registry, mirroring one combined backup first if enabled."""
+        entity_ids = tool_input.tool_args["entity_ids"]
+        entity_reg = er.async_get(hass)
+        # Only fetched when mirroring is on - same reasoning as
+        # DeleteEntityTool's identical guard.
+        before_entries = (
+            {eid: entity_reg.async_get(eid) for eid in entity_ids}
+            if mirror.is_mirror_enabled(hass)
+            else None
+        )
+        try:
+            result = entity_manager.delete_entities(hass, entity_ids)
+        except entity_manager.EntityNotFoundError as exc:
+            return _tool_error(exc)
+        response: JsonObjectType = dict(result)
+        if mirror.is_mirror_enabled(hass):
+            before_snapshot = [
+                entity_manager.entity_registry_snapshot(before_entries[eid])
+                for eid in entity_ids
+            ]
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=_entities_batch_mirror_path(),
+                content_before=json.dumps(before_snapshot),
+                content_after=json.dumps(
+                    [{"deleted": True, "entity_id": eid} for eid in entity_ids]
+                ),
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
+
+
 class RenderTemplateTool(GatedTool):
     """Render a Jinja2 template against live state - the core author/iterate loop primitive."""
 
@@ -2220,6 +2285,7 @@ class DevToolsAPI(llm.API):
                 FindEntitiesTool(),
                 EntityHealthReportTool(),
                 DeleteEntityTool(),
+                DeleteEntitiesTool(),
                 RenderTemplateTool(),
                 ValidateTemplateTool(),
                 GetLogsTool(self.log_manager),

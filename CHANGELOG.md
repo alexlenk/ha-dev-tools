@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-09-18
+
+### Added
+- `delete_entities` - a real gap surfaced by a real bulk cleanup: removing 55 stale entities left behind by a replaced device via `delete_entity` one at a time took ~110+ tool calls (a mandatory propose/confirm pair per entity), tens of thousands of tokens, and produced up to 110 separate mirror commits. `delete_entities` accepts a list of `entity_id`s under one propose/confirm pair - refuses to delete any of them if even one id doesn't resolve, rather than guessing which ones were meant (a typo partway through a long list shouldn't silently delete everything up to that point). If git mirroring is enabled, every entity's registry snapshot is pushed together as one combined before/after commit pair - not one pair per entity - so a large batch doesn't flood the mirror repository. `delete_entity` (singular) is unchanged and still the right tool for a one-off removal.
+
 ## [2.14.0] - 2026-09-18
 
 ### Added

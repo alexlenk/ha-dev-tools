@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_dev_tools.entity_manager import (
     EntityNotFoundError,
+    delete_entities,
     delete_entity,
     entity_health_report,
     entity_registry_snapshot,
@@ -257,6 +258,41 @@ async def test_delete_entity_removes_from_registry(hass: HomeAssistant):
 async def test_delete_entity_not_found_raises(hass: HomeAssistant):
     with pytest.raises(EntityNotFoundError):
         delete_entity(hass, "light.does_not_exist")
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_removes_all_from_registry(hass: HomeAssistant):
+    _register_entity(hass, "light.kitchen")
+    _register_entity(hass, "light.bedroom")
+    _register_entity(hass, "switch.fan")
+
+    result = delete_entities(hass, ["light.kitchen", "light.bedroom", "switch.fan"])
+
+    assert result == {
+        "deleted": True,
+        "entity_ids": ["light.kitchen", "light.bedroom", "switch.fan"],
+    }
+    entity_reg = er.async_get(hass)
+    assert entity_reg.async_get("light.kitchen") is None
+    assert entity_reg.async_get("light.bedroom") is None
+    assert entity_reg.async_get("switch.fan") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_refuses_all_if_one_not_found(hass: HomeAssistant):
+    """A typo in a long list shouldn't silently delete everything up to
+    that point - validates every id first, deletes none if any is missing."""
+    _register_entity(hass, "light.kitchen")
+    _register_entity(hass, "light.bedroom")
+
+    with pytest.raises(EntityNotFoundError, match="light.does_not_exist"):
+        delete_entities(
+            hass, ["light.kitchen", "light.does_not_exist", "light.bedroom"]
+        )
+
+    entity_reg = er.async_get(hass)
+    assert entity_reg.async_get("light.kitchen") is not None
+    assert entity_reg.async_get("light.bedroom") is not None
 
 
 @pytest.mark.asyncio

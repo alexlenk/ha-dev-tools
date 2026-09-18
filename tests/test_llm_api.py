@@ -69,6 +69,7 @@ from custom_components.ha_dev_tools.llm_api import (
     CreateTemplateEntityTool,
     DeleteAutomationTool,
     DeleteDerivedSensorTool,
+    DeleteEntitiesTool,
     DeleteEntityTool,
     DeleteHelperTool,
     DeleteTemplateEntityTool,
@@ -173,6 +174,7 @@ async def test_dev_tools_real_tools_registered(
         "find_entities",
         "entity_health_report",
         "delete_entity",
+        "delete_entities",
         "render_template",
         "validate_template",
         "get_logs",
@@ -402,6 +404,166 @@ async def test_delete_entity_tool_mirrors_registry_snapshot_then_tombstone(
     put_after_json = fake_session.calls[-1][2]["json"]["content"]
     after_content = json.loads(base64.b64decode(put_after_json))
     assert after_content == {"deleted": True, "entity_id": "light.kitchen_light"}
+
+
+# --- DeleteEntitiesTool -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_tool_confirm_flow_removes_all_from_registry(
+    hass: HomeAssistant, admin_user
+):
+    _arm(hass)
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    entity_reg.async_get_or_create(
+        "light", "test", "bedroom_light", suggested_object_id="bedroom_light"
+    )
+    tool = DeleteEntitiesTool()
+    args = {"entity_ids": ["light.kitchen_light", "light.bedroom_light"]}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_entities", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_entities", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result == {
+        "deleted": True,
+        "entity_ids": ["light.kitchen_light", "light.bedroom_light"],
+    }
+    assert entity_reg.async_get("light.kitchen_light") is None
+    assert entity_reg.async_get("light.bedroom_light") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_tool_not_found_returns_tool_error_deletes_none(
+    hass: HomeAssistant,
+):
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    tool = DeleteEntitiesTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_entities",
+            tool_args={"entity_ids": ["light.kitchen_light", "light.does_not_exist"]},
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "EntityNotFoundError"
+    # Refused as a whole - the one valid id wasn't deleted either.
+    assert entity_reg.async_get("light.kitchen_light") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_tool_no_mirror_key_when_disabled(hass: HomeAssistant):
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    tool = DeleteEntitiesTool()
+
+    result = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_entities",
+            tool_args={"entity_ids": ["light.kitchen_light"]},
+        ),
+        _llm_context(),
+    )
+
+    assert result["deleted"] is True
+    assert "mirror" not in result
+    assert entity_reg.async_get("light.kitchen_light") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_tool_mirrors_one_combined_commit_pair(
+    hass: HomeAssistant, setup_integration_with_entry
+):
+    """The whole point of this tool over calling delete_entity in a loop:
+    N entities still only ever produce one before/after commit pair, not
+    one pair per entity."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    entity_reg = er.async_get(hass)
+    entity_reg.async_get_or_create(
+        "light", "test", "kitchen_light", suggested_object_id="kitchen_light"
+    )
+    entity_reg.async_update_entity("light.kitchen_light", name="Kitchen Light")
+    entity_reg.async_get_or_create(
+        "light", "test", "bedroom_light", suggested_object_id="bedroom_light"
+    )
+    entity_reg.async_update_entity("light.bedroom_light", name="Bedroom Light")
+    tool = DeleteEntitiesTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - not mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-before"}}),  # PUT before
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+
+    with patch(
+        "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+        return_value=fake_session,
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_entities",
+                tool_args={
+                    "entity_ids": ["light.kitchen_light", "light.bedroom_light"]
+                },
+            ),
+            _llm_context(),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["before", "after"]
+    # Exactly 4 calls total (GET repo, GET current, PUT before, PUT after) -
+    # not 8, proving this was one combined push, not one per entity.
+    assert len(fake_session.calls) == 4
+
+    put_before_json = fake_session.calls[2][2]["json"]["content"]
+    before_content = json.loads(base64.b64decode(put_before_json))
+    assert isinstance(before_content, list)
+    assert {e["entity_id"] for e in before_content} == {
+        "light.kitchen_light",
+        "light.bedroom_light",
+    }
+    names = {e["entity_id"]: e["name"] for e in before_content}
+    assert names["light.kitchen_light"] == "Kitchen Light"
+    assert names["light.bedroom_light"] == "Bedroom Light"
+
+    put_after_json = fake_session.calls[-1][2]["json"]["content"]
+    after_content = json.loads(base64.b64decode(put_after_json))
+    assert after_content == [
+        {"deleted": True, "entity_id": "light.kitchen_light"},
+        {"deleted": True, "entity_id": "light.bedroom_light"},
+    ]
 
 
 # --- GetAutomationTool / currently_enabled ----------------------------------
