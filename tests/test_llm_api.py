@@ -2073,6 +2073,77 @@ async def test_delete_automation_tool_confirm_flow_deletes_and_reloads(
 
 
 @pytest.mark.asyncio
+async def test_delete_automation_tool_not_found_returns_tool_error(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """AutomationNotFoundError from the manager becomes a _tool_error()
+    payload, not a raw exception escaping the tool."""
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: keep\n  alias: Keep\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "does_not_exist"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["error_type"] == "AutomationNotFoundError"
+    assert "does_not_exist" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_dry_run_not_found_skips_mirror(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
+):
+    """Same not-found handling in the dry-run + mirroring hook: the error
+    becomes a not-mirrored MirrorResult rather than escaping, and
+    mirror.mirror_dry_run is never reached."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_DRY_RUN: True,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: keep\n  alias: Keep\n  trigger: []\n  action: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+    args = {"automation_id": "does_not_exist"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["dry_run"] is True
+    assert result["mirror"]["mirrored"] is False
+    assert "does_not_exist" in result["mirror"]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_delete_automation_tool_mirrors_when_enabled(
     hass: HomeAssistant, setup_integration_with_entry, admin_user, tmp_path
 ):

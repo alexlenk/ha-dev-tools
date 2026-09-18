@@ -464,23 +464,23 @@ class AutomationManager:
     ) -> str:
         """Synchronous: remove the automation from its document, return the new file content.
 
-        Same document/automations resolution as _build_content, just a
-        find-and-remove instead of a replace-or-append.
+        Unlike _build_content, this never needs to handle a missing/empty
+        document or automation list - find_automation() (called by every
+        caller before this) already confirmed automation_id lives in
+        location.file_path, so document and its automation list are always
+        already there. The one normalization still needed is a package's
+        single-mapping `automation:` form (vs. a list) - see
+        _automation_list's docstring.
         """
         yaml = _new_yaml()
 
         if location.file_path == DEFAULT_AUTOMATIONS_FILE:
-            automations = document if isinstance(document, list) else CommentedSeq()
-            document = automations
+            automations = document
         else:
-            if document is None:
-                document = CommentedMap()
             automations = document.get("automation")
             if isinstance(automations, dict):
                 automations = CommentedSeq([automations])
-            elif not isinstance(automations, list):
-                automations = CommentedSeq()
-            document["automation"] = automations
+                document["automation"] = automations
 
         for i, entry in enumerate(automations):
             if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):

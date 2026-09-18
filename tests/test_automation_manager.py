@@ -371,6 +371,29 @@ async def test_delete_automation_removes_from_package_preserves_other_content(
 
 
 @pytest.mark.asyncio
+async def test_delete_automation_removes_single_mapping_automation_from_package(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """A package's `automation:` key can be a single mapping instead of a
+    list (HA allows both) - deleting the only automation there should
+    normalize it to a list the same way write_automation's _build_content
+    does, leaving an empty list rather than raising."""
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "automation:\n  id: gone\n  trigger: []\n  action: []\n"
+        "input_boolean:\n  unrelated_helper: {}\n",
+    )
+
+    result = await automation_manager.delete_automation("gone")
+
+    assert result.location.file_path == "packages/emhas.yaml"
+    parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
+    assert parsed["automation"] == []
+    assert parsed["input_boolean"]["unrelated_helper"] == {}
+
+
+@pytest.mark.asyncio
 async def test_delete_automation_dry_run_computes_content_without_writing(
     automation_manager, tmp_path, mock_reload_service
 ):
