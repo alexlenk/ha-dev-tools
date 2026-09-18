@@ -2086,6 +2086,7 @@ async def test_delete_automation_tool_mirrors_when_enabled(
     )
     manager = _write_automation_manager(hass, tmp_path)
     _arm(hass)
+    hass.services.async_register("automation", "reload", AsyncMock())
     (tmp_path / "automations.yaml").write_text(
         "- id: gone\n  alias: Gone\n  trigger: []\n  action: []\n"
     )
