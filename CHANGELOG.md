@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-09-18
+
+### Added
+- Git mirroring now covers config-entry-based derived/calculated sensor helpers (issue #34's last remaining piece): `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor` push the resolved `ConfigEntry`'s own `.data`/`.options` (the same shape `get_derived_sensor` already returns) - there's no real file to mirror, so this goes to a synthetic `derived_sensors/<domain>/<entry_id>.json` path in the mirror repo instead, never the raw `.storage/core.config_entries` file (shared by every integration on the instance, explicitly in `DEFAULT_DENYLIST`). Deleting an entry has no file to remove either, so it pushes a small `{"deleted": true, "entry_id": ...}` marker instead - the entry's last real config stays visible in the mirror repo's own git history right before that commit. `update`/`delete` only fetch the "before" snapshot when mirroring is actually enabled, avoiding an extra lookup (and its own not-found risk) on every call otherwise. No dry-run + mirroring support for these three (unlike `write_automation`/`write_script`/the template-entity tools) - there's no way to compute a "would-be" config entry without actually running the real config/options flow, so a true dry-run preview isn't possible the way it is for a plain YAML/JSON write.
+
 ## [2.11.0] - 2026-09-18
 
 ### Added

@@ -1184,6 +1184,20 @@ def _derived_sensor_domain_schema() -> vol.Schema:
     return vol.In(DERIVED_SENSOR_DOMAINS)
 
 
+def _derived_sensor_mirror_path(domain: str, entry_id: str) -> str:
+    """Synthetic mirror-repo path for a derived-sensor config entry (issue #34).
+
+    There's no real file to mirror - the resolved ConfigEntry object's own
+    `.data`/`.options` (the same shape get_derived_sensor already returns)
+    is what gets pushed, never the raw `.storage/core.config_entries` file:
+    that file is shared by every integration on the instance and is
+    explicitly in DEFAULT_DENYLIST for exactly that reason. One JSON
+    "file" per entry, grouped by domain for readability in the mirror
+    repo's own history.
+    """
+    return f"derived_sensors/{domain}/{entry_id}.json"
+
+
 class ListDerivedSensorsTool(GatedTool):
     """List config-entry-based derived/calculated sensor helpers."""
 
@@ -1289,13 +1303,24 @@ class CreateDerivedSensorTool(WriteGatedTool):
         """Drive the config flow forward with the given steps."""
         args = tool_input.tool_args
         try:
-            return await derived_sensor_manager.create_derived_sensor(
+            created = await derived_sensor_manager.create_derived_sensor(
                 hass, args["domain"], args.get("steps") or {}
             )
         except FlowStepRequiredError as exc:
             return _flow_step_required_payload(exc)
         except (InvalidDerivedSensorDomainError, FlowAbortedError) as exc:
             return _tool_error(exc)
+        response: JsonObjectType = dict(created)
+        if mirror.is_mirror_enabled(hass):
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=_derived_sensor_mirror_path(args["domain"], created["entry_id"]),
+                content_before=None,
+                content_after=json.dumps(created),
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 class UpdateDerivedSensorTool(WriteGatedTool):
@@ -1324,13 +1349,36 @@ class UpdateDerivedSensorTool(WriteGatedTool):
         """Drive the options flow forward with the given steps."""
         args = tool_input.tool_args
         try:
-            return await derived_sensor_manager.update_derived_sensor(
+            # Only fetched when mirroring is on - avoids an extra
+            # get_derived_sensor() call (and its own not-found risk) on
+            # every update when nothing will use it.
+            content_before = (
+                json.dumps(
+                    derived_sensor_manager.get_derived_sensor(hass, args["entry_id"])
+                )
+                if mirror.is_mirror_enabled(hass)
+                else None
+            )
+            updated = await derived_sensor_manager.update_derived_sensor(
                 hass, args["entry_id"], args.get("steps") or {}
             )
         except FlowStepRequiredError as exc:
             return _flow_step_required_payload(exc)
         except (DerivedSensorNotFoundError, FlowAbortedError) as exc:
             return _tool_error(exc)
+        response: JsonObjectType = dict(updated)
+        if mirror.is_mirror_enabled(hass):
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=_derived_sensor_mirror_path(
+                    updated["domain"], updated["entry_id"]
+                ),
+                content_before=content_before,
+                content_after=json.dumps(updated),
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 class DeleteDerivedSensorTool(WriteGatedTool):
@@ -1350,12 +1398,29 @@ class DeleteDerivedSensorTool(WriteGatedTool):
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """Delete the derived-sensor entry."""
+        entry_id = tool_input.tool_args["entry_id"]
         try:
-            return await derived_sensor_manager.delete_derived_sensor(
-                hass, tool_input.tool_args["entry_id"]
+            # Only fetched when mirroring is on - same reasoning as
+            # UpdateDerivedSensorTool's identical guard.
+            before = (
+                derived_sensor_manager.get_derived_sensor(hass, entry_id)
+                if mirror.is_mirror_enabled(hass)
+                else None
             )
+            result = await derived_sensor_manager.delete_derived_sensor(hass, entry_id)
         except DerivedSensorNotFoundError as exc:
             return _tool_error(exc)
+        response: JsonObjectType = dict(result)
+        if mirror.is_mirror_enabled(hass):
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=_derived_sensor_mirror_path(before["domain"], entry_id),
+                content_before=json.dumps(before),
+                content_after=json.dumps({"deleted": True, "entry_id": entry_id}),
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
 
 
 class ReloadDerivedSensorTool(GatedTool):
