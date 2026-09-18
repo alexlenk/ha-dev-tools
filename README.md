@@ -7,16 +7,114 @@
 [![License][license-shield]](LICENSE)
 [![hacs][hacsbadge]][hacs]
 
-A Home Assistant custom integration that gives an AI coding assistant direct,
-tool-gated access to develop and maintain your Home Assistant instance:
-authoring and validating automations, reading logs, managing helpers and
-dashboards, auditing for common reliability bugs. It works by registering
-tools into Home Assistant's own [LLM tool
-registry](https://developers.home-assistant.io/docs/core/llm/) and letting
-Home Assistant's native `mcp_server` integration serve them over
-[MCP](https://modelcontextprotocol.io/) - there's no separate MCP server
-process to install or run, and no custom transport or auth code in this
-repository.
+**Give your AI coding assistant hands-on access to your Home Assistant
+instance** - the same way it already helps you with code, but for
+automations, entities, dashboards, and helpers.
+
+It runs inside Home Assistant's own [`mcp_server`
+integration](https://developers.home-assistant.io/docs/core/llm/), so there's
+no separate server to install, host, or keep running - just a Bearer token
+and an MCP client. And because handing write access to an AI assistant is a
+big ask, every write is proposed and previewed before anything happens, an
+optional dry-run mode can keep it that way permanently, and optional git
+mirroring gives you a private, before/after history to roll back from by
+hand. See [The safety model](#the-safety-model) below for exactly what that
+does and doesn't guarantee - it's worth reading before you turn this loose on
+a live instance.
+
+### What you can ask it to do
+
+- *"Add an automation that turns on the hallway light when the hallway
+  motion sensor trips after sunset."*
+- *"Find every automation that references an entity that's now
+  unavailable."*
+- *"The porch light didn't turn on last night - check the logs and logbook
+  and tell me why."*
+- *"Clean up the 40 leftover entities from the Zigbee device I just
+  removed."*
+
+## Quick start
+
+Needs Home Assistant **2026.8.2+** (see [Requirements](#requirements) below
+for the full list, including client-specific versions).
+
+1. Install via HACS or manually - see [Installation](#installation) below.
+2. **Settings → Devices & Services → Add Integration → HA Dev Tools.**
+3. **Settings → Devices & Services → Add Integration → Model Context
+   Protocol Server** (Home Assistant's own built-in integration) - in its
+   setup, add `dev_tools` to the exposed APIs. This step is easy to miss and
+   is the single most common way to end up stuck: skip it and HA Dev Tools'
+   card still shows healthy, but an MCP client just gets a bare 404 (a
+   **Settings → System → Repairs** issue will flag it if you do).
+4. **Arm it.** Every tool except a diagnostic ping refuses to run until you
+   prove real filesystem access - the same kind SSH or the Terminal add-on
+   already requires:
+
+   ```bash
+   date +%s > /config/.storage/ha_dev_tools.armed
+   ```
+
+   This enables `dev_tools` for up to 4 hours (extended by 30 minutes each
+   time a tool is used, and it expires on its own after 30 minutes idle).
+   Since it expires, a shell alias saves retyping it:
+
+   ```bash
+   echo 'alias dev-tools-arm="date +%s > /config/.storage/ha_dev_tools.armed && echo armed"' >> ~/.bashrc && source ~/.bashrc
+   ```
+
+5. **Connect your MCP client** to
+   `https://<your-ha-instance>/api/mcp/dev_tools`, authenticated with a
+   normal Home Assistant admin long-lived access token as a Bearer token.
+   For Claude Code:
+
+   ```bash
+   claude mcp add --transport http ha-dev-tools \
+     https://<your-ha-instance>/api/mcp/dev_tools \
+     --header "Authorization: Bearer <your-long-lived-access-token>" \
+     --scope user
+   ```
+
+   See [Connecting an MCP client](#connecting-an-mcp-client) below for other
+   clients, and why Claude Desktop/claude.ai generally can't be pointed at a
+   home LAN instance directly.
+
+That's it - ask it something.
+
+## The safety model
+
+Every write tool (`write_automation`, `delete_automation`, `write_script`,
+the helper/derived-sensor/template-entity CRUD tools, `delete_entity`/
+`delete_entities`, `write_dashboard`) always requires two calls: **propose**
+(no arguments changed, no side effects - returns a preview of what would be
+applied plus a short-lived `confirm_token`) and **confirm** (the identical
+call, plus that token - only this one can actually do anything). That's
+always on and can't be turned off. Two optional layers sit on top of it.
+Here's exactly what each one actually guarantees:
+
+| Layer | Guarantee | What it's for |
+|---|---|---|
+| **Confirm step** (always on) | UX friction, not an enforced human check - nothing stops an agent from calling propose then confirm back to back with no one actually reading the preview in between | Catches accidental first-call writes and stops a token from silently being reused for a different call |
+| **Dry-run mode** (optional) | Hard guarantee - a confirmed write's content is resolved but never reaches disk while it's on | Lets you review an agent's proposed changes for as long as you want, with zero risk of any of them going live |
+| **Git mirroring** (optional) | Audit trail only - it never gates a write, live or dry-run | A private, before/after history of every change, so you have something to manually restore from (copy the old YAML back) if something goes wrong |
+
+In short: **dry-run is the actual safety net.** The confirm step and git
+mirroring make mistakes easier to catch and easier to undo, but neither one
+*stops* a bad write from happening. If you want a real guarantee that
+nothing touches your live config while you're still trusting an agent,
+turn dry-run on and read what it proposes.
+
+See [Setup](#setup---optional-hardening) below for how to enable each, and
+[docs/SECURITY.md](docs/SECURITY.md) for the full threat model - including
+what these gates do *not* protect against (this integration isn't
+sandboxed; a confirmed, non-dry-run write has the same power as your admin
+account, full stop).
+
+> **⚠️ Use at your own risk.** This is a community project, built and
+> maintained in spare time - no SLA, no guaranteed support, and no guarantee
+> that dry-run, the confirm step, or git mirroring catch every mistake
+> before it reaches your live instance. AI can be wrong, and this is all
+> still a work in progress. Provided as-is, with no warranty - see
+> [LICENSE](LICENSE).
 
 ## Requirements
 
@@ -24,7 +122,7 @@ repository.
   `mcp_server` integration this depends on. That release itself requires
   Python 3.14.2+.
 - The `mcp_server` integration, configured to expose the `dev_tools` API (see
-  Setup below).
+  Quick start above).
 - If connecting with Claude Code, **Claude Code 2.1 or newer** - it's the
   release line that correctly prioritizes a configured Bearer token over
   `mcp_server`'s OAuth discovery metadata. Run `claude update` if unsure.
@@ -44,139 +142,6 @@ repository.
 2. Copy the `ha_dev_tools` folder into `<config>/custom_components/`.
 3. Restart Home Assistant.
 
-## Setup
-
-1. **Settings → Devices & Services → Add Integration → HA Dev Tools.** This
-   registers the `dev_tools` LLM API; it does nothing reachable on its own
-   yet.
-2. **Settings → Devices & Services → Add Integration → Model Context Protocol
-   Server** (Home Assistant's own built-in integration, not part of this
-   repo). In its setup, add `dev_tools` to the exposed APIs. Skipping this
-   step is the single most common way to end up stuck: HA Dev Tools' card
-   shows healthy with no log errors either way, since it only registers the
-   `dev_tools` API into HA's internal tool registry and has no HTTP
-   transport of its own - `mcp_server` is what actually serves it, so
-   without this step an MCP client just gets a bare 404. If you skip it (or
-   later remove `mcp_server` or un-expose `dev_tools` from it), a **Settings
-   → System → Repairs** issue will say so.
-3. **Arm it.** Every tool except a diagnostic ping refuses to run until you
-   prove real filesystem access - the same kind SSH or the Terminal add-on
-   already requires - by creating a file:
-
-   ```bash
-   date +%s > /config/.storage/ha_dev_tools.armed
-   ```
-
-   This enables `dev_tools` for up to 4 hours, extended by 30 minutes each
-   time a tool is actually used, and expires on its own if idle for 30
-   minutes. See [docs/SECURITY.md](docs/SECURITY.md) for why this exists and
-   exactly how it works - it's the single most important thing to understand
-   before pointing an MCP client at this integration.
-
-   Since it expires and needs re-arming, a shell alias saves retyping the
-   command every time. Paste this into a shell on the Home Assistant host
-   (SSH or the Terminal add-on) to add one:
-
-   ```bash
-   echo 'alias dev-tools-arm="date +%s > /config/.storage/ha_dev_tools.armed && echo armed"' >> ~/.bashrc && source ~/.bashrc
-   ```
-
-   Then arming is just `dev-tools-arm`.
-4. **Connect an MCP client** to `https://<your-ha-instance>/api/mcp/dev_tools`,
-   authenticated with a normal Home Assistant admin long-lived access token as
-   a Bearer token - see [Connecting an MCP client](#connecting-an-mcp-client)
-   below for exactly how to do that in Claude Code and Claude Desktop.
-5. **Every write tool now requires two calls, always.** `write_automation`,
-   `delete_automation`, `write_script`,
-   `create_helper`/`update_helper`/`delete_helper`,
-   `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`,
-   `create_template_entity`/`update_template_entity`/`delete_template_entity`,
-   `delete_entity`/`delete_entities`, and `write_dashboard` never write on their first call - they return a
-   preview of what would be applied plus a short-lived `confirm_token`.
-   Only a second call with the
-   identical arguments plus that `confirm_token` actually proceeds. This
-   applies whether dry-run mode (below) is on or off - it's a separate,
-   always-on step meant to give you a chance to review before anything
-   happens, not a substitute for dry-run's stronger guarantee. Read-only
-   tools and `reload_domain`/`reload_derived_sensor`/`check_config` are
-   unaffected.
-6. **Optional: turn on dry-run mode.** From this integration's card in
-   Settings → Devices & Services, click **Configure** and enable dry-run.
-   Once a write tool's confirm_token is confirmed, its underlying write
-   still never actually happens while dry-run is on - the same preview
-   comes back instead, so an agent's proposed changes can be reviewed
-   before you turn dry-run back off. Takes effect immediately, no restart
-   needed.
-7. **Optional: turn on git mirroring.** From the same **Configure** dialog,
-   enable git mirroring, set **Mirror repository** to a dedicated private
-   GitHub repo (`owner/repo` form - separate from your HA config repo, and
-   never the repo any deploy mechanism pulls from - create it first if it
-   doesn't exist yet, private, empty is fine), and paste a **Mirror
-   repository access token** scoped to only that repo. Every confirmed
-   write from a supported tool then pushes the touched file's before/after
-   content to that repo's actual default branch (whatever it's really
-   named - resolved fresh from the repo itself, never assumed to be
-   `main`) - a private, push-only audit trail for manual rollback.
-   Content that looks like it holds a literal credential (not routed
-   through `!secret`) is never pushed; the tool's response reports that
-   back instead.
-
-   To create the access token:
-   1. GitHub → your avatar (top right) → **Settings** → **Developer
-      settings** → **Personal access tokens** → **Fine-grained tokens** →
-      **Generate new token**.
-   2. **Repository access**: "Only select repositories" → pick the one
-      dedicated mirror repo above.
-   3. **Permissions** → **Repository permissions** → set **Contents** to
-      **Read and write**. Leave everything else at "No access" - no
-      `workflow` scope, no admin rights, no force-push.
-   4. Set an **Expiration** date - not "No expiration".
-   5. Click **Generate token**, copy it immediately (GitHub won't show it
-      again), and paste it into the **Mirror repository access token**
-      field. It's stored as a password-type field.
-
-   Supported today: `write_automation`, `delete_automation`, `write_script`,
-   `create_template_entity`/`update_template_entity`/`delete_template_entity`,
-   `write_dashboard`, `create_helper`/`update_helper`/`delete_helper`,
-   `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`,
-   `delete_entity`/`delete_entities`.
-   HA's helper storage debounces its save 10 seconds, so reading the
-   file right after a helper write would capture stale, pre-write
-   content - instead, the mirrored "after" content is reconstructed in
-   memory from the file's last-known state plus the write's own known
-   result, never by reading the file again. Derived sensors have no real
-   file at all - the resolved config entry's own data/options get pushed
-   to a synthetic `derived_sensors/<domain>/<entry_id>.json` path instead;
-   deleting one pushes a small `{"deleted": true, ...}` marker rather than
-   removing anything, so its last real config stays visible in the mirror
-   repo's own git history. `delete_entity` works the same way for the
-   entity registry: it's a soft delete on Home Assistant's own side (see
-   the tool's own description) regardless of mirroring, but HA's own
-   safety net only protects orphaned entries for 30 days - that's true
-   whether or not you ever turn mirroring on. Only *with* mirroring
-   enabled does the entry's full registry data (name, area, labels,
-   options, ...) also get pushed to a synthetic
-   `entities/<entity_id>.json` path first, so it isn't lost once that
-   30-day window passes; with mirroring off, `delete_entity` has no
-   backup beyond that same 30-day window. `delete_entities` (plural)
-   does the same thing for a whole list of entity_ids in one propose/
-   confirm pair - a bulk cleanup (e.g. every leftover entity from a
-   replaced device) pushes exactly one combined before/after commit
-   pair for the entire batch, not one pair per entity, so a large batch
-   doesn't flood the mirror repo with commits.
-
-   **With dry-run mode also on:** `write_automation`, `delete_automation`,
-   `write_script`, and the template-entity tools still mirror something
-   even though nothing
-   live changed - the resolved would-be content goes to its own
-   `proposed/<kind>-<id>` branch (e.g. `proposed/automation-my_automation`,
-   `proposed/script-my_script`), freshly branched from the default
-   branch's current tip each time, rather than to the default branch
-   itself. That lets you review a dry-run's actual diff on GitHub before
-   ever turning dry-run off. `write_dashboard` has no such
-   compute-without-writing path (the real write is the only way to resolve
-   its storage JSON), so it mirrors nothing while dry-run is on.
-
 ## Connecting an MCP client
 
 This integration is a **remote** MCP server - Home Assistant's own `mcp_server`
@@ -191,16 +156,9 @@ alongside it, for web-based clients that require it. That advertisement
 matters for setup, covered below.
 
 - **Claude Code** (CLI, 2.1+ - see Requirements) supports remote HTTP
-  servers with custom headers directly, so a Bearer token works as-is:
-
-  ```bash
-  claude mcp add --transport http ha-dev-tools \
-    https://<your-ha-instance>/api/mcp/dev_tools \
-    --header "Authorization: Bearer <your-long-lived-access-token>" \
-    --scope user
-  ```
-
-  Run `claude mcp list` afterward to confirm it shows as connected.
+  servers with custom headers directly, so a Bearer token works as-is (see
+  the command in Quick start above). Run `claude mcp list` afterward to
+  confirm it shows as connected.
 
 - **Claude Desktop and claude.ai** connect to remote servers only through
   **Settings → Connectors → Add custom connector**, which has two problems
@@ -269,16 +227,55 @@ matters for setup, covered below.
 integration/MCP wiring itself - it's the one tool that isn't gated (see
 Security).
 
+## Setup - optional hardening
+
+Both of these are optional and off by default. Neither requires a restart to
+take effect.
+
+**Dry-run mode:** from this integration's card in Settings → Devices &
+Services, click **Configure** and enable dry-run. Every write tool's
+confirm step still returns its preview, but the underlying write never
+actually happens - see [The safety model](#the-safety-model) above for what
+that does and doesn't guarantee.
+
+**Git mirroring:** from the same **Configure** dialog, enable it, set
+**Mirror repository** to a dedicated private GitHub repo (`owner/repo` -
+separate from your HA config repo, and never the repo any deploy mechanism
+pulls from), and paste a **Mirror repository access token**. To create the
+token: GitHub → your avatar → **Settings → Developer settings → Personal
+access tokens → Fine-grained tokens → Generate new token** → restrict
+**Repository access** to that one repo → set **Contents** permission to
+**Read and write** (nothing else) → set an **Expiration** date → generate
+and paste it in.
+
+Every confirmed write then pushes the touched file's before/after content
+to that repo's default branch (in dry-run, to its own `proposed/<kind>-<id>`
+branch instead, so you can review the diff on GitHub before turning dry-run
+off). Content that looks like a literal credential (not routed through
+`!secret`) is never pushed. Rollback is manual: find the old version in the
+mirror repo's git history and paste it back in - there's no automated
+revert. Helper and derived-sensor writes are reconstructed in memory rather
+than re-read from disk, to dodge Home Assistant's own storage-save debounce;
+`delete_entity`/`delete_entities` also back up the entity's full registry
+data first, since HA's own registry-purge safety net only lasts 30 days
+either way. Supported today: `write_automation`, `delete_automation`,
+`write_script`, the template-entity tools, `write_dashboard` (live mode
+only - it has no compute-without-writing path to mirror in dry-run), the
+helper tools, the derived-sensor tools, and `delete_entity`/`delete_entities`.
+
 ## Security
 
 Every tool above requires two things: proof of recent out-of-band filesystem
 access, and a genuine Home Assistant admin account. Neither is optional, and
 neither is enforced by Home Assistant on our behalf - both live in this
-integration's own code, on purpose. **Read
-[docs/SECURITY.md](docs/SECURITY.md)** before exposing this to anything
-beyond your own local network - it explains the actual threat this design
-defends against and why a simpler "just require admin" gate isn't enough on
-its own.
+integration's own code, on purpose. These gates control *when* and *by
+whom* a tool can be invoked - they do not sandbox what it's capable of once
+invoked, and a confirmed, non-dry-run write has the same power as the admin
+account behind it. **Read [docs/SECURITY.md](docs/SECURITY.md)** before
+exposing this to anything beyond your own local network - it explains the
+actual threat this design defends against, exactly what it doesn't defend
+against, and why a simpler "just require admin" gate isn't enough on its
+own.
 
 File access from `write_automation` and other file-touching tools is
 additionally bounded by a path allowlist/denylist - not currently
@@ -293,8 +290,9 @@ a custom integration do safely - see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Git mirroring of writes made through this integration is built - see
-[Setup](#setup) step 7 above to turn it on. Offline automation testing
-(the two-tier lint/CI concept) is still design-stage, not built - see
+[Setup - optional hardening](#setup---optional-hardening) above to turn it
+on. Offline automation testing (the two-tier lint/CI concept) is still
+design-stage, not built - see
 [docs/AUTOMATION_TESTING_DESIGN.md](docs/AUTOMATION_TESTING_DESIGN.md).
 [scripts/config-repo-setup/](scripts/config-repo-setup/) has standalone
 scripts for bootstrapping the security hygiene (`.gitignore`, secret
