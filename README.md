@@ -72,6 +72,16 @@ repository.
    minutes. See [docs/SECURITY.md](docs/SECURITY.md) for why this exists and
    exactly how it works - it's the single most important thing to understand
    before pointing an MCP client at this integration.
+
+   Since it expires and needs re-arming, a shell alias saves retyping the
+   command every time. Paste this into a shell on the Home Assistant host
+   (SSH or the Terminal add-on) to add one:
+
+   ```bash
+   echo 'alias dev-tools-arm="date +%s > /config/.storage/ha_dev_tools.armed && echo armed"' >> ~/.bashrc && source ~/.bashrc
+   ```
+
+   Then arming is just `dev-tools-arm`.
 4. **Connect an MCP client** to `https://<your-ha-instance>/api/mcp/dev_tools`,
    authenticated with a normal Home Assistant admin long-lived access token as
    a Bearer token - see [Connecting an MCP client](#connecting-an-mcp-client)
