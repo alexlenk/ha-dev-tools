@@ -136,13 +136,18 @@ repository.
 
    Supported today: `write_automation`, `write_script`,
    `create_template_entity`/`update_template_entity`/`delete_template_entity`,
-   `write_dashboard`, `create_helper`/`update_helper`/`delete_helper`.
+   `write_dashboard`, `create_helper`/`update_helper`/`delete_helper`,
+   `create_derived_sensor`/`update_derived_sensor`/`delete_derived_sensor`.
    HA's helper storage debounces its save 10 seconds, so reading the
    file right after a helper write would capture stale, pre-write
    content - instead, the mirrored "after" content is reconstructed in
    memory from the file's last-known state plus the write's own known
-   result, never by reading the file again. Derived-sensor mirroring
-   hasn't been built yet.
+   result, never by reading the file again. Derived sensors have no real
+   file at all - the resolved config entry's own data/options get pushed
+   to a synthetic `derived_sensors/<domain>/<entry_id>.json` path instead;
+   deleting one pushes a small `{"deleted": true, ...}` marker rather than
+   removing anything, so its last real config stays visible in the mirror
+   repo's own git history.
 
    **With dry-run mode also on:** `write_automation`, `write_script`, and
    the template-entity tools still mirror something even though nothing
