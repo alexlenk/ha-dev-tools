@@ -8,6 +8,7 @@ read-only by design (issue #73).
 """
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -15,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from custom_components.ha_dev_tools.file_manager import FileManager
 from custom_components.ha_dev_tools.rest_command_manager import (
     DuplicateRestCommandIdError,
+    RestCommandLocation,
     RestCommandManager,
     RestCommandNotFoundError,
 )
@@ -195,6 +197,31 @@ async def test_all_rest_commands_key_wrong_type_raises(rest_command_manager, tmp
 
     with pytest.raises(ValueError, match="is not a mapping"):
         await rest_command_manager.all_rest_commands()
+
+
+@pytest.mark.asyncio
+async def test_get_rest_command_defensive_error_when_vanished_between_reads(
+    rest_command_manager, tmp_path, monkeypatch
+):
+    """The final raise in get_rest_command is unreachable through the
+    public API alone - find_rest_command's presence check and the second
+    read always agree in practice. Exercised directly by patching
+    find_rest_command to resolve a location that doesn't actually define
+    the id, so the fallback path is at least proven correct rather than
+    left silently untested."""
+    _write(tmp_path, "configuration.yaml", "rest_command:\n  abc:\n    url: http://a\n")
+    monkeypatch.setattr(
+        rest_command_manager,
+        "find_rest_command",
+        AsyncMock(
+            return_value=RestCommandLocation(
+                file_path="configuration.yaml", is_package=False
+            )
+        ),
+    )
+
+    with pytest.raises(RestCommandNotFoundError):
+        await rest_command_manager.get_rest_command("vanished_id")
 
 
 @pytest.mark.asyncio
