@@ -92,7 +92,8 @@ That's it - ask it something.
 
 Every write tool (`write_automation`, `delete_automation`, `write_script`,
 the helper/derived-sensor/template-entity CRUD tools, `delete_entity`/
-`delete_entities`, `write_dashboard`) always requires two calls: **propose**
+`delete_entities`, `write_dashboard`, `write_energy_config`) always requires
+two calls: **propose**
 (no arguments changed, no side effects - returns a preview of what would be
 applied plus a short-lived `confirm_token`) and **confirm** (the identical
 call, plus that token - only this one can actually do anything). That's
@@ -196,6 +197,7 @@ matters for setup, covered below.
 | `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward |
 | `delete_automation` | Layout-aware, package-safe delete - resolves which file actually defines it first, refuses to guess if the id isn't found or is defined in more than one file |
 | `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
+| `list_rest_commands` / `get_rest_command` | Same layout-aware pattern, for `rest_command:` - resolves whether it lives in `configuration.yaml` or a `packages/*.yaml` file. Read-only - no write_rest_command yet |
 | `check_config` | Home Assistant's own full config validation |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
 
@@ -208,6 +210,7 @@ matters for setup, covered below.
 | `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) plus the general-purpose Template helper (any entity domain - light, switch, sensor, ...) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create) |
 | `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. For the config-entry Template *helper* instead, see the row above |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction) |
+| `get_energy_config` / `write_energy_config` | Read/write the Energy dashboard's own source config (grid/solar/battery/gas/water entities, cost settings) - a separate HA subsystem from Lovelace dashboards, not reachable through `get_dashboard`. Each field in a write wholesale-replaces that section; omitting a field leaves it untouched |
 
 **Diagnose**
 | Tool | What it does |
@@ -260,9 +263,10 @@ than re-read from disk, to dodge Home Assistant's own storage-save debounce;
 `delete_entity`/`delete_entities` also back up the entity's full registry
 data first, since HA's own registry-purge safety net only lasts 30 days
 either way. Supported today: `write_automation`, `delete_automation`,
-`write_script`, the template-entity tools, `write_dashboard` (live mode
-only - it has no compute-without-writing path to mirror in dry-run), the
-helper tools, the derived-sensor tools, and `delete_entity`/`delete_entities`.
+`write_script`, the template-entity tools, `write_dashboard` and
+`write_energy_config` (live mode only for both - neither has a
+compute-without-writing path to mirror in dry-run), the helper tools, the
+derived-sensor tools, and `delete_entity`/`delete_entities`.
 
 ## Security
 

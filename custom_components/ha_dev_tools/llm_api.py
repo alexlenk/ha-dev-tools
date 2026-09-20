@@ -28,6 +28,7 @@ from . import (
     config_tools,
     dashboard_manager,
     derived_sensor_manager,
+    energy_manager,
     entity_manager,
     helper_manager,
     history_manager,
@@ -59,6 +60,11 @@ from .helper_manager import (
 )
 from .history_manager import RecorderNotAvailableError
 from .log_manager import LogFilters, LogManager
+from .rest_command_manager import (
+    DuplicateRestCommandIdError,
+    RestCommandManager,
+    RestCommandNotFoundError,
+)
 from .script_manager import (
     DuplicateScriptIdError,
     ScriptManager,
@@ -2114,6 +2120,92 @@ class WriteDashboardTool(WriteGatedTool):
         return response
 
 
+class GetEnergyConfigTool(GatedTool):
+    """Read the Energy dashboard's own source config - see energy_manager.py."""
+
+    name = "get_energy_config"
+    description = (
+        "Read the Energy dashboard's own source configuration (grid "
+        "consumption/return entities, solar production per source, "
+        "battery in/out, gas/water sources, cost/compensation settings) - "
+        "a distinct HA subsystem from Lovelace dashboards, not reachable "
+        "through get_dashboard. Fails with a not_found error if the "
+        "Energy dashboard has never been configured."
+    )
+    parameters = vol.Schema({})
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Read the Energy dashboard's config."""
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            config = await energy_manager.get_energy_config(hass, user)
+        except (UnresolvedUserError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return config
+
+
+class WriteEnergyConfigTool(WriteGatedTool):
+    """Update the Energy dashboard's own source config - see energy_manager.py."""
+
+    name = "write_energy_config"
+    description = (
+        "Update the Energy dashboard's source configuration. Each of "
+        "energy_sources/device_consumption/device_consumption_water, if "
+        "supplied, wholesale-replaces that section - omit a field to "
+        "leave it untouched rather than clearing it. Call "
+        "get_energy_config first to see the current full config (and the "
+        "exact shape each section expects) before editing one section."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Optional("energy_sources"): list,
+            vol.Optional("device_consumption"): list,
+            vol.Optional("device_consumption_water"): list,
+        }
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Write the Energy dashboard's config."""
+        args = tool_input.tool_args
+        storage_path = ".storage/energy"
+        try:
+            content_before = await _read_storage_file(hass, storage_path)
+            user = await helper_manager.resolve_user(hass, llm_context)
+            result = await energy_manager.write_energy_config(
+                hass,
+                user,
+                energy_sources=args.get("energy_sources"),
+                device_consumption=args.get("device_consumption"),
+                device_consumption_water=args.get("device_consumption_water"),
+            )
+        except (UnresolvedUserError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        content_after = await _read_storage_file(hass, storage_path)
+        response: JsonObjectType = {"saved": True, "config": result}
+        if content_after is not None:
+            response = await _mirror_file_write(
+                hass,
+                response,
+                file_path=storage_path,
+                content_before=content_before,
+                content_after=content_after,
+                content_type="json",
+            )
+        return response
+
+
 class AuditAutomationsTool(GatedTool):
     """Static analysis over every known automation for latent reliability bugs."""
 
@@ -2309,6 +2401,83 @@ class WriteScriptTool(WriteGatedTool):
         )
 
 
+class ListRestCommandsTool(GatedTool):
+    """List every rest_command across configuration.yaml and packages."""
+
+    name = "list_rest_commands"
+    description = (
+        "List every rest_command (configuration.yaml and every "
+        "packages/*.yaml file), each with its id, source file, and full "
+        "config. Same layout-aware, package-safe file resolution as "
+        "get_automation/get_script - a plain file read can silently miss "
+        "package-defined rest_commands. Read-only."
+    )
+    parameters = vol.Schema({})
+
+    def __init__(self, rest_command_manager: RestCommandManager) -> None:
+        """Init with the RestCommandManager backing this tool."""
+        self._manager = rest_command_manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List every rest_command."""
+        items = [
+            {
+                "rest_command_id": rest_command_id,
+                "file_path": location.file_path,
+                "is_package": location.is_package,
+                "config": config,
+            }
+            for location, rest_command_id, config in await self._manager.all_rest_commands()
+        ]
+        return {"items": items}
+
+
+class GetRestCommandTool(GatedTool):
+    """Layout-aware rest_command read - resolves the file that actually defines it."""
+
+    name = "get_rest_command"
+    description = (
+        "Read a rest_command's config (url, method, headers, payload, "
+        "...) by id, resolving which file actually defines it "
+        "(configuration.yaml or a packages/*.yaml file) - a plain file "
+        "read can silently miss package-defined rest_commands. Fails "
+        "clearly if the id isn't found or is defined in more than one "
+        "file, rather than guessing. Read-only - no write_rest_command "
+        "yet."
+    )
+    parameters = vol.Schema({vol.Required("rest_command_id"): str})
+
+    def __init__(self, rest_command_manager: RestCommandManager) -> None:
+        """Init with the RestCommandManager backing this tool."""
+        self._manager = rest_command_manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Resolve and return a rest_command's config and source file."""
+        try:
+            location, config = await self._manager.get_rest_command(
+                tool_input.tool_args["rest_command_id"]
+            )
+        except (RestCommandNotFoundError, DuplicateRestCommandIdError) as exc:
+            return _tool_error(exc)
+        return {
+            "file_path": location.file_path,
+            "is_package": location.is_package,
+            "config": config,
+        }
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
@@ -2317,6 +2486,7 @@ class DevToolsAPI(llm.API):
     automation_manager: AutomationManager
     script_manager: ScriptManager
     template_yaml_manager: TemplateYamlManager
+    rest_command_manager: RestCommandManager
 
     @override
     async def async_get_api_instance(
@@ -2367,6 +2537,10 @@ class DevToolsAPI(llm.API):
                 DeleteTemplateEntityTool(self.template_yaml_manager),
                 GetDashboardTool(),
                 WriteDashboardTool(),
+                GetEnergyConfigTool(),
+                WriteEnergyConfigTool(),
+                ListRestCommandsTool(self.rest_command_manager),
+                GetRestCommandTool(self.rest_command_manager),
             ],
         )
 
@@ -2378,6 +2552,7 @@ def async_register(
     automation_manager: AutomationManager,
     script_manager: ScriptManager,
     template_yaml_manager: TemplateYamlManager,
+    rest_command_manager: RestCommandManager,
 ) -> Any:
     """Register the dev_tools API and return its unsubscribe callable."""
     return llm.async_register_api(
@@ -2390,5 +2565,6 @@ def async_register(
             automation_manager=automation_manager,
             script_manager=script_manager,
             template_yaml_manager=template_yaml_manager,
+            rest_command_manager=rest_command_manager,
         ),
     )

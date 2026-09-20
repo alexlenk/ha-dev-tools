@@ -22,6 +22,7 @@ from .file_manager import FileManager
 from .llm_api import async_register as async_register_llm_api
 from .log_manager import LogManager
 from .mcp_repair import async_setup_repair as async_setup_mcp_repair
+from .rest_command_manager import RestCommandManager
 from .script_manager import ScriptManager
 from .security import SecurityManager
 from .template_yaml_manager import TemplateYamlManager
@@ -39,6 +40,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation_manager = AutomationManager(hass, file_manager)
     script_manager = ScriptManager(hass, file_manager)
     template_yaml_manager = TemplateYamlManager(hass, file_manager)
+    rest_command_manager = RestCommandManager(hass, file_manager)
 
     # Register the dev_tools LLM API, exposed over MCP by HA's native
     # mcp_server integration (no custom transport code needed here).
@@ -48,6 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         automation_manager=automation_manager,
         script_manager=script_manager,
         template_yaml_manager=template_yaml_manager,
+        rest_command_manager=rest_command_manager,
     )
 
     # Best-effort periodic cleanup of an expired access-control arm file

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-09-20
+
+### Added
+- `get_energy_config` / `write_energy_config` - the Energy dashboard's own source config (grid consumption/return, solar production per source, battery in/out, gas/water sources, cost/compensation settings) is a separate HA subsystem from Lovelace dashboards, living in `.storage/energy` and read/written via its own `energy/get_prefs`/`energy/save_prefs` websocket commands - `get_dashboard`/`write_dashboard` never reached it (issue #74). `write_energy_config` mirrors `energy/save_prefs`'s own real semantics: each of `energy_sources`/`device_consumption`/`device_consumption_water`, if supplied, wholesale-replaces that section; omitting a field leaves it untouched rather than clearing it - a genuine partial update, unlike `write_dashboard`'s full-document replace.
+- `list_rest_commands` / `get_rest_command` - `get_automation`/`get_script` already resolve which file (default file or a `packages/*.yaml`) actually defines an entry; `rest_command:` had no equivalent, so a package-defined `rest_command` was only readable by having the owner paste the file's contents manually (issue #73). Read-only by design - a write path needs its own safety review and is out of scope here. Structurally closest to `script:` (a mapping of id -> config), with one simplification: `rest_command:` has no dedicated default include-file the way `script: !include scripts.yaml` does, so `configuration.yaml` itself is always a read candidate, same as `template:` entities already are.
+
 ## [2.17.0] - 2026-09-18
 
 ### Added

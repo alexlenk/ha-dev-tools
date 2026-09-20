@@ -20,6 +20,11 @@ OPERATION_WRITE = "write"
 # Default read-only paths (recommended configuration)
 DEFAULT_READ_ONLY_PATHS = [
     "/config/.storage/lovelace*",
+    # Energy dashboard prefs storage key (energy/data.py's
+    # STORAGE_KEY = "energy"), for write_energy_config's before/after
+    # mirroring the same way "/config/.storage/lovelace*" backs
+    # write_dashboard's - see energy_manager.py/issue #74.
+    "/config/.storage/energy",
     "/config/.storage/input_*",
     "/config/.storage/timer",
     "/config/.storage/counter",

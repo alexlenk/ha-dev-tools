@@ -29,6 +29,17 @@ as part of that same PR - not as a separate follow-up.
 5. Merge once CI is green. `Auto Release` then tags and publishes
    `vX.Y.Z` automatically; HACS picks it up from there.
 
+Multiple independent features/fixes worked on together can be pooled into
+one PR and one version bump, rather than each getting its own PR/release -
+e.g. two small, unrelated new tools landing in the same session. Bump once
+for the pooled set (per rule 3 above - a set that includes a new
+tool/capability still only needs one minor bump, not one per feature), and
+give each its own `### Added`/`### Fixed`/etc. entry under that single new
+CHANGELOG heading rather than a combined entry that blurs what changed.
+Don't default to pooling, though - most work here is one PR per feature/fix;
+pool only when it's genuinely the same unit of work (e.g. explicitly
+requested together, or one doesn't make sense without the other).
+
 ## PR workflow
 
 Always open a PR for work on this repo, and merge it once CI is green -

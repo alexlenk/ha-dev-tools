@@ -63,6 +63,7 @@ from custom_components.ha_dev_tools.file_manager import FileManager
 from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
 from custom_components.ha_dev_tools.log_manager import LogManager
 from custom_components.ha_dev_tools.mqtt_manager import MqttNotAvailableError
+from custom_components.ha_dev_tools.rest_command_manager import RestCommandManager
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
@@ -84,15 +85,18 @@ from custom_components.ha_dev_tools.llm_api import (
     GetAutomationTool,
     GetDashboardTool,
     GetDerivedSensorTool,
+    GetEnergyConfigTool,
     GetEntityHistoryTool,
     GetLogbookTool,
     GetLogsTool,
+    GetRestCommandTool,
     GetScriptTool,
     GetTemplateEntityTool,
     ListAddonsTool,
     ListDerivedSensorsTool,
     ListHelpersTool,
     ListMqttTopicsTool,
+    ListRestCommandsTool,
     ListScriptsTool,
     ListTemplateEntitiesTool,
     ReloadDerivedSensorTool,
@@ -104,12 +108,14 @@ from custom_components.ha_dev_tools.llm_api import (
     ValidateTemplateTool,
     WriteAutomationTool,
     WriteDashboardTool,
+    WriteEnergyConfigTool,
     WriteGatedTool,
     WriteScriptTool,
 )
 from custom_components.ha_dev_tools.security import SecurityManager
 from custom_components.ha_dev_tools.supervisor_manager import SupervisorNotAvailableError
 from custom_components.ha_dev_tools.template_yaml_manager import TemplateYamlManager
+from custom_components.ha_dev_tools.ws_call import WebSocketCommandError
 
 
 def _llm_context(user_id: str | None = None) -> llm.LLMContext:
@@ -226,6 +232,10 @@ async def test_dev_tools_real_tools_registered(
         "delete_template_entity",
         "get_dashboard",
         "write_dashboard",
+        "get_energy_config",
+        "write_energy_config",
+        "list_rest_commands",
+        "get_rest_command",
     }
 
 
@@ -1017,6 +1027,90 @@ async def test_write_script_tool_confirm_flow_writes_and_reloads(
     assert result["file_path"] == "scripts.yaml"
     reload_mock.assert_called_once()
     assert "new_script" in (tmp_path / "scripts.yaml").read_text()
+
+
+# --- GetRestCommandTool / ListRestCommandsTool (issue #73) -------------------
+
+
+def _rest_command_manager(hass: HomeAssistant, tmp_path) -> RestCommandManager:
+    hass.config.config_dir = str(tmp_path)
+    security_manager = SecurityManager(
+        hass,
+        {
+            "read_paths": ["configuration.yaml", "packages/**/*.yaml"],
+            "write_paths": [],
+            "denied_paths": [],
+        },
+    )
+    file_manager = FileManager(hass, security_manager)
+    return RestCommandManager(hass, file_manager)
+
+
+@pytest.mark.asyncio
+async def test_get_rest_command_returns_config(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _rest_command_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "configuration.yaml").write_text(
+        "rest_command:\n  my_cmd:\n    url: http://example.com\n"
+    )
+
+    result = await GetRestCommandTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_rest_command", tool_args={"rest_command_id": "my_cmd"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["file_path"] == "configuration.yaml"
+    assert result["config"]["url"] == "http://example.com"
+
+
+@pytest.mark.asyncio
+async def test_get_rest_command_returns_error_for_missing_id(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _rest_command_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "configuration.yaml").write_text(
+        "rest_command:\n  other_id:\n    url: http://example.com\n"
+    )
+
+    result = await GetRestCommandTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_rest_command", tool_args={"rest_command_id": "missing"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_list_rest_commands_returns_every_command(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _rest_command_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "configuration.yaml").write_text(
+        "rest_command:\n  a:\n    url: http://a\n"
+    )
+    (tmp_path / "packages").mkdir()
+    (tmp_path / "packages" / "emhass.yaml").write_text(
+        "rest_command:\n  b:\n    url: http://b\n"
+    )
+
+    result = await ListRestCommandsTool(manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="list_rest_commands", tool_args={}),
+        _llm_context(admin_user.id),
+    )
+
+    ids = {item["rest_command_id"] for item in result["items"]}
+    assert ids == {"a", "b"}
 
 
 # --- WriteGatedTool / dry-run ------------------------------------------------
@@ -2263,6 +2357,221 @@ async def test_get_dashboard_tool_surfaces_unresolved_user(hass: HomeAssistant):
     )
 
     assert result["error_type"] == "UnresolvedUserError"
+
+
+# --- GetEnergyConfigTool / WriteEnergyConfigTool (issue #74) -----------------
+#
+# Never imported by any existing test. Mocking energy_manager directly
+# (same pattern as ListHelpersTool's tests) rather than standing up the
+# real `energy` component (which needs recorder/history, see
+# test_energy_manager.py) - what needs the real component is already
+# covered there; this only needs to prove the tool wires its args/errors
+# through correctly.
+
+
+@pytest.mark.asyncio
+async def test_get_energy_config_tool_calls_manager(hass: HomeAssistant, admin_user):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.energy_manager.get_energy_config",
+        AsyncMock(return_value={"energy_sources": []}),
+    ) as mock_get:
+        result = await GetEnergyConfigTool()._run(
+            hass,
+            llm.ToolInput(tool_name="get_energy_config", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"energy_sources": []}
+    mock_get.assert_called_once_with(hass, admin_user)
+
+
+@pytest.mark.asyncio
+async def test_get_energy_config_tool_surfaces_unresolved_user(hass: HomeAssistant):
+    """No user in context - resolve_user must refuse before energy_manager
+    is ever called."""
+    result = await GetEnergyConfigTool()._run(
+        hass, llm.ToolInput(tool_name="get_energy_config", tool_args={}), _llm_context()
+    )
+
+    assert result["error_type"] == "UnresolvedUserError"
+
+
+@pytest.mark.asyncio
+async def test_get_energy_config_tool_surfaces_not_configured(hass: HomeAssistant, admin_user):
+    """energy/get_prefs's real not_found error (never configured) must
+    come back as a tool error, not propagate as a raw exception."""
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.energy_manager.get_energy_config",
+        AsyncMock(side_effect=WebSocketCommandError("not_found", "No prefs")),
+    ):
+        result = await GetEnergyConfigTool()._run(
+            hass,
+            llm.ToolInput(tool_name="get_energy_config", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["error_type"] == "WebSocketCommandError"
+
+
+@pytest.mark.asyncio
+async def test_write_energy_config_tool_writes_and_reports_saved(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """Direct _write() call (bypassing the confirm-token gate), same
+    pattern as write_dashboard's equivalent test - the confirm-token flow
+    itself is generic WriteGatedTool behavior, already covered by
+    write_script's confirm-flow test."""
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.energy_manager.write_energy_config",
+        AsyncMock(return_value={"energy_sources": []}),
+    ) as mock_write:
+        result = await WriteEnergyConfigTool()._write(
+            hass,
+            llm.ToolInput(
+                tool_name="write_energy_config",
+                tool_args={"energy_sources": []},
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["saved"] is True
+    assert result["config"] == {"energy_sources": []}
+    mock_write.assert_called_once_with(
+        hass,
+        admin_user,
+        energy_sources=[],
+        device_consumption=None,
+        device_consumption_water=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_energy_config_tool_surfaces_unresolved_user(
+    hass: HomeAssistant, setup_integration_with_entry
+):
+    """No user in context - resolve_user must refuse before
+    energy_manager.write_energy_config is ever called."""
+    result = await WriteEnergyConfigTool()._write(
+        hass,
+        llm.ToolInput(tool_name="write_energy_config", tool_args={"energy_sources": []}),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "UnresolvedUserError"
+
+
+@pytest.mark.asyncio
+async def test_write_energy_config_tool_confirm_flow(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """The propose/confirm gate every write tool needs - proposing first
+    never calls energy_manager at all, confirming does."""
+    _arm(hass)
+    tool = WriteEnergyConfigTool()
+    args = {"energy_sources": []}
+
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.energy_manager.write_energy_config",
+        AsyncMock(return_value={"energy_sources": []}),
+    ) as mock_write:
+        proposal = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_energy_config", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+        assert proposal["confirmation_required"] is True
+        mock_write.assert_not_called()
+
+        confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_energy_config", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["saved"] is True
+    mock_write.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_write_energy_config_tool_passes_device_consumption_water(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    """The third optional field (device_consumption_water) must reach
+    energy_manager too, not just energy_sources/device_consumption."""
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.energy_manager.write_energy_config",
+        AsyncMock(return_value={"device_consumption_water": []}),
+    ) as mock_write:
+        await WriteEnergyConfigTool()._write(
+            hass,
+            llm.ToolInput(
+                tool_name="write_energy_config",
+                tool_args={"device_consumption_water": []},
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    mock_write.assert_called_once_with(
+        hass,
+        admin_user,
+        energy_sources=None,
+        device_consumption=None,
+        device_consumption_water=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_energy_config_tool_mirrors_when_enabled(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+):
+    """Same mirroring wiring as write_dashboard - see that test's own
+    comment for why _read_storage_file is patched directly (the test
+    harness's in-memory Store means a real read-after-write here would
+    never see energy_manager's write)."""
+    hass.config_entries.async_update_entry(
+        setup_integration_with_entry,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_test",
+        },
+    )
+    tool = WriteEnergyConfigTool()
+    fake_session = _FakeMirrorSession(
+        [
+            _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
+            _FakeMirrorResponse(404),  # GET current - no energy config mirrored yet
+            _FakeMirrorResponse(200, {"content": {"sha": "sha-1"}}),  # PUT after
+        ]
+    )
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.energy_manager.write_energy_config",
+            AsyncMock(return_value={"energy_sources": []}),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(side_effect=[None, '{"data": {"energy_sources": []}}']),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.mirror.async_get_clientsession",
+            return_value=fake_session,
+        ),
+    ):
+        result = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="write_energy_config", tool_args={"energy_sources": []}
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert result["mirror"]["mirrored"] is True
+    assert result["mirror"]["commits"] == ["after"]
 
 
 # --- AuditAutomationsTool ------------------------------------------------------
