@@ -117,10 +117,26 @@ async def test_write_dashboard_reraises_unrelated_ws_errors(
 
 
 # --- list_dashboards ---------------------------------------------------------
+#
+# list_dashboards goes through the frontend's own get_panels WS command
+# (see dashboard_manager.py's docstring for why), which is only registered
+# once the frontend component itself sets up - lovelace does NOT depend on
+# frontend (it's the other way around: frontend depends on lovelace), so
+# the module-level setup_lovelace fixture above isn't enough here. Every
+# real Home Assistant install always has frontend loaded (it's required
+# for the UI), but a bare websocket_api+lovelace test setup doesn't get it
+# for free.
+
+
+@pytest.fixture
+async def setup_frontend(hass: HomeAssistant):
+    assert await async_setup_component(hass, "frontend", {})
 
 
 @pytest.mark.asyncio
-async def test_list_dashboards_includes_default_panel(hass: HomeAssistant, admin_user):
+async def test_list_dashboards_includes_default_panel(
+    hass: HomeAssistant, admin_user, setup_frontend
+):
     """A fresh instance always has at least the default "lovelace" panel
     registered (see _async_ensure_default_panel in home-assistant/core),
     even before any dashboard is ever explicitly created."""
@@ -132,7 +148,7 @@ async def test_list_dashboards_includes_default_panel(hass: HomeAssistant, admin
 
 @pytest.mark.asyncio
 async def test_list_dashboards_includes_newly_created_storage_dashboard(
-    hass: HomeAssistant, admin_user
+    hass: HomeAssistant, admin_user, setup_frontend
 ):
     """A second, non-default storage-mode dashboard must show up too - this
     is exactly the gap issue #77 reported: a dashboard the caller doesn't
