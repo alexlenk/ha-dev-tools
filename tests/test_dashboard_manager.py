@@ -121,57 +121,26 @@ async def test_write_dashboard_reraises_unrelated_ws_errors(
 # list_dashboards goes through the frontend's own get_panels WS command
 # (see dashboard_manager.py's docstring for why), which is only registered
 # once the frontend component itself sets up - lovelace does NOT depend on
-# frontend (it's the other way around: frontend depends on lovelace), so
-# the module-level setup_lovelace fixture above isn't enough here. Every
-# real Home Assistant install always has frontend loaded (it's required
-# for the UI), but a bare websocket_api+lovelace test setup doesn't get it
-# for free.
-
-
-@pytest.fixture
-async def setup_frontend(hass: HomeAssistant):
-    assert await async_setup_component(hass, "frontend", {})
-
-
-@pytest.mark.asyncio
-async def test_list_dashboards_includes_default_panel(
-    hass: HomeAssistant, admin_user, setup_frontend
-):
-    """A fresh instance always has at least the default "lovelace" panel
-    registered (see _async_ensure_default_panel in home-assistant/core),
-    even before any dashboard is ever explicitly created."""
-    result = await list_dashboards(hass, admin_user)
-
-    url_paths = {d["url_path"] for d in result}
-    assert "lovelace" in url_paths
+# frontend (it's the other way around: frontend depends on lovelace).
+# Every real Home Assistant install always has frontend loaded (it's
+# required for the UI), but actually setting it up here would need the
+# separate hass_frontend PyPI package (the compiled static UI assets),
+# which isn't otherwise needed by anything in this repo - so these are
+# mocked call_ws_command tests, same pattern as get_dashboard/
+# write_dashboard's "url_path threading" tests above, rather than a real
+# integration test standing up the whole frontend component.
 
 
 @pytest.mark.asyncio
-async def test_list_dashboards_includes_newly_created_storage_dashboard(
-    hass: HomeAssistant, admin_user, setup_frontend
-):
-    """A second, non-default storage-mode dashboard must show up too - this
-    is exactly the gap issue #77 reported: a dashboard the caller doesn't
-    already know the url_path of was otherwise unreachable."""
-    from custom_components.ha_dev_tools.ws_call import call_ws_command
+async def test_list_dashboards_calls_get_panels(hass: HomeAssistant, admin_user):
+    with patch(
+        "custom_components.ha_dev_tools.dashboard_manager.call_ws_command",
+        new=AsyncMock(return_value={}),
+    ) as mock_call:
+        result = await list_dashboards(hass, admin_user)
 
-    await call_ws_command(
-        hass,
-        admin_user,
-        "lovelace/dashboards/create",
-        title="Solar",
-        url_path="dashboard-solar",
-        icon="mdi:solar-power",
-    )
-
-    result = await list_dashboards(hass, admin_user)
-
-    solar = next(d for d in result if d["url_path"] == "dashboard-solar")
-    assert solar["title"] == "Solar"
-    assert solar["icon"] == "mdi:solar-power"
-    assert solar["mode"] == "storage"
-    assert solar["show_in_sidebar"] is True
-    assert solar["require_admin"] is False
+    mock_call.assert_called_once_with(hass, admin_user, "get_panels")
+    assert result == []
 
 
 @pytest.mark.asyncio
