@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-09-23
+
+### Added
+- `list_dashboards` - `get_dashboard` could only read one dashboard at a time, by `url_path`, with no way to enumerate what dashboards exist on the instance at all. A real session hit this directly: a sweep for stale entity references checked the default dashboard via `get_dashboard` and reported clean, missing a second, non-default dashboard (`dashboard-solar`) entirely - only found because the user happened to paste its URL (issue #77). Goes through the frontend's own `get_panels` WS command rather than `lovelace/dashboards/list` (which only covers storage-mode dashboards) - every Lovelace dashboard of either mode registers a frontend panel with `component_name == "lovelace"`, which is the one place both modes show up together, matching `get_dashboard`'s own both-modes read coverage.
+- `trigger_automation` / `set_number_value` / `set_boolean_value` - debugging Modbus writes (EMHASS's battery-schedule slot updates intermittently failing with `No response received after 3 retries`) needed calling a single HA service on demand to test one write in isolation, which this integration had no way to do. The workaround - a temporary automation just for one-shot `number.set_value` calls - went wrong concretely: its `time_pattern: minutes: "*"` trigger kept re-firing every minute (`mode: single` only blocks concurrent re-entry, not repeat firing), racing EMHASS's own legitimate write cycle on the same registers (issue #76). Deliberately not a generic `call_service` tool - that was considered and rejected as too broad a surface (could reach `lock.unlock`, `alarm_control_panel.disarm`, `backup.*`, `homeassistant.restart` on an instance with real physical devices). Instead, three narrow tools each wrap exactly one hardcoded service: `trigger_automation` only runs an automation already in reviewed config (same boundary `write_automation` draws); `set_number_value`/`set_boolean_value` are scoped to just the `number`/`input_number` and `input_boolean` domains, refusing everything else outright - in particular `switch` and any other domain that could be a real-world actuator, which would need their own separate risk review. All three go through the same arm+admin gate plus the same propose/confirm pattern as `write_automation`. See `docs/SECURITY.md`'s new "Scoped service-call tools" section for the full reasoning.
+
 ## [2.18.0] - 2026-09-20
 
 ### Added

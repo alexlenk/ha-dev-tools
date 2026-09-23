@@ -93,6 +93,7 @@ from custom_components.ha_dev_tools.llm_api import (
     GetScriptTool,
     GetTemplateEntityTool,
     ListAddonsTool,
+    ListDashboardsTool,
     ListDerivedSensorsTool,
     ListHelpersTool,
     ListMqttTopicsTool,
@@ -102,6 +103,9 @@ from custom_components.ha_dev_tools.llm_api import (
     ReloadDerivedSensorTool,
     ReloadDomainTool,
     RenderTemplateTool,
+    SetBooleanValueTool,
+    SetNumberValueTool,
+    TriggerAutomationTool,
     UpdateDerivedSensorTool,
     UpdateHelperTool,
     UpdateTemplateEntityTool,
@@ -212,6 +216,9 @@ async def test_dev_tools_real_tools_registered(
         "write_automation",
         "delete_automation",
         "audit_automations",
+        "trigger_automation",
+        "set_number_value",
+        "set_boolean_value",
         "list_scripts",
         "get_script",
         "write_script",
@@ -230,6 +237,7 @@ async def test_dev_tools_real_tools_registered(
         "create_template_entity",
         "update_template_entity",
         "delete_template_entity",
+        "list_dashboards",
         "get_dashboard",
         "write_dashboard",
         "get_energy_config",
@@ -2327,6 +2335,41 @@ async def test_delete_template_entity_tool_mirrors_when_enabled(
     assert result["mirror"]["commits"] == ["before", "after"]
 
 
+# --- ListDashboardsTool (issue #77) -------------------------------------------
+#
+# Never imported by any existing test. dashboard_manager.py's own tests
+# (test_dashboard_manager.py) cover list_dashboards' real filtering/mapping
+# logic against real HA lovelace - this only proves the tool wires args/
+# errors through correctly, same pattern as GetDashboardTool's tests below.
+
+
+@pytest.mark.asyncio
+async def test_list_dashboards_tool_calls_manager(hass: HomeAssistant, admin_user):
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.dashboard_manager.list_dashboards",
+        AsyncMock(return_value=[{"url_path": "lovelace", "title": "Overview"}]),
+    ) as mock_list:
+        result = await ListDashboardsTool()._run(
+            hass,
+            llm.ToolInput(tool_name="list_dashboards", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"dashboards": [{"url_path": "lovelace", "title": "Overview"}]}
+    mock_list.assert_called_once_with(hass, admin_user)
+
+
+@pytest.mark.asyncio
+async def test_list_dashboards_tool_surfaces_unresolved_user(hass: HomeAssistant):
+    """No user in context - resolve_user must refuse before dashboard_manager
+    is ever called."""
+    result = await ListDashboardsTool()._run(
+        hass, llm.ToolInput(tool_name="list_dashboards", tool_args={}), _llm_context()
+    )
+
+    assert result["error_type"] == "UnresolvedUserError"
+
+
 # --- GetDashboardTool ---------------------------------------------------------
 #
 # Never imported by any existing test.
@@ -2595,6 +2638,149 @@ async def test_audit_automations_tool_calls_manager(hass: HomeAssistant):
 
     assert result == {"duplicates": []}
     mock_audit.assert_called_once_with(hass, manager)
+
+
+# --- TriggerAutomationTool / SetNumberValueTool / SetBooleanValueTool (issue #76) -
+#
+# Never imported by any existing test. service_call_manager.py's own tests
+# (test_service_call_manager.py) cover the real service-call/validation
+# logic - these only prove each tool's propose/confirm gate and error
+# translation, same mocked-manager pattern as the tools above.
+
+
+@pytest.mark.asyncio
+async def test_trigger_automation_tool_confirm_flow_calls_manager(
+    hass: HomeAssistant, admin_user
+):
+    _arm(hass)
+    tool = TriggerAutomationTool()
+    args = {"automation_id": "kitchen_id"}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="trigger_automation", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.service_call_manager.trigger_automation",
+        AsyncMock(return_value="automation.kitchen_lights"),
+    ) as mock_trigger:
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="trigger_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"triggered": True, "entity_id": "automation.kitchen_lights"}
+    mock_trigger.assert_called_once_with(hass, "kitchen_id", skip_condition=True)
+
+
+@pytest.mark.asyncio
+async def test_trigger_automation_tool_surfaces_not_running_error(hass: HomeAssistant):
+    result = await TriggerAutomationTool()._write(
+        hass,
+        llm.ToolInput(
+            tool_name="trigger_automation", tool_args={"automation_id": "unknown_id"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "AutomationNotRunningError"
+
+
+@pytest.mark.asyncio
+async def test_set_number_value_tool_confirm_flow_calls_manager(
+    hass: HomeAssistant, admin_user
+):
+    _arm(hass)
+    tool = SetNumberValueTool()
+    args = {"entity_id": "number.battery_charge_slot", "value": 42.5}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="set_number_value", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.service_call_manager.set_number_value",
+        AsyncMock(return_value=None),
+    ) as mock_set:
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="set_number_value", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"entity_id": "number.battery_charge_slot", "value": 42.5}
+    mock_set.assert_called_once_with(hass, "number.battery_charge_slot", 42.5)
+
+
+@pytest.mark.asyncio
+async def test_set_number_value_tool_surfaces_invalid_domain_error(
+    hass: HomeAssistant,
+):
+    result = await SetNumberValueTool()._write(
+        hass,
+        llm.ToolInput(
+            tool_name="set_number_value",
+            tool_args={"entity_id": "switch.garage_door", "value": 1},
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "InvalidEntityDomainError"
+
+
+@pytest.mark.asyncio
+async def test_set_boolean_value_tool_confirm_flow_calls_manager(
+    hass: HomeAssistant, admin_user
+):
+    _arm(hass)
+    tool = SetBooleanValueTool()
+    args = {"entity_id": "input_boolean.vacation_mode", "state": True}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="set_boolean_value", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["confirmation_required"] is True
+
+    confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.service_call_manager.set_boolean_value",
+        AsyncMock(return_value=None),
+    ) as mock_set:
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="set_boolean_value", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+
+    assert result == {"entity_id": "input_boolean.vacation_mode", "state": True}
+    mock_set.assert_called_once_with(hass, "input_boolean.vacation_mode", True)
+
+
+@pytest.mark.asyncio
+async def test_set_boolean_value_tool_surfaces_entity_not_found_error(
+    hass: HomeAssistant,
+):
+    result = await SetBooleanValueTool()._write(
+        hass,
+        llm.ToolInput(
+            tool_name="set_boolean_value",
+            tool_args={"entity_id": "input_boolean.does_not_exist", "state": True},
+        ),
+        _llm_context(),
+    )
+
+    assert result["error_type"] == "EntityNotFoundError"
 
 
 # --- write_dashboard tool (storage-file-based mirroring) ---------------------

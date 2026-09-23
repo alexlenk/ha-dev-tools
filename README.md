@@ -209,8 +209,16 @@ matters for setup, covered below.
 | `delete_entities` | Same as `delete_entity`, for a list of entity_ids in one propose/confirm pair - for bulk cleanup, avoids one round trip (and one mirror commit pair) per entity |
 | `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) plus the general-purpose Template helper (any entity domain - light, switch, sensor, ...) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create) |
 | `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. For the config-entry Template *helper* instead, see the row above |
+| `list_dashboards` | List every configured Lovelace dashboard (title, url_path, icon, mode, require_admin, show_in_sidebar) - storage- and YAML-mode alike. Use before `get_dashboard` when checking every dashboard for something, since a non-default dashboard's url_path otherwise has to already be known |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction) |
 | `get_energy_config` / `write_energy_config` | Read/write the Energy dashboard's own source config (grid/solar/battery/gas/water entities, cost settings) - a separate HA subsystem from Lovelace dashboards, not reachable through `get_dashboard`. Each field in a write wholesale-replaces that section; omitting a field leaves it untouched |
+
+**Act**
+| Tool | What it does |
+|---|---|
+| `trigger_automation` | Run an existing automation immediately by its config id, the same as the UI's "Run actions" button - for one-shot testing without a throwaway automation edit cycle. Only ever triggers an automation already in reviewed config; never accepts an arbitrary entity_id or service |
+| `set_number_value` | Set a `number` or `input_number` entity's value directly (e.g. an EMHASS battery-schedule slot, a Modbus-backed inverter setting) - scoped to exactly these two domains, not a generic service-call tool |
+| `set_boolean_value` | Turn an `input_boolean` helper on or off directly - scoped to just this virtual helper domain, never `switch` or any other domain that could be a real-world actuator |
 
 **Diagnose**
 | Tool | What it does |

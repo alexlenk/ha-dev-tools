@@ -29,6 +29,35 @@ class YamlModeDashboardError(Exception):
     """
 
 
+async def list_dashboards(hass: HomeAssistant, user: User) -> list[dict[str, Any]]:
+    """List every configured Lovelace dashboard, storage- and YAML-mode alike.
+
+    Goes through the frontend's own `get_panels` WS command rather than
+    `lovelace/dashboards/list` - that collection only covers storage-mode
+    dashboards, since a YAML-mode one registered via `lovelace: dashboards:`
+    in configuration.yaml never enters it at all (confirmed by reading
+    home-assistant/core's lovelace/__init__.py: YAML dashboards are merged
+    straight into hass.data[LOVELACE_DATA].dashboards, bypassing
+    DashboardsCollection entirely). Every Lovelace dashboard of either mode
+    does register a frontend panel with component_name == "lovelace"
+    though - that's the one place both kinds show up together, matching
+    get_dashboard's own "works in both modes" coverage (issue #77).
+    """
+    panels = await call_ws_command(hass, user, "get_panels")
+    return [
+        {
+            "url_path": panel["url_path"],
+            "title": panel.get("title"),
+            "icon": panel.get("icon"),
+            "mode": (panel.get("config") or {}).get("mode"),
+            "require_admin": panel.get("require_admin", False),
+            "show_in_sidebar": panel.get("show_in_sidebar", True),
+        }
+        for panel in panels.values()
+        if panel.get("component_name") == "lovelace"
+    ]
+
+
 async def get_dashboard(
     hass: HomeAssistant, user: User, *, url_path: str | None = None
 ) -> dict[str, Any]:
