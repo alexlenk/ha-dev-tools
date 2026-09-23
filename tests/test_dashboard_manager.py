@@ -10,6 +10,7 @@ from pytest_homeassistant_custom_component.common import MockUser
 from custom_components.ha_dev_tools.dashboard_manager import (
     YamlModeDashboardError,
     get_dashboard,
+    list_dashboards,
     write_dashboard,
 )
 from custom_components.ha_dev_tools.ws_call import WebSocketCommandError
@@ -113,3 +114,97 @@ async def test_write_dashboard_reraises_unrelated_ws_errors(
     ):
         with pytest.raises(WebSocketCommandError, match="Something else broke"):
             await write_dashboard(hass, admin_user, {"views": []})
+
+
+# --- list_dashboards ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_dashboards_includes_default_panel(hass: HomeAssistant, admin_user):
+    """A fresh instance always has at least the default "lovelace" panel
+    registered (see _async_ensure_default_panel in home-assistant/core),
+    even before any dashboard is ever explicitly created."""
+    result = await list_dashboards(hass, admin_user)
+
+    url_paths = {d["url_path"] for d in result}
+    assert "lovelace" in url_paths
+
+
+@pytest.mark.asyncio
+async def test_list_dashboards_includes_newly_created_storage_dashboard(
+    hass: HomeAssistant, admin_user
+):
+    """A second, non-default storage-mode dashboard must show up too - this
+    is exactly the gap issue #77 reported: a dashboard the caller doesn't
+    already know the url_path of was otherwise unreachable."""
+    from custom_components.ha_dev_tools.ws_call import call_ws_command
+
+    await call_ws_command(
+        hass,
+        admin_user,
+        "lovelace/dashboards/create",
+        title="Solar",
+        url_path="dashboard-solar",
+        icon="mdi:solar-power",
+    )
+
+    result = await list_dashboards(hass, admin_user)
+
+    solar = next(d for d in result if d["url_path"] == "dashboard-solar")
+    assert solar["title"] == "Solar"
+    assert solar["icon"] == "mdi:solar-power"
+    assert solar["mode"] == "storage"
+    assert solar["show_in_sidebar"] is True
+    assert solar["require_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_dashboards_filters_out_non_lovelace_panels_and_maps_mode(
+    hass: HomeAssistant, admin_user
+):
+    """get_panels returns every registered frontend panel, not just
+    dashboards (e.g. "config", "developer-tools") - only component_name ==
+    "lovelace" entries should be returned, with mode read from each panel's
+    own config dict (this is how a YAML-mode dashboard is distinguished,
+    since get_panels is the only place both modes show up together)."""
+    fake_panels = {
+        "lovelace": {
+            "component_name": "lovelace",
+            "title": "Overview",
+            "icon": None,
+            "config": {"mode": "storage"},
+            "url_path": "lovelace",
+            "require_admin": False,
+            "show_in_sidebar": True,
+        },
+        "extra": {
+            "component_name": "lovelace",
+            "title": "Extra",
+            "icon": "mdi:file",
+            "config": {"mode": "yaml"},
+            "url_path": "extra",
+            "require_admin": True,
+            "show_in_sidebar": False,
+        },
+        "config": {
+            "component_name": "config",
+            "title": "Settings",
+            "icon": "mdi:cog",
+            "config": None,
+            "url_path": "config",
+            "require_admin": True,
+            "show_in_sidebar": True,
+        },
+    }
+    with patch(
+        "custom_components.ha_dev_tools.dashboard_manager.call_ws_command",
+        new=AsyncMock(return_value=fake_panels),
+    ):
+        result = await list_dashboards(hass, admin_user)
+
+    url_paths = {d["url_path"] for d in result}
+    assert url_paths == {"lovelace", "extra"}
+    extra = next(d for d in result if d["url_path"] == "extra")
+    assert extra["mode"] == "yaml"
+    assert extra["require_admin"] is True
+    assert extra["show_in_sidebar"] is False

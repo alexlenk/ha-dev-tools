@@ -140,6 +140,39 @@ to repair the broken YAML bridge. If per-install customization is ever
 needed, it belongs in a proper options flow (Settings → Devices & Services →
 HA Dev Tools → Configure), not YAML.
 
+## Scoped service-call tools
+
+`trigger_automation`, `set_number_value`, and `set_boolean_value`
+(`service_call_manager.py`) call Home Assistant services - a different
+surface than the path allowlist above, which only governs file-touching
+tools. A generic `call_service` tool (domain + service + arbitrary data) was
+considered and rejected: it would be able to reach *any* registered
+service, including high-consequence ones on an instance with real physical
+devices (`lock.unlock`, `alarm_control_panel.disarm`, `backup.*`,
+`homeassistant.restart`), and bounding that with a configurable allow/deny
+list just moves the same risk into a config value someone has to get right.
+
+Instead, each of these three tools wraps exactly one hardcoded service
+call, so the tool surface itself is the allowlist rather than something
+configured on top of a broad one:
+
+- `trigger_automation` only calls `automation.trigger`, and only for an
+  automation id that already resolves to a live entity - the security
+  boundary is "already in reviewed `automations.yaml`/packages", the same
+  boundary `write_automation` already draws, not "whatever entity_id the
+  caller passes".
+- `set_number_value`/`set_boolean_value` only reach the `number`/
+  `input_number` and `input_boolean` domains respectively - refusing every
+  other domain outright. In particular, `switch` (which could be anything
+  from a desk lamp to a garage door opener) and any domain that maps to a
+  real-world actuator were deliberately left out; those would need their
+  own separate risk review before ever getting a write tool.
+
+All three still go through the same two `GatedTool` checks (arm file +
+admin) as every other tool, plus the same `WriteGatedTool` propose/confirm
+gate as `write_automation` - this scoping is in addition to those, not a
+replacement for them.
+
 ## What this does *not* do
 
 - It does not sandbox this integration's own code. Home Assistant gives

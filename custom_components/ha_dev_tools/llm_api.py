@@ -34,6 +34,7 @@ from . import (
     history_manager,
     mirror,
     mqtt_manager,
+    service_call_manager,
     supervisor_manager,
     template_manager,
     write_confirmation,
@@ -2034,6 +2035,38 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         )
 
 
+class ListDashboardsTool(GatedTool):
+    """List every configured dashboard - see dashboard_manager.py."""
+
+    name = "list_dashboards"
+    description = (
+        "List every configured Lovelace dashboard (title, url_path, icon, "
+        "mode, require_admin, show_in_sidebar) - both storage-mode and "
+        "YAML-mode, same coverage get_dashboard already has per-dashboard. "
+        "Use this before get_dashboard when checking every dashboard for "
+        "something (e.g. leftover references to a renamed/removed entity) "
+        "- otherwise a non-default dashboard whose url_path you don't "
+        "already know is silently missed (see issue #77). Pass a result's "
+        "url_path straight to get_dashboard/write_dashboard."
+    )
+    parameters = vol.Schema({})
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List every dashboard."""
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            dashboards = await dashboard_manager.list_dashboards(hass, user)
+        except (UnresolvedUserError, WebSocketCommandError) as exc:
+            return _tool_error(exc)
+        return {"dashboards": dashboards}
+
+
 class GetDashboardTool(GatedTool):
     """Read a dashboard's config - works in both storage and YAML mode."""
 
@@ -2234,6 +2267,124 @@ class AuditAutomationsTool(GatedTool):
     ) -> JsonObjectType:
         """Run the audit."""
         return await audit_manager.audit_automations(hass, self._manager)
+
+
+class TriggerAutomationTool(WriteGatedTool):
+    """Run an existing automation on demand - see service_call_manager.py."""
+
+    name = "trigger_automation"
+    description = (
+        "Run an existing automation immediately by its config id (not its "
+        "entity_id - automation.<id> is never valid, see get_automation), "
+        "the same as the UI's 'Run actions' button. Only automations "
+        "already defined in reviewed automations.yaml/packages can be "
+        "triggered this way - unlike a generic service-call tool, this "
+        "never accepts an arbitrary entity_id or service. Useful for "
+        "one-shot testing without a throwaway automation edit cycle (see "
+        "issue #76). skip_condition defaults to true (conditions in the "
+        "automation are not evaluated, matching the UI default). Fails "
+        "clearly if no live automation.* entity exists yet for this id "
+        "(e.g. never reloaded since being added)."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("automation_id"): str,
+            vol.Optional("skip_condition", default=True): bool,
+        }
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Resolve the automation's live entity and trigger it."""
+        args = tool_input.tool_args
+        try:
+            entity_id = await service_call_manager.trigger_automation(
+                hass,
+                args["automation_id"],
+                skip_condition=args.get("skip_condition", True),
+            )
+        except service_call_manager.AutomationNotRunningError as exc:
+            return _tool_error(exc)
+        return {"triggered": True, "entity_id": entity_id}
+
+
+class SetNumberValueTool(WriteGatedTool):
+    """Set a number/input_number entity's value - see service_call_manager.py."""
+
+    name = "set_number_value"
+    description = (
+        "Set a `number` or `input_number` entity's value directly - e.g. "
+        "to test a single write in isolation (an EMHASS battery-schedule "
+        "slot, a Modbus-backed inverter setting exposed as a number "
+        "entity) without a full automation edit cycle (see issue #76). "
+        "Deliberately scoped to just these two domains, not a generic "
+        "service-call tool - refuses any other entity domain rather than "
+        "guessing which service to call."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {vol.Required("entity_id"): str, vol.Required("value"): vol.Coerce(float)}
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Call the entity's own domain-specific set_value service."""
+        args = tool_input.tool_args
+        try:
+            await service_call_manager.set_number_value(
+                hass, args["entity_id"], args["value"]
+            )
+        except (
+            service_call_manager.InvalidEntityDomainError,
+            service_call_manager.EntityNotFoundError,
+        ) as exc:
+            return _tool_error(exc)
+        return {"entity_id": args["entity_id"], "value": args["value"]}
+
+
+class SetBooleanValueTool(WriteGatedTool):
+    """Turn an input_boolean helper on/off - see service_call_manager.py."""
+
+    name = "set_boolean_value"
+    description = (
+        "Turn an `input_boolean` helper on or off directly. Scoped to just "
+        "this virtual helper domain - never `switch` or any other domain "
+        "that could be a real-world actuator (see issue #76's risk "
+        "discussion); those would need their own separate security review "
+        "before getting a write tool."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {vol.Required("entity_id"): str, vol.Required("state"): bool}
+    )
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Call input_boolean.turn_on or turn_off."""
+        args = tool_input.tool_args
+        try:
+            await service_call_manager.set_boolean_value(
+                hass, args["entity_id"], args["state"]
+            )
+        except (
+            service_call_manager.InvalidEntityDomainError,
+            service_call_manager.EntityNotFoundError,
+        ) as exc:
+            return _tool_error(exc)
+        return {"entity_id": args["entity_id"], "state": args["state"]}
 
 
 class ListScriptsTool(GatedTool):
@@ -2517,6 +2668,9 @@ class DevToolsAPI(llm.API):
                 WriteAutomationTool(self.automation_manager),
                 DeleteAutomationTool(self.automation_manager),
                 AuditAutomationsTool(self.automation_manager),
+                TriggerAutomationTool(),
+                SetNumberValueTool(),
+                SetBooleanValueTool(),
                 ListScriptsTool(self.script_manager),
                 GetScriptTool(self.script_manager),
                 WriteScriptTool(self.script_manager),
@@ -2535,6 +2689,7 @@ class DevToolsAPI(llm.API):
                 CreateTemplateEntityTool(self.template_yaml_manager),
                 UpdateTemplateEntityTool(self.template_yaml_manager),
                 DeleteTemplateEntityTool(self.template_yaml_manager),
+                ListDashboardsTool(),
                 GetDashboardTool(),
                 WriteDashboardTool(),
                 GetEnergyConfigTool(),
