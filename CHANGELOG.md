@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.2] - 2026-09-24
+
+### Added
+- `audit_automations` now reports `misread_values`: unquoted values that Home Assistant reads as a different type than written, e.g. `before: 17:00:00` read as the integer `61200`, or `state: off` read as `False` (issue #96). Each finding gives the automation, file, path (e.g. `conditions[1].before`), line, the text as written and what HA reads it as. 2.20.1 stopped `write_automation` from writing such values, but values already in a file stay broken until written again. Nothing pointed to them: `get_automation` shows the intended string and `check_config` reports the config as valid, while HA disables the automation. Writing the automation again with `write_automation` quotes the value.
+
 ### Fixed
 - `delete_entities` with mirroring enabled could crash while building the backup snapshot if one of the entity ids had no registry entry. It now records `null` for that entity, the same way `delete_entity` already does. Found while fixing the type errors below.
 

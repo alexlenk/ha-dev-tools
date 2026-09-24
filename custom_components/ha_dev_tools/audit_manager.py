@@ -8,13 +8,18 @@ any error - the exact class of "latent failure" this project exists to
 surface. `audit_automations` walks every known automation and reports
 both.
 
-Scope: this first pass covers duplicate ids and unavailable-entity
-references, the two checks that are cheap and reliable to detect
-statically. Overlapping-trigger race detection and unhandled
-rest_command/shell_command failures (also called out in
-docs/ARCHITECTURE.md) are real but need more careful semantic analysis
-to avoid false positives/negatives - deliberately left for a follow-up
-rather than shipped half-confident.
+It also reports unquoted values Home Assistant reads as a different type
+than they look (`before: 17:00:00` -> 61200, `state: off` -> False) -
+these silently disable the automation, while every read through this
+integration shows the intended string (issue #96).
+
+Scope: duplicate ids, unavailable-entity references and misread values
+are the checks that are cheap and reliable to detect statically.
+Overlapping-trigger race detection and unhandled rest_command/
+shell_command failures (also called out in docs/ARCHITECTURE.md) are
+real but need more careful semantic analysis to avoid false
+positives/negatives - deliberately left for a follow-up rather than
+shipped half-confident.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant, State
 
 from .automation_manager import AutomationManager
+from .yaml_style import find_misread_scalars
 
 UNAVAILABLE_STATES = {"unavailable", "unknown"}
 
@@ -73,10 +79,12 @@ def find_automation_state(hass: HomeAssistant, automation_id: str) -> State | No
 async def audit_automations(
     hass: HomeAssistant, automation_manager: AutomationManager
 ) -> dict[str, Any]:
-    """Audit every known automation for duplicate ids and unavailable entity references."""
+    """Audit every known automation for duplicate ids, unavailable entity
+    references, and values Home Assistant misreads."""
     all_automations = await automation_manager.all_automations()
     id_locations: dict[str, list[str]] = {}
     unavailable_findings: list[dict[str, Any]] = []
+    misread_findings: list[dict[str, Any]] = []
     currently_disabled: list[str] = []
 
     for location, entry in all_automations:
@@ -116,6 +124,17 @@ async def audit_automations(
                 }
             )
 
+        misread = find_misread_scalars(entry)
+        if misread:
+            misread_findings.append(
+                {
+                    "automation_id": automation_id,
+                    "file_path": location.file_path,
+                    "values": misread,
+                    "currently_enabled": currently_enabled,
+                }
+            )
+
     duplicate_findings = [
         {"automation_id": automation_id, "files": files}
         for automation_id, files in id_locations.items()
@@ -126,6 +145,7 @@ async def audit_automations(
         "automations_checked": len(all_automations),
         "duplicate_ids": duplicate_findings,
         "references_unavailable_entities": unavailable_findings,
+        "misread_values": misread_findings,
         "currently_disabled": sorted(currently_disabled),
         "note": (
             "Overlapping-trigger race detection and unhandled "

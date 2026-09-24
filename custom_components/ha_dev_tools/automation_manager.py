@@ -230,7 +230,9 @@ class AutomationManager:
             )
             for entry in automations:
                 if isinstance(entry, dict):
-                    results.append((location, dict(entry)))
+                    # The loaded mapping itself, not a dict() copy: the
+                    # audit reads its per-key line numbers (ruamel's .lc).
+                    results.append((location, entry))
         return results
 
     async def get_automation(

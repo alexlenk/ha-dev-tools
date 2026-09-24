@@ -10,6 +10,7 @@ from io import StringIO
 from ruamel.yaml import YAML
 
 from custom_components.ha_dev_tools.yaml_style import (
+    find_misread_scalars,
     merge_preserving_style,
     pyyaml_misreads,
     quote_ambiguous_scalars,
@@ -74,3 +75,33 @@ def test_merge_replaces_mapping_using_merge_key_wholesale():
     assert merged == {"x": 1, "y": 3}
     # The shared anchor itself is untouched.
     assert document["base"] == {"x": 1}
+
+
+def test_find_misread_scalars_reports_path_line_and_reading():
+    document = _load(
+        "mode: off\n"
+        "items:\n"
+        "- 1:30\n"
+        "- '1:30'\n"
+        "- nested:\n"
+        "    day: 2024-01-01\n"
+        "    when: |\n"
+        "      17:00:00\n"
+        "    ok: 07:00:00\n"
+    )
+    assert find_misread_scalars(document) == [
+        {"path": "mode", "line": 1, "written": "off", "ha_reads_as": False},
+        {"path": "items[0]", "line": 3, "written": "1:30", "ha_reads_as": 90},
+    ]
+
+
+def test_find_misread_scalars_without_line_info_and_odd_readings():
+    # Plain dicts/lists (no ruamel position data) still get paths; values
+    # PyYAML reads as floats or non-JSON types are reported JSON-safe.
+    findings = find_misread_scalars({"a": ["1.5", ".inf", "~", "="]})
+    assert findings == [
+        {"path": "a[0]", "line": None, "written": "1.5", "ha_reads_as": 1.5},
+        {"path": "a[1]", "line": None, "written": ".inf", "ha_reads_as": "inf"},
+        {"path": "a[2]", "line": None, "written": "~", "ha_reads_as": None},
+        {"path": "a[3]", "line": None, "written": "=", "ha_reads_as": "<load error>"},
+    ]
