@@ -285,6 +285,225 @@ async def test_write_automation_quotes_ambiguous_state_scalars(
 
 
 @pytest.mark.asyncio
+async def test_write_automation_quotes_base60_time_strings(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Issue #91's root cause: ruamel.yaml (YAML 1.2) dumps a new "17:00:00"
+    unquoted, but HA's PyYAML loader (YAML 1.1) reads an unquoted
+    `17:00:00` as the base-60 int 61200 - HA then rejects the time
+    condition ("Invalid time specified: 61200") and disables the
+    automation."""
+    result = await automation_manager.write_automation(
+        "time_window",
+        {
+            "alias": "Time window",
+            "triggers": [],
+            "conditions": [
+                {"condition": "time", "after": "07:00:00", "before": "17:00:00"},
+                {"condition": "time", "after": "9:30"},
+            ],
+            "actions": [],
+        },
+    )
+
+    assert 'before: "17:00:00"' in result.content_after
+    assert 'after: "9:30"' in result.content_after
+    parsed = pyyaml.safe_load((tmp_path / "automations.yaml").read_text())
+    assert parsed[0]["conditions"][0]["after"] == "07:00:00"
+    assert parsed[0]["conditions"][0]["before"] == "17:00:00"
+    assert parsed[0]["conditions"][1]["after"] == "9:30"
+
+
+@pytest.mark.asyncio
+async def test_write_automation_preserves_formatting_of_unchanged_fields(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Issue #91: editing one field used to swap the whole automation for
+    the caller's plain dict, so every untouched field in it lost its
+    original formatting too - e.g. `state: 'off'` two lines away from the
+    edited `before:` came back as `state: "off"`."""
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: '1760425761699'\n"
+        "  alias: Solar Heating\n"
+        "  triggers:\n"
+        "  - trigger: state\n"
+        "    entity_id: sensor.excess  # grid export\n"
+        "  conditions:\n"
+        "  - condition: state\n"
+        "    entity_id: switch.heater\n"
+        "    state: 'off'\n"
+        "  - condition: time\n"
+        "    after: '07:00:00'\n"
+        "    before: 61200\n"
+        "  - condition: numeric_state\n"
+        "    entity_id: sensor.excess\n"
+        "    above: 0x10\n"
+        "  actions: []\n"
+        "  mode: single\n",
+    )
+    before = (tmp_path / "automations.yaml").read_text()
+
+    result = await automation_manager.write_automation(
+        "1760425761699",
+        {
+            "alias": "Solar Heating",
+            "triggers": [{"trigger": "state", "entity_id": "sensor.excess"}],
+            "conditions": [
+                {"condition": "state", "entity_id": "switch.heater", "state": "off"},
+                {"condition": "time", "after": "07:00:00", "before": "17:00:00"},
+                {
+                    "condition": "numeric_state",
+                    "entity_id": "sensor.excess",
+                    "above": 16,
+                },
+            ],
+            "actions": [],
+            "mode": "single",
+        },
+    )
+
+    # Exactly one line changed; every other line (quote style, the hex
+    # int, the comment) is byte-for-byte what it was.
+    assert result.content_after == before.replace(
+        "    before: 61200\n", '    before: "17:00:00"\n'
+    )
+    parsed = pyyaml.safe_load(result.content_after)
+    assert parsed[0]["conditions"][1]["before"] == "17:00:00"
+
+
+@pytest.mark.asyncio
+async def test_write_automation_patch_adds_and_removes_keys_and_list_items(
+    automation_manager, tmp_path, mock_reload_service
+):
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: patched\n"
+        "  alias: 'Patched'\n"
+        "  description: Goes away\n"
+        "  triggers: []\n"
+        "  conditions:\n"
+        "  - condition: state\n"
+        "    entity_id: switch.a\n"
+        "    state: 'on'\n"
+        "  - condition: state\n"
+        "    entity_id: switch.b\n"
+        "    state: 'on'\n"
+        "  actions: []\n",
+    )
+
+    await automation_manager.write_automation(
+        "patched",
+        {
+            "alias": "Patched",
+            "triggers": [],
+            "conditions": [
+                {"condition": "state", "entity_id": "switch.a", "state": "on"}
+            ],
+            "actions": [],
+            "mode": "restart",
+        },
+    )
+
+    raw = (tmp_path / "automations.yaml").read_text()
+    assert "alias: 'Patched'" in raw
+    assert "state: 'on'" in raw
+    assert "description" not in raw
+    assert "switch.b" not in raw
+    parsed = pyyaml.safe_load(raw)
+    assert parsed == [
+        {
+            "id": "patched",
+            "alias": "Patched",
+            "triggers": [],
+            "conditions": [
+                {"condition": "state", "entity_id": "switch.a", "state": "on"}
+            ],
+            "actions": [],
+            "mode": "restart",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_write_automation_does_not_patch_shared_anchor_in_place(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Patching an anchored node in place would silently change every other
+    automation aliasing it - so it's replaced instead, like before #91."""
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: first\n"
+        "  alias: First\n"
+        "  triggers: []\n"
+        "  conditions: &shared\n"
+        "  - condition: state\n"
+        "    entity_id: switch.a\n"
+        "    state: 'on'\n"
+        "  actions: []\n"
+        "- id: second\n"
+        "  alias: Second\n"
+        "  triggers: []\n"
+        "  conditions: *shared\n"
+        "  actions: []\n",
+    )
+
+    await automation_manager.write_automation(
+        "first",
+        {
+            "alias": "First",
+            "triggers": [],
+            "conditions": [
+                {"condition": "state", "entity_id": "switch.z", "state": "on"}
+            ],
+            "actions": [],
+        },
+    )
+
+    parsed = pyyaml.safe_load((tmp_path / "automations.yaml").read_text())
+    assert parsed[0]["conditions"][0]["entity_id"] == "switch.z"
+    assert parsed[1]["conditions"][0]["entity_id"] == "switch.a"
+
+
+@pytest.mark.asyncio
+async def test_write_automation_requotes_unchanged_but_misread_plain_scalar(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """An unchanged value is only kept as-is if HA reads it back correctly -
+    an existing unquoted `state: off` (which HA reads as False) gets quoted
+    when the caller writes the string "off" for it."""
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: bare_off\n"
+        "  triggers: []\n"
+        "  conditions:\n"
+        "  - condition: state\n"
+        "    entity_id: switch.a\n"
+        "    state: off\n"
+        "  actions: []\n",
+    )
+
+    result = await automation_manager.write_automation(
+        "bare_off",
+        {
+            "triggers": [],
+            "conditions": [
+                {"condition": "state", "entity_id": "switch.a", "state": "off"}
+            ],
+            "actions": [],
+        },
+    )
+
+    assert 'state: "off"' in result.content_after
+    parsed = pyyaml.safe_load(result.content_after)
+    assert parsed[0]["conditions"][0]["state"] == "off"
+
+
+@pytest.mark.asyncio
 async def test_write_automation_missing_package_raises(automation_manager, tmp_path):
     with pytest.raises(AutomationNotFoundError):
         await automation_manager.write_automation(
