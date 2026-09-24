@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `delete_entities` with mirroring enabled could crash while building the backup snapshot if one of the entity ids had no registry entry. It now records `null` for that entity, the same way `delete_entity` already does. Found while fixing the type errors below.
+
+### Changed
+- CI now runs the same checks as `.pre-commit-config.yaml` (black, isort, flake8, mypy) in a new `lint` job (issue #93). None of them were enforced before, and `main` had drifted: mypy reported 33 errors, 10 files weren't black/isort-formatted, and one test had an unused import. All of that is fixed. No other behavior changes.
+
 ## [2.20.0] - 2026-09-24
 
 ### Fixed

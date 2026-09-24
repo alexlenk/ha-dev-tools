@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, override
+from typing import Any, cast, override
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
@@ -226,7 +226,7 @@ def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
     exc.step_id/exc.schema into a plain string and lose exactly the
     information a caller needs to retry correctly.
     """
-    return {
+    payload: dict[str, Any] = {
         "needs_input": True,
         "step_id": exc.step_id,
         "schema": exc.schema,
@@ -238,6 +238,7 @@ def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
             "until the flow finishes."
         ),
     }
+    return cast(JsonObjectType, payload)
 
 
 def _parse_datetime(value: str, *, field: str) -> Any:
@@ -620,9 +621,13 @@ class DeleteEntitiesTool(WriteGatedTool):
         except entity_manager.EntityNotFoundError as exc:
             return _tool_error(exc)
         response: JsonObjectType = dict(result)
-        if mirror.is_mirror_enabled(hass):
+        if mirror.is_mirror_enabled(hass) and before_entries is not None:
             before_snapshot = [
-                entity_manager.entity_registry_snapshot(before_entries[eid])
+                (
+                    entity_manager.entity_registry_snapshot(entry)
+                    if (entry := before_entries[eid]) is not None
+                    else None
+                )
                 for eid in entity_ids
             ]
             mirror_result = await mirror.mirror_write(
@@ -931,7 +936,7 @@ class ListAddonsTool(GatedTool):
             addons = await supervisor_manager.list_addons(hass)
         except SupervisorNotAvailableError as exc:
             return _tool_error(exc)
-        return {"addons": addons}
+        return cast(JsonObjectType, {"addons": addons})
 
 
 class GetAddonLogsTool(GatedTool):
@@ -1241,7 +1246,7 @@ class DeleteAutomationTool(WriteGatedTool):
         )
 
 
-def _helper_domain_schema() -> vol.Schema:
+def _helper_domain_schema() -> vol.In:
     return vol.In(HELPER_DOMAINS)
 
 
@@ -1278,7 +1283,7 @@ class ListHelpersTool(GatedTool):
             WebSocketCommandError,
         ) as exc:
             return _tool_error(exc)
-        return {"items": items}
+        return cast(JsonObjectType, {"items": items})
 
 
 class CreateHelperTool(WriteGatedTool):
@@ -1441,7 +1446,7 @@ class DeleteHelperTool(WriteGatedTool):
         return response
 
 
-def _derived_sensor_domain_schema() -> vol.Schema:
+def _derived_sensor_domain_schema() -> vol.In:
     return vol.In(DERIVED_SENSOR_DOMAINS)
 
 
@@ -1491,7 +1496,7 @@ class ListDerivedSensorsTool(GatedTool):
             )
         except InvalidDerivedSensorDomainError as exc:
             return _tool_error(exc)
-        return {"items": items}
+        return cast(JsonObjectType, {"items": items})
 
 
 class GetDerivedSensorTool(GatedTool):
@@ -1684,7 +1689,7 @@ class DeleteDerivedSensorTool(WriteGatedTool):
         except DerivedSensorNotFoundError as exc:
             return _tool_error(exc)
         response: JsonObjectType = dict(result)
-        if mirror.is_mirror_enabled(hass):
+        if mirror.is_mirror_enabled(hass) and before is not None:
             mirror_result = await mirror.mirror_write(
                 hass,
                 path=_derived_sensor_mirror_path(before["domain"], entry_id),
@@ -1756,7 +1761,7 @@ class ListTemplateEntitiesTool(GatedTool):
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """List every template: entity."""
-        return {"items": await self._manager.list_entities()}
+        return cast(JsonObjectType, {"items": await self._manager.list_entities()})
 
 
 class GetTemplateEntityTool(GatedTool):
@@ -2076,7 +2081,7 @@ class ListDashboardsTool(GatedTool):
             dashboards = await dashboard_manager.list_dashboards(hass, user)
         except (UnresolvedUserError, WebSocketCommandError) as exc:
             return _tool_error(exc)
-        return {"dashboards": dashboards}
+        return cast(JsonObjectType, {"dashboards": dashboards})
 
 
 class GetDashboardTool(GatedTool):
@@ -2433,7 +2438,7 @@ class ListScriptsTool(GatedTool):
             }
             for location, script_id, config in await self._manager.all_scripts()
         ]
-        return {"items": items}
+        return cast(JsonObjectType, {"items": items})
 
 
 class GetScriptTool(GatedTool):
@@ -2598,7 +2603,7 @@ class ListRestCommandsTool(GatedTool):
             }
             for location, rest_command_id, config in await self._manager.all_rest_commands()
         ]
-        return {"items": items}
+        return cast(JsonObjectType, {"items": items})
 
 
 class GetRestCommandTool(GatedTool):

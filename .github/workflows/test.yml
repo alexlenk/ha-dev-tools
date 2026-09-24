@@ -40,3 +40,34 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  # The same checks as .pre-commit-config.yaml, at the same versions. Until
+  # this job existed nothing enforced them, so mypy errors and formatting
+  # drift piled up on main unnoticed (issue #93). mypy runs against the
+  # pinned homeassistant from requirements-test.txt, like the tests.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt black==26.5.1 isort==8.0.1 flake8==7.3.0 mypy==2.3.1
+
+      - name: black
+        run: black --check .
+
+      - name: isort
+        run: isort --check-only .
+
+      - name: flake8
+        run: flake8 .
+
+      - name: mypy
+        run: mypy --ignore-missing-imports --python-version 3.14 custom_components/ha_dev_tools

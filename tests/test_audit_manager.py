@@ -175,7 +175,9 @@ async def test_audit_handles_no_automations_at_all(automation_manager):
     assert result["currently_disabled"] == []
 
 
-def test_find_automation_state_matches_by_id_attribute_not_entity_id(hass: HomeAssistant):
+def test_find_automation_state_matches_by_id_attribute_not_entity_id(
+    hass: HomeAssistant,
+):
     # entity_id is derived from `alias` (slugified) - deliberately not
     # "automation.some_id" here, to prove the lookup can't be relying on
     # entity_id matching the config id.

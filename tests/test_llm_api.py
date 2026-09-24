@@ -47,7 +47,6 @@ from pytest_homeassistant_custom_component.common import MockUser
 from custom_components.ha_dev_tools import access_control, helper_manager
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.automation_manager import AutomationManager
-from custom_components.ha_dev_tools.script_manager import ScriptManager
 from custom_components.ha_dev_tools.const import (
     OPT_DRY_RUN,
     OPT_MIRROR_ENABLED,
@@ -61,9 +60,6 @@ from custom_components.ha_dev_tools.derived_sensor_manager import (
 )
 from custom_components.ha_dev_tools.file_manager import FileManager
 from custom_components.ha_dev_tools.history_manager import RecorderNotAvailableError
-from custom_components.ha_dev_tools.log_manager import LogManager
-from custom_components.ha_dev_tools.mqtt_manager import MqttNotAvailableError
-from custom_components.ha_dev_tools.rest_command_manager import RestCommandManager
 from custom_components.ha_dev_tools.llm_api import (
     API_ID,
     DOMAIN,
@@ -116,8 +112,11 @@ from custom_components.ha_dev_tools.llm_api import (
     WriteGatedTool,
     WriteScriptTool,
 )
+from custom_components.ha_dev_tools.log_manager import LogManager
+from custom_components.ha_dev_tools.mqtt_manager import MqttNotAvailableError
+from custom_components.ha_dev_tools.rest_command_manager import RestCommandManager
+from custom_components.ha_dev_tools.script_manager import ScriptManager
 from custom_components.ha_dev_tools.security import SecurityManager
-from custom_components.ha_dev_tools.supervisor_manager import SupervisorNotAvailableError
 from custom_components.ha_dev_tools.template_yaml_manager import TemplateYamlManager
 from custom_components.ha_dev_tools.ws_call import WebSocketCommandError
 
@@ -724,7 +723,9 @@ async def test_get_logs_tool_returns_filtered_entries(hass: HomeAssistant):
     ) as mock_get_logs:
         result = await tool._run(
             hass,
-            llm.ToolInput(tool_name="get_logs", tool_args={"lines": 50, "level": "ERROR"}),
+            llm.ToolInput(
+                tool_name="get_logs", tool_args={"lines": 50, "level": "ERROR"}
+            ),
             _llm_context(),
         )
 
@@ -819,7 +820,9 @@ async def test_reload_domain_tool_calls_manager(hass: HomeAssistant):
     ) as mock_reload:
         result = await ReloadDomainTool()._run(
             hass,
-            llm.ToolInput(tool_name="reload_domain", tool_args={"domain": "automation"}),
+            llm.ToolInput(
+                tool_name="reload_domain", tool_args={"domain": "automation"}
+            ),
             _llm_context(),
         )
 
@@ -2460,7 +2463,9 @@ async def test_get_energy_config_tool_surfaces_unresolved_user(hass: HomeAssista
 
 
 @pytest.mark.asyncio
-async def test_get_energy_config_tool_surfaces_not_configured(hass: HomeAssistant, admin_user):
+async def test_get_energy_config_tool_surfaces_not_configured(
+    hass: HomeAssistant, admin_user
+):
     """energy/get_prefs's real not_found error (never configured) must
     come back as a tool error, not propagate as a raw exception."""
     with patch(
@@ -2516,7 +2521,9 @@ async def test_write_energy_config_tool_surfaces_unresolved_user(
     energy_manager.write_energy_config is ever called."""
     result = await WriteEnergyConfigTool()._write(
         hass,
-        llm.ToolInput(tool_name="write_energy_config", tool_args={"energy_sources": []}),
+        llm.ToolInput(
+            tool_name="write_energy_config", tool_args={"energy_sources": []}
+        ),
         _llm_context(),
     )
 
@@ -2913,9 +2920,7 @@ async def test_write_dashboard_tool_surfaces_unresolved_user(
 
     result = await tool._write(
         hass,
-        llm.ToolInput(
-            tool_name="write_dashboard", tool_args={"config": {"views": []}}
-        ),
+        llm.ToolInput(tool_name="write_dashboard", tool_args={"config": {"views": []}}),
         _llm_context(),
     )
 

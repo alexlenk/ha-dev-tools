@@ -140,9 +140,7 @@ async def test_call_ws_command_times_out_for_a_handler_that_never_responds(
     websocket_api.async_register_command(hass, _never_responds_command)
 
     with pytest.raises(TimeoutError, match="did not respond within"):
-        await call_ws_command(
-            hass, admin_user, "test/never_responds", timeout=0.01
-        )
+        await call_ws_command(hass, admin_user, "test/never_responds", timeout=0.01)
 
 
 @pytest.mark.asyncio

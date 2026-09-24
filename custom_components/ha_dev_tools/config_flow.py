@@ -8,8 +8,7 @@ CHANGELOG's Removed entry for why that was dropped rather than fixed).
 from __future__ import annotations
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 
 from .const import DOMAIN
 from .options_flow import HADevToolsOptionsFlow
@@ -29,7 +28,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call
         """Get the options flow (currently just the dry-run toggle)."""
         return HADevToolsOptionsFlow(config_entry)
 
-    async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
         """Handle the initial (and only) step."""
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")

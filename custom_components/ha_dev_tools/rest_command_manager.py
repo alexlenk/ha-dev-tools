@@ -81,7 +81,9 @@ class DuplicateRestCommandIdError(Exception):
     across files, this repo just never picks one on the caller's behalf.
     """
 
-    def __init__(self, rest_command_id: str, locations: list[RestCommandLocation]) -> None:
+    def __init__(
+        self, rest_command_id: str, locations: list[RestCommandLocation]
+    ) -> None:
         self.rest_command_id = rest_command_id
         self.locations = locations
         super().__init__(
@@ -148,10 +150,14 @@ class RestCommandManager:
             return None
         commands = document[REST_COMMAND_KEY]
         if not isinstance(commands, dict):
-            raise ValueError(f"{file_path}'s '{REST_COMMAND_KEY}:' key is not a mapping")
+            raise ValueError(
+                f"{file_path}'s '{REST_COMMAND_KEY}:' key is not a mapping"
+            )
         return commands
 
-    async def find_all_locations(self, rest_command_id: str) -> list[RestCommandLocation]:
+    async def find_all_locations(
+        self, rest_command_id: str
+    ) -> list[RestCommandLocation]:
         """Find every file that defines the given rest_command id."""
         locations: list[RestCommandLocation] = []
         for file_path in await self.candidate_files():

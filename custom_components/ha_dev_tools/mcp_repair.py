@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from homeassistant.config_entries import ConfigEntryState, SIGNAL_CONFIG_ENTRY_CHANGED
+from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED, ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
@@ -96,9 +96,7 @@ def async_setup_repair(hass: HomeAssistant) -> Callable[[], None]:
     def _on_started(_event: object) -> None:
         _async_refresh_issue(hass)
 
-    unsub_started = hass.bus.async_listen_once(
-        EVENT_HOMEASSISTANT_STARTED, _on_started
-    )
+    unsub_started = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
 
     @callback
     def _unsub() -> None:

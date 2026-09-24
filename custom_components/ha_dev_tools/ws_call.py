@@ -117,7 +117,7 @@ async def call_ws_command(
     # satisfies both - `if refresh_token else None` treats any truthy
     # object as present, and `.id` access finds None either way. We
     # generally have no real RefreshToken for an internal Tool call.
-    all_kwargs = {
+    all_kwargs: dict[str, Any] = {
         "logger": _LOGGER,
         "hass": hass,
         "send_message": _send_message,
