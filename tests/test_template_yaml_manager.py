@@ -572,6 +572,35 @@ async def test_update_entity_in_place_preserves_siblings(
 
 
 @pytest.mark.asyncio
+async def test_update_entity_preserves_formatting_of_unchanged_fields(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Issue #92 (same gap as write_automation's #91): editing one field used
+    to swap the whole entity for the caller's plain dict, so every untouched
+    field lost its original quote style and comments."""
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "- sensor:\n"
+        "  - name: 'Target'\n"
+        "    unique_id: 'target'\n"
+        "    unit_of_measurement: 'W'  # watts\n"
+        "    state: '{{ 1 }}'\n",
+    )
+    before = (tmp_path / "packages/emhas.yaml").read_text()
+
+    result = await template_manager.update_entity(
+        "target",
+        {"name": "Target", "unit_of_measurement": "W", "state": "{{ 2 }}"},
+    )
+
+    assert result.content_after == before.replace(
+        "    state: '{{ 1 }}'\n", "    state: '{{ 2 }}'\n"
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_entity_dry_run_computes_content_without_writing(
     template_manager, tmp_path, mock_reload_service
 ):

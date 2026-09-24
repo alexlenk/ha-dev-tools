@@ -32,28 +32,14 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString
-from yaml.nodes import ScalarNode
-from yaml.resolver import Resolver as PyYamlResolver
 
 from .file_manager import FileManager
+from .yaml_style import merge_preserving_style, quote_ambiguous_scalars
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SCRIPTS_FILE = "scripts.yaml"
 PACKAGES_DIR = "packages"
-
-# Same check + same reasoning as automation_manager.py's helper of the
-# same name: HA reads this file back with PyYAML (YAML 1.1), while
-# ruamel.yaml (YAML 1.2) won't quote a brand-new plain `str` that only
-# YAML 1.1 misreads - e.g. `off` (-> False) or `17:00:00` (-> 61200).
-_PYYAML_RESOLVER = PyYamlResolver()
-_PYYAML_STR_TAG = "tag:yaml.org,2002:str"
-
-
-def _pyyaml_misreads(value: str) -> bool:
-    """True if PyYAML would read this plain (unquoted) scalar as a non-str."""
-    return _PYYAML_RESOLVER.resolve(ScalarNode, value, (True, False)) != _PYYAML_STR_TAG
 
 
 def _new_yaml() -> YAML:
@@ -77,21 +63,6 @@ def _load_yaml(content: str) -> Any:
     callable only defers load() to the executor - `_new_yaml()` itself is
     evaluated eagerly on the event loop before being passed in."""
     return _new_yaml().load(content)
-
-
-def _quote_ambiguous_scalars(value: Any) -> Any:
-    """Recursively force-quote plain strings PyYAML would misread as a non-str.
-
-    Same helper duplicated in automation_manager.py/template_yaml_manager.py -
-    see automation_manager.py's copy's docstring for the full reasoning.
-    """
-    if isinstance(value, dict):
-        return {k: _quote_ambiguous_scalars(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_quote_ambiguous_scalars(v) for v in value]
-    if isinstance(value, str) and _pyyaml_misreads(value):
-        return DoubleQuotedScalarString(value)
-    return value
 
 
 @dataclass(frozen=True)
@@ -287,7 +258,7 @@ class ScriptManager:
         file_manager.write_file() or reloading - nothing live changes.
         """
         config = dict(config)
-        config = _quote_ambiguous_scalars(config)
+        config = quote_ambiguous_scalars(config)
 
         locations = await self.find_all_locations(script_id)
         if len(locations) > 1:
@@ -361,7 +332,7 @@ class ScriptManager:
 
         Uses ruamel's round-trip dumper so everything else in the document
         (other scripts, comments, other domains in a package file) is
-        preserved as-is - only the target script's key is set. Unlike
+        preserved as-is - only the target script's key is set or patched. Unlike
         automation_manager's list splice, this is a plain dict-key
         assignment, since `script:` is a mapping keyed by id.
         """
@@ -378,7 +349,14 @@ class ScriptManager:
                 scripts = CommentedMap()
             document["script"] = scripts
 
-        scripts[script_id] = config
+        # Patch an existing script in place rather than swapping it for the
+        # caller's plain dict, so its unchanged fields keep their original
+        # formatting - see yaml_style.merge_preserving_style (issue #92).
+        scripts[script_id] = (
+            merge_preserving_style(scripts[script_id], config)
+            if script_id in scripts
+            else config
+        )
 
         from io import StringIO
 

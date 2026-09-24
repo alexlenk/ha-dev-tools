@@ -273,6 +273,45 @@ async def test_write_script_quotes_base60_time_strings(
 
 
 @pytest.mark.asyncio
+async def test_write_script_preserves_formatting_of_unchanged_fields(
+    script_manager, tmp_path, mock_reload_service
+):
+    """Issue #92 (same gap as write_automation's #91): editing one field used
+    to swap the whole script for the caller's plain dict, so every untouched
+    field lost its original quote style, comments and number formatting."""
+    _write(
+        tmp_path,
+        "scripts.yaml",
+        "heat_office:\n"
+        "  alias: 'Heat office'\n"
+        "  sequence:\n"
+        "  - condition: state\n"
+        "    entity_id: switch.heater  # office heater\n"
+        "    state: 'off'\n"
+        "  - delay: 0x10\n"
+        "  - condition: time\n"
+        "    before: '19:00:00'\n",
+    )
+    before = (tmp_path / "scripts.yaml").read_text()
+
+    result = await script_manager.write_script(
+        "heat_office",
+        {
+            "alias": "Heat office",
+            "sequence": [
+                {"condition": "state", "entity_id": "switch.heater", "state": "off"},
+                {"delay": 16},
+                {"condition": "time", "before": "17:00:00"},
+            ],
+        },
+    )
+
+    assert result.content_after == before.replace(
+        "    before: '19:00:00'\n", '    before: "17:00:00"\n'
+    )
+
+
+@pytest.mark.asyncio
 async def test_write_script_missing_package_raises(script_manager, tmp_path):
     with pytest.raises(ScriptNotFoundError):
         await script_manager.write_script(

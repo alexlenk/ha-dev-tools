@@ -52,30 +52,15 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString
-from yaml.nodes import ScalarNode
-from yaml.resolver import Resolver as PyYamlResolver
 
 from .file_manager import FileManager
+from .yaml_style import merge_preserving_style, quote_ambiguous_scalars
 
 _LOGGER = logging.getLogger(__name__)
 
 TEMPLATE_KEY = "template"
 DEFAULT_CONFIG_FILE = "configuration.yaml"
 PACKAGES_DIR = "packages"
-
-# Same check + same reasoning as automation_manager.py's helper of the
-# same name: HA reads this file back with PyYAML (YAML 1.1), while
-# ruamel.yaml (YAML 1.2) won't quote a brand-new plain `str` that only
-# YAML 1.1 misreads - e.g. `off` (-> False) or `17:00:00` (-> 61200).
-_PYYAML_RESOLVER = PyYamlResolver()
-_PYYAML_STR_TAG = "tag:yaml.org,2002:str"
-
-
-def _pyyaml_misreads(value: str) -> bool:
-    """True if PyYAML would read this plain (unquoted) scalar as a non-str."""
-    return _PYYAML_RESOLVER.resolve(ScalarNode, value, (True, False)) != _PYYAML_STR_TAG
-
 
 # Every platform the template integration supports (confirmed by reading
 # homeassistant/components/template/const.py at this repo's pinned HA
@@ -124,21 +109,6 @@ def _load_yaml(content: str) -> Any:
     callable only defers load() to the executor - `_new_yaml()` itself is
     evaluated eagerly on the event loop before being passed in."""
     return _new_yaml().load(content)
-
-
-def _quote_ambiguous_scalars(value: Any) -> Any:
-    """Recursively force-quote plain strings PyYAML would misread as a non-str.
-
-    Same helper duplicated in automation_manager.py - see that copy's
-    docstring for the full reasoning.
-    """
-    if isinstance(value, dict):
-        return {k: _quote_ambiguous_scalars(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_quote_ambiguous_scalars(v) for v in value]
-    if isinstance(value, str) and _pyyaml_misreads(value):
-        return DoubleQuotedScalarString(value)
-    return value
 
 
 def _to_plain(value: Any) -> Any:
@@ -429,8 +399,8 @@ class TemplateYamlManager:
         if existing:
             raise DuplicateTemplateUniqueIdError(unique_id, existing)
 
-        config = _quote_ambiguous_scalars(config)
-        triggers = _quote_ambiguous_scalars(triggers) if triggers else triggers
+        config = quote_ambiguous_scalars(config)
+        triggers = quote_ambiguous_scalars(triggers) if triggers else triggers
 
         file_path = f"{PACKAGES_DIR}/{package}"
         if not (self._config_dir / file_path).is_file():
@@ -554,7 +524,7 @@ class TemplateYamlManager:
                 "+ create_entity to change a unique_id"
             )
         config["unique_id"] = unique_id
-        config = _quote_ambiguous_scalars(config)
+        config = quote_ambiguous_scalars(config)
 
         location = await self.find_entity(unique_id)
         content_before = await self.file_manager.read_file(location.file_path)
@@ -594,10 +564,18 @@ class TemplateYamlManager:
     def _build_update_content(
         self, document: Any, location: TemplateEntityLocation, config: dict[str, Any]
     ) -> str:
-        """Synchronous: replace one entity's config in place, return the new file content."""
+        """Synchronous: patch one entity's config in place, return the new file content.
+
+        The loaded entity is patched rather than swapped for the caller's
+        plain dict, so its unchanged fields keep their original formatting -
+        see yaml_style.merge_preserving_style (issue #92).
+        """
         yaml = _new_yaml()
         blocks = self._template_blocks(document)
-        blocks[location.block_index][location.platform][location.entity_index] = config
+        entities = blocks[location.block_index][location.platform]
+        entities[location.entity_index] = merge_preserving_style(
+            entities[location.entity_index], config
+        )
 
         from io import StringIO
 
