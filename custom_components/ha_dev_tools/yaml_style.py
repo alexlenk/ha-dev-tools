@@ -11,12 +11,17 @@ Two things can go wrong there, one helper each:
 - merge_preserving_style: swapping an existing item for the caller's
   plain dict loses the original formatting of every field in it, changed
   or not (issue #91).
+
+find_misread_scalars finds values a file already has in that broken
+form, for the audit tools (issue #96).
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
+import yaml
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 from yaml.nodes import ScalarNode
@@ -59,6 +64,73 @@ def quote_ambiguous_scalars(value: Any) -> Any:
     if isinstance(value, str) and pyyaml_misreads(value):
         return DoubleQuotedScalarString(value)
     return value
+
+
+def _pyyaml_reading(value: str) -> Any:
+    """What PyYAML (so Home Assistant) actually reads this plain scalar as,
+    in a JSON-safe form for tool responses."""
+    try:
+        read = yaml.safe_load(value)
+    except yaml.YAMLError:
+        # e.g. a bare `=` (YAML 1.1's "value" tag): PyYAML can't construct
+        # it at all, so HA fails to load the whole file.
+        return "<load error>"
+    if read is None or isinstance(read, (bool, int, str)):
+        return read
+    if isinstance(read, float) and math.isfinite(read):
+        return read
+    return str(read)  # dates, inf/nan
+
+
+def find_misread_scalars(node: Any, path: str = "") -> list[dict[str, Any]]:
+    """Find every unquoted string value in a loaded document that Home
+    Assistant reads back as a different type (issue #96).
+
+    Loaded with ruamel's round-trip loader, an unquoted `before: 17:00:00`
+    or `state: off` comes back as a plain `str` (YAML 1.2), so every read
+    through this integration looks fine - but HA's PyYAML loader reads the
+    same text as 61200 or False. A file already written that way (e.g. by
+    a version before quote_ambiguous_scalars covered it) stays broken
+    until the value is written again, and nothing else points to it.
+
+    Quoted and block scalars load as ScalarString subclasses, never plain
+    `str`, so they're never reported. Each finding has the value's path
+    (e.g. `conditions[1].before`), 1-based line (None where ruamel kept no
+    position), the text as written, and what HA reads it as.
+    """
+    findings: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        items: Any = node.items()
+    elif isinstance(node, list):
+        items = enumerate(node)
+    else:
+        return findings
+    lc = getattr(node, "lc", None)
+    for key, value in items:
+        child = (
+            f"{path}[{key}]"
+            if isinstance(node, list)
+            else (f"{path}.{key}" if path else str(key))
+        )
+        if type(value) is str and pyyaml_misreads(value):
+            line = None
+            if lc is not None:
+                position = lc.data.get(key)
+                if position is not None:
+                    # Mappings record the value's line as position[2],
+                    # sequences only have the item's own line.
+                    line = (position[2] if len(position) > 2 else position[0]) + 1
+            findings.append(
+                {
+                    "path": child,
+                    "line": line,
+                    "written": value,
+                    "ha_reads_as": _pyyaml_reading(value),
+                }
+            )
+        else:
+            findings.extend(find_misread_scalars(value, child))
+    return findings
 
 
 def _same_scalar(old: Any, new: Any) -> bool:

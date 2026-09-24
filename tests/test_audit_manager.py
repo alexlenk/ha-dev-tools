@@ -241,3 +241,70 @@ async def test_audit_tags_unavailable_findings_with_enabled_state(
     assert len(result["references_unavailable_entities"]) == 1
     finding = result["references_unavailable_entities"][0]
     assert finding["currently_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_audit_reports_values_home_assistant_misreads(
+    automation_manager, tmp_path
+):
+    """Issue #96: an unquoted `before: 17:00:00` or `state: off` already in
+    the file reads back as a normal string through ruamel (so get_automation
+    looks fine), but HA's PyYAML loader reads 61200 / False and disables the
+    automation. The audit has to point at them - quoted values, and values
+    PyYAML reads correctly (07:00:00), are not findings."""
+    _write(
+        tmp_path,
+        "packages/heating.yaml",
+        "automation:\n"
+        "  - id: broken\n"
+        "    triggers:\n"
+        "      - trigger: time\n"
+        "        at: 14:00:00\n"
+        "    conditions:\n"
+        "      - condition: state\n"
+        "        entity_id: switch.heater\n"
+        "        state: off\n"
+        "      - condition: time\n"
+        "        after: 07:00:00\n"
+        "        before: 17:00:00\n"
+        "    actions: []\n"
+        "  - id: fine\n"
+        "    conditions:\n"
+        "      - condition: time\n"
+        "        before: '17:00:00'\n"
+        '        after: "07:00:00"\n'
+        "      - condition: state\n"
+        "        entity_id: switch.heater\n"
+        "        state: 'off'\n"
+        "    actions: []\n",
+    )
+
+    result = await audit_automations(automation_manager.hass, automation_manager)
+
+    assert result["misread_values"] == [
+        {
+            "automation_id": "broken",
+            "file_path": "packages/heating.yaml",
+            "values": [
+                {
+                    "path": "triggers[0].at",
+                    "line": 5,
+                    "written": "14:00:00",
+                    "ha_reads_as": 50400,
+                },
+                {
+                    "path": "conditions[0].state",
+                    "line": 9,
+                    "written": "off",
+                    "ha_reads_as": False,
+                },
+                {
+                    "path": "conditions[1].before",
+                    "line": 12,
+                    "written": "17:00:00",
+                    "ha_reads_as": 61200,
+                },
+            ],
+            "currently_enabled": None,
+        }
+    ]
