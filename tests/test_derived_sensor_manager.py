@@ -1,15 +1,21 @@
 """Tests for derived-sensor config-entry CRUD (derived_sensor_manager.py)."""
 
 import asyncio
+import json
 
 import pytest
+import voluptuous as vol
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_dev_tools.derived_sensor_manager import (
     DerivedSensorNotFoundError,
     FlowAbortedError,
     FlowStepRequiredError,
     InvalidDerivedSensorDomainError,
+    _current_step_values,
+    _schema_field_names,
     _serialize_schema,
     create_derived_sensor,
     delete_derived_sensor,
@@ -437,3 +443,196 @@ async def test_validation_error_raises_instead_of_hanging(hass: HomeAssistant):
     err = exc_info.value
     assert err.step_id == "options"
     assert err.errors
+
+
+# --- issue #81: omitted fields keep their current values -----------------
+
+
+async def _template_sensor_with_device(hass: HomeAssistant) -> tuple[dict, str]:
+    owner = MockConfigEntry(domain="test")
+    owner.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=owner.entry_id, identifiers={("test", "1")}
+    )
+    created = await create_derived_sensor(
+        hass,
+        "template",
+        {
+            "user": {"next_step_id": "sensor"},
+            "sensor": {
+                "name": "Output Power",
+                "state": "{{ 1 }}",
+                "device_id": device.id,
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "additional_options": {"availability": "{{ true }}"},
+            },
+        },
+    )
+    return created, device.id
+
+
+async def test_update_keeps_omitted_optional_fields(hass: HomeAssistant):
+    """The exact #81 report: changing only `state` silently dropped
+    `device_id`, because HA's options flow deletes every optional key the
+    submitted input leaves out. Omitted fields - including ones nested in a
+    section - must now keep their current values."""
+    created, device_id = await _template_sensor_with_device(hass)
+
+    updated = await update_derived_sensor(
+        hass, created["entry_id"], {"sensor": {"state": "{{ 2 }}"}}
+    )
+
+    options = updated["options"]
+    assert options["state"] == "{{ 2 }}"
+    assert options["device_id"] == device_id
+    assert options["unit_of_measurement"] == "W"
+    assert options["device_class"] == "power"
+    assert options["state_class"] == "measurement"
+    assert options["additional_options"] == {"availability": "{{ true }}"}
+
+
+async def test_update_none_clears_optional_field(hass: HomeAssistant):
+    created, _ = await _template_sensor_with_device(hass)
+
+    updated = await update_derived_sensor(
+        hass, created["entry_id"], {"sensor": {"device_id": None}}
+    )
+
+    assert "device_id" not in updated["options"]
+    assert updated["options"]["state"] == "{{ 1 }}"
+
+
+async def test_needs_input_schema_is_json_serializable(hass: HomeAssistant):
+    """#81's discovery call crashed with "Object of type _Unsupported is not
+    JSON serializable" on HA 2026.9+ (probatio's UNSUPPORTED sentinel leaking
+    through voluptuous_serialize) - the schema handed back must be plain JSON,
+    and must carry each field's current value as its suggested_value."""
+    created, device_id = await _template_sensor_with_device(hass)
+
+    with pytest.raises(FlowStepRequiredError) as exc_info:
+        await update_derived_sensor(hass, created["entry_id"], {})
+
+    schema = exc_info.value.schema
+    json.dumps(schema)
+    fields = {field["name"]: field for field in schema}
+    assert fields["device_id"]["description"] == {"suggested_value": device_id}
+
+
+async def test_unknown_step_field_error_lists_accepted_fields(hass: HomeAssistant):
+    """#80's utility_meter chase: a create-only field was rejected one at a
+    time. The error now names every field the step accepts."""
+    created = await create_derived_sensor(
+        hass,
+        "utility_meter",
+        {"user": {"source": "sensor.a", "name": "Meter", "cycle": "monthly"}},
+    )
+
+    with pytest.raises(FlowAbortedError) as exc_info:
+        await update_derived_sensor(
+            hass, created["entry_id"], {"init": {"cycle": "quarter-hourly"}}
+        )
+
+    message = str(exc_info.value)
+    assert "Fields this step accepts" in message
+    assert "'source'" in message
+    assert "'periodically_resetting'" in message
+
+
+# --- issue #82: step-id-free `options` patch -----------------------------
+
+
+async def test_options_patch_changes_only_given_fields(hass: HomeAssistant):
+    created = await create_derived_sensor(
+        hass,
+        "min_max",
+        {
+            "user": {
+                "entity_ids": ["sensor.a"],
+                "type": "sum",
+                "round_digits": 3,
+                "name": "Solar Total",
+            }
+        },
+    )
+
+    updated = await update_derived_sensor(
+        hass, created["entry_id"], options={"entity_ids": ["sensor.a", "sensor.b"]}
+    )
+
+    assert updated["options"]["entity_ids"] == ["sensor.a", "sensor.b"]
+    assert updated["options"]["type"] == "sum"
+    assert updated["options"]["round_digits"] == 3
+
+
+async def test_options_patch_on_template_keeps_device(hass: HomeAssistant):
+    """Template's options `init` step has no schema and auto-skips to the
+    platform step - the patch needs no step id there either."""
+    created, device_id = await _template_sensor_with_device(hass)
+
+    updated = await update_derived_sensor(
+        hass, created["entry_id"], options={"state": "{{ 3 }}"}
+    )
+
+    assert updated["options"]["state"] == "{{ 3 }}"
+    assert updated["options"]["device_id"] == device_id
+
+
+async def test_options_patch_rejects_create_only_field_without_writing(
+    hass: HomeAssistant,
+):
+    created = await create_derived_sensor(
+        hass,
+        "utility_meter",
+        {"user": {"source": "sensor.a", "name": "Meter", "cycle": "monthly"}},
+    )
+
+    with pytest.raises(FlowAbortedError) as exc_info:
+        await update_derived_sensor(
+            hass,
+            created["entry_id"],
+            options={"source": "sensor.b", "cycle": "quarter-hourly"},
+        )
+
+    message = str(exc_info.value)
+    assert "['cycle']" in message
+    assert "'source'" in message
+    options = get_derived_sensor(hass, created["entry_id"])["options"]
+    assert options["source"] == "sensor.a"
+    assert options["cycle"] == "monthly"
+
+
+async def test_steps_and_options_together_rejected(hass: HomeAssistant):
+    with pytest.raises(FlowAbortedError):
+        await update_derived_sensor(
+            hass, "irrelevant", {"init": {"type": "min"}}, {"type": "min"}
+        )
+
+
+async def test_update_section_field_merges_into_section(hass: HomeAssistant):
+    """A partial section dict is merged into that section's current values,
+    not swapped in wholesale."""
+    created, _ = await _template_sensor_with_device(hass)
+
+    updated = await update_derived_sensor(
+        hass,
+        created["entry_id"],
+        options={"additional_options": {"availability": "{{ false }}"}},
+    )
+
+    assert updated["options"]["additional_options"] == {"availability": "{{ false }}"}
+    assert updated["options"]["state"] == "{{ 1 }}"
+
+
+def test_step_schema_helpers_handle_no_schema_and_plain_keys():
+    assert _schema_field_names(None) == []
+    assert _current_step_values(None) == {}
+    schema = vol.Schema({"plain": str, vol.Optional("marked"): str})
+    assert _schema_field_names(schema) == ["plain", "marked"]
+    assert _current_step_values(schema) == {}
+
+
+async def test_non_object_step_input_raises_flow_aborted(hass: HomeAssistant):
+    with pytest.raises(FlowAbortedError, match="must be an object"):
+        await create_derived_sensor(hass, "min_max", {"user": ["not", "a", "dict"]})
