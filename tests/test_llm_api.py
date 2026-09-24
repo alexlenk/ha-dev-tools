@@ -1689,7 +1689,27 @@ async def test_update_derived_sensor_tool_calls_manager(hass: HomeAssistant):
         )
 
     assert result == {"entry_id": "abc"}
-    mock_update.assert_called_once_with(hass, "abc", {"init": {"type": "min"}})
+    mock_update.assert_called_once_with(hass, "abc", {"init": {"type": "min"}}, None)
+
+
+@pytest.mark.asyncio
+async def test_update_derived_sensor_tool_passes_options_patch(hass: HomeAssistant):
+    """The step-id-free `options` patch (issue #82) reaches the manager."""
+    tool = UpdateDerivedSensorTool()
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.update_derived_sensor",
+        AsyncMock(return_value={"entry_id": "abc"}),
+    ) as mock_update:
+        await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_derived_sensor",
+                tool_args={"entry_id": "abc", "options": {"type": "min"}},
+            ),
+            _llm_context(),
+        )
+
+    mock_update.assert_called_once_with(hass, "abc", {}, {"type": "min"})
 
 
 @pytest.mark.asyncio

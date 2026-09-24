@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-09-24
+
+### Fixed
+- `update_derived_sensor` silently deleted every optional field the caller didn't restate. Changing only a template sensor's `state` dropped its `device_id`, which removed the entity's device link with no warning (issue #81). Home Assistant's options flow deletes any optional key missing from the submitted input; the UI never hits this because it pre-fills each form with the current values. Each step's input now starts from that step's current values (its schema's `suggested_value`s, including fields inside sections), with the caller's fields laid over it. Pass a field as `null` to clear it on purpose.
+- `create_derived_sensor`/`update_derived_sensor` crashed with `Object of type _Unsupported is not JSON serializable` whenever they returned `needs_input` on Home Assistant 2026.9 or later. That broke schema discovery (issue #81) and also caused the `min_max` "confirm" crash in issue #80, where the wrong step id triggered a `needs_input` response that then crashed. In 2026.9, `cv.custom_serializer` moved to probatio, whose "unsupported" sentinel `voluptuous_serialize` doesn't recognise. The schema converter now matches whichever one `cv` itself uses.
+- A field a derived-sensor step doesn't accept was rejected one at a time (`Schema validation failed at 'cycle'`, then `'offset'`, ...), so callers had to guess field by field (issue #80, `utility_meter`). The error now lists every field that step accepts. Most of `utility_meter`'s fields (`cycle`, `offset`, `tariffs`, ...) can only be set when the helper is created; its edit step accepts `source`, `periodically_resetting` and `always_available`.
+- The derived-sensor tool descriptions now say that schema discovery (`steps={}`) returns `needs_input` on the confirmed call, not on the first propose call.
+
+### Added
+- `update_derived_sensor` accepts `options`, a flat patch of just the fields to change (e.g. `{"entity_ids": [...]}`). No step id is needed and every other field keeps its current value (issue #82). The patch still goes through Home Assistant's own options flow and validation, rather than writing the config entry directly as the issue first proposed, so it can't store options the UI would reject. A key that isn't editable after creation is rejected before anything is written, and the error lists the fields that are editable.
+
 ## [2.19.0] - 2026-09-23
 
 ### Added

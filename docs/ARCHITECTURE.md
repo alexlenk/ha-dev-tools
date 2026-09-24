@@ -138,7 +138,9 @@ whatever step id the flow is currently on. When the caller hasn't supplied
 input for that step, it raises `FlowStepRequiredError` carrying the step's
 own schema - serialized the same way HA's own `config_entries` HTTP view
 does (`voluptuous_serialize.convert(schema, custom_serializer=
-cv.custom_serializer)`) - so a caller (the LLM) can discover each step's
+cv.custom_serializer)` up to HA 2026.8, probatio's `to_field_list` from
+2026.9 on, whichever `cv` itself imports - see "Two HA-side traps" below)
+- so a caller (the LLM) can discover each step's
 fields and retry, accumulating a `steps` dict keyed by step id until the
 flow finishes. A `MENU` result needs no special-casing beyond accepting
 that result type into the same loop as `FORM` - HA represents the choice
@@ -183,6 +185,38 @@ specifically, the options flow's own first step ("init") has no schema of
 its own - it reads the entry's already-stored `template_type` and skips
 straight to that domain's options step, so updating an entity never needs
 to redrive the menu the way creating one does.
+
+Two HA-side traps, both hit on a live instance (issues #80, #81):
+
+- **Omitted optional fields get deleted.** `SchemaCommonFlowHandler`'s
+  `_update_and_remove_omitted_optional_keys` removes every `vol.Optional`
+  key the submitted input leaves out - that's how the UI clears a field.
+  The frontend never trips over it because it renders each form
+  pre-populated with the current values (each schema key's
+  `suggested_value`) and submits them all back. `_drive_flow` does the
+  same: every FORM step's input starts from that step's own
+  `suggested_value`s (recursing into sections), with the caller's input
+  laid over it, and `None` meaning "clear this field". The step's schema
+  is the source, never the entry's raw options, so keys the step doesn't
+  accept (Template's `name`, Utility Meter's create-only `cycle`) are
+  never injected.
+- **`cv.custom_serializer`'s "defer" sentinel changed in HA 2026.9.**
+  It now returns probatio's `UNSUPPORTED`, which
+  `voluptuous_serialize.convert` doesn't recognize - it hands the sentinel
+  back as the whole serialized schema, which then fails JSON encoding
+  (`Object of type _Unsupported is not JSON serializable`) on every
+  `needs_input` response. The converter is picked by what `cv` imports
+  (`cv.to_field_list` if present) so it always matches the sentinel.
+
+`update_derived_sensor` also takes a flat `options` patch instead of
+`steps` (issue #82): applied to whichever FORM step the options flow is
+on, with no step id needed, still through HA's own validation rather than
+a direct `async_update_entry`. All eight domains' options flows show
+exactly one FORM step (Template's and Filter's `init` have no schema and
+skip to the type-specific one), so every patch key must be a field of that
+step - checked before submitting, since submitting is what writes the
+entry. A key that isn't there is one HA only allows at creation time, and
+the error lists the fields that are editable.
 
 ## Layout-aware YAML `template:` entities (`template_yaml_manager.py`)
 

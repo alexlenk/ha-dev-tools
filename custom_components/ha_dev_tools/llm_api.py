@@ -1527,12 +1527,15 @@ _DERIVED_SENSOR_STEPS_DESCRIPTION = (
     "step depending on an earlier answer, and template's very first "
     "create step is a menu (its single field, next_step_id, picks which "
     "entity domain - sensor, switch, light, ... - to create). Call with "
-    "steps={} (or omitted) first: the response comes back with "
-    "needs_input=true, the current step_id, and that step's field schema "
-    "(a menu's schema is just its list of valid next_step_id choices). "
-    "Fill those fields in under steps[step_id] and call again - repeat, "
-    "accumulating entries in steps, until the call returns the "
-    "created/updated entry instead of needs_input."
+    "steps={} (or omitted) first - like every call to this tool, that "
+    "first returns a confirm_token, and it's the confirmed call that comes "
+    "back with needs_input=true, the current step_id, and that step's "
+    "field schema (a menu's schema is just its list of valid next_step_id "
+    "choices; each field's description.suggested_value is its current "
+    "value). Fill those fields in under steps[step_id] and call again - "
+    "repeat, accumulating entries in steps, until the call returns the "
+    "created/updated entry instead of needs_input. Any field of a step "
+    "you leave out keeps its current value; pass it as null to clear it."
 )
 
 
@@ -1591,12 +1594,21 @@ class UpdateDerivedSensorTool(WriteGatedTool):
     description = (
         "Update an existing calculated/derived sensor helper's config by "
         "its entry id (from list_derived_sensors), via the same options "
-        "flow the UI's helper edit page uses. " + _DERIVED_SENSOR_STEPS_DESCRIPTION
+        "flow the UI's helper edit page uses. Simplest form: pass options "
+        "as a flat dict of just the fields to change (e.g. "
+        '{"entity_ids": [...]}, or {"state": "{{ ... }}"} for a '
+        "template sensor) - no step_id needed, every other field keeps its "
+        "current value, null clears an optional field, and it still goes "
+        "through Home Assistant's own validation. A field that isn't "
+        "editable after creation (e.g. utility_meter's cycle) is rejected "
+        "with the list of fields that are. Alternatively, use steps "
+        "instead of options (not both): " + _DERIVED_SENSOR_STEPS_DESCRIPTION
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("entry_id"): str,
             vol.Optional("steps"): dict,
+            vol.Optional("options"): dict,
         }
     )
 
@@ -1621,7 +1633,7 @@ class UpdateDerivedSensorTool(WriteGatedTool):
                 else None
             )
             updated = await derived_sensor_manager.update_derived_sensor(
-                hass, args["entry_id"], args.get("steps") or {}
+                hass, args["entry_id"], args.get("steps") or {}, args.get("options")
             )
         except FlowStepRequiredError as exc:
             return _flow_step_required_payload(exc)
