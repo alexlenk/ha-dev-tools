@@ -20,7 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
-from homeassistant.util.json import JsonObjectType
+from homeassistant.util.json import JsonObjectType, JsonValueType
 
 from . import (
     access_control,
@@ -78,6 +78,7 @@ from .template_yaml_manager import (
     TemplateYamlManager,
 )
 from .ws_call import WebSocketCommandError
+from .yaml_style import find_misread_scalars
 
 API_ID = "dev_tools"
 API_NAME = "HA Dev Tools"
@@ -217,6 +218,16 @@ def _reconstruct_helper_storage_json(
         ]
 
     return json.dumps(document)
+
+
+# Shared by get_automation/get_script/get_template_entity (issue #97).
+_MISREAD_VALUES_NOTE = (
+    " 'misread_values' lists any unquoted value Home Assistant reads as a "
+    "different type than written (e.g. `before: 17:00:00` is read as 61200, "
+    "`delay: 1:30` as 90 seconds, `state: off` as False) - 'config' shows "
+    "the intended text, but HA acts on what it reads. Writing the item "
+    "again quotes such values."
+)
 
 
 def _flow_step_required_payload(exc: FlowStepRequiredError) -> JsonObjectType:
@@ -1034,7 +1045,7 @@ class GetAutomationTool(GatedTool):
         "(toggling it via the UI or automation.turn_off never touches the "
         "YAML), so the config content alone never tells you whether it's "
         "actually active right now."
-    )
+    ) + _MISREAD_VALUES_NOTE
     parameters = vol.Schema({vol.Required("automation_id"): str})
 
     def __init__(self, automation_manager: AutomationManager) -> None:
@@ -1070,6 +1081,7 @@ class GetAutomationTool(GatedTool):
                 if live_state is None
                 else None
             ),
+            "misread_values": cast(JsonValueType, find_misread_scalars(config)),
         }
 
 
@@ -1771,7 +1783,7 @@ class GetTemplateEntityTool(GatedTool):
     description = (
         "Read a YAML `template:` entity's current config by its unique_id "
         "(from list_template_entities)."
-    )
+    ) + _MISREAD_VALUES_NOTE
     parameters = vol.Schema({vol.Required("unique_id"): str})
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
@@ -1797,6 +1809,7 @@ class GetTemplateEntityTool(GatedTool):
             "is_package": location.is_package,
             "platform": location.platform,
             "config": config,
+            "misread_values": cast(JsonValueType, find_misread_scalars(config)),
         }
 
 
@@ -2456,7 +2469,7 @@ class GetScriptTool(GatedTool):
         "file) - a plain file read can silently miss package-defined "
         "scripts. Fails clearly if the id isn't found or is defined in "
         "more than one file, rather than guessing."
-    )
+    ) + _MISREAD_VALUES_NOTE
     parameters = vol.Schema({vol.Required("script_id"): str})
 
     def __init__(self, script_manager: ScriptManager) -> None:
@@ -2481,6 +2494,7 @@ class GetScriptTool(GatedTool):
             "file_path": location.file_path,
             "is_package": location.is_package,
             "config": config,
+            "misread_values": cast(JsonValueType, find_misread_scalars(config)),
         }
 
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.3] - 2026-09-24
+
+### Added
+- `get_automation`, `get_script` and `get_template_entity` now return `misread_values`, the same check `audit_automations` gained in 2.20.2 (issue #97). It lists each unquoted value Home Assistant reads as a different type than written. `config` shows the intended text, e.g. `delay: 1:30`, but HA reads it as 90 seconds instead of 1½ hours, silently and with no Repairs entry. An agent now sees this on the item it's about to edit. Scripts and template entities had no check at all before. No new tools. `get_template_entity` reports paths without line numbers, because its read path converts `!secret`/`!include` tags to plain values.
+
 ## [2.20.2] - 2026-09-24
 
 ### Added
