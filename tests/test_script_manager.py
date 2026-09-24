@@ -255,6 +255,24 @@ async def test_write_script_quotes_ambiguous_scalars(
 
 
 @pytest.mark.asyncio
+async def test_write_script_quotes_base60_time_strings(
+    script_manager, tmp_path, mock_reload_service
+):
+    """Same regression as write_automation's equivalent test (issue #91):
+    an unquoted `17:00:00` reloads via HA's PyYAML loader as the int
+    61200."""
+    result = await script_manager.write_script(
+        "time_check",
+        {"sequence": [{"condition": "time", "before": "17:00:00"}]},
+    )
+
+    assert 'before: "17:00:00"' in result.content_after
+
+    parsed = pyyaml.safe_load((tmp_path / "scripts.yaml").read_text())
+    assert parsed["time_check"]["sequence"][0]["before"] == "17:00:00"
+
+
+@pytest.mark.asyncio
 async def test_write_script_missing_package_raises(script_manager, tmp_path):
     with pytest.raises(ScriptNotFoundError):
         await script_manager.write_script(

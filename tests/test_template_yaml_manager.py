@@ -436,6 +436,32 @@ async def test_create_entity_quotes_ambiguous_scalars(
 
 
 @pytest.mark.asyncio
+async def test_create_entity_quotes_base60_time_strings(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Same regression as automation_manager.py's equivalent test (issue
+    #91): an unquoted `17:00:00` reloads via HA's PyYAML loader as the int
+    61200."""
+    _write(tmp_path, "packages/emhas.yaml", "template: []\n")
+
+    result = await template_manager.create_entity(
+        "binary_sensor",
+        {
+            "name": "Uses time trigger",
+            "unique_id": "uses_time_trigger",
+            "state": "{{ true }}",
+        },
+        package="emhas.yaml",
+        triggers=[{"trigger": "time", "at": "17:00:00"}],
+    )
+
+    assert 'at: "17:00:00"' in result.content_after
+
+    parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
+    assert parsed["template"][-1]["triggers"][0]["at"] == "17:00:00"
+
+
+@pytest.mark.asyncio
 async def test_create_entity_into_empty_package_file(
     template_manager, tmp_path, mock_reload_service
 ):

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.1] - 2026-09-24
+
+### Fixed
+- `write_automation`, `write_script` and the template entity tools wrote time strings like `"17:00:00"` unquoted. Home Assistant reads YAML with PyYAML (YAML 1.1), which reads an unquoted `17:00:00` as the base-60 integer `61200`, so a `time` condition written this way failed with `Invalid time specified: 61200` and the automation was disabled (found while investigating issue #91). ruamel.yaml, which writes these files, follows YAML 1.2 and only quotes strings that YAML 1.2 would misread. The quoting check used to be a fixed list of `on`/`off`/`yes`/`no`-style words. It now asks PyYAML's own resolver and quotes any new string it wouldn't read back as a string, which also covers `9:30`, `0x1F`, `2024-01-01` and similar values.
+- `write_automation` reformatted every field of the automation it edited, not just the fields that changed (issue #91). Changing one condition's `before:` also turned an untouched `state: 'off'` two lines away into `state: "off"`. The caller's config replaced the loaded automation wholesale, so all of its original quote styles, comments and number formats (e.g. `0x10`) were lost. The loaded automation is now patched in place: values that didn't change keep their original YAML, and only changed, added or removed fields are rewritten. Two exceptions: an unchanged but unquoted value that Home Assistant misreads (e.g. `state: off`) is still re-quoted, and anchored (`&name`) or `<<:` merge-key nodes are still replaced wholesale, because patching them in place would also change every other automation that shares them.
+
 ## [2.20.0] - 2026-09-24
 
 ### Fixed

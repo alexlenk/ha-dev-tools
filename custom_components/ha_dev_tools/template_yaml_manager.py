@@ -53,6 +53,8 @@ from homeassistant.core import HomeAssistant
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+from yaml.nodes import ScalarNode
+from yaml.resolver import Resolver as PyYamlResolver
 
 from .file_manager import FileManager
 
@@ -62,38 +64,18 @@ TEMPLATE_KEY = "template"
 DEFAULT_CONFIG_FILE = "configuration.yaml"
 PACKAGES_DIR = "packages"
 
-# Same set + same reasoning as automation_manager.py's helper of the same
-# name: PyYAML's default resolver (what HA's own YAML loader uses to read
-# this file back) treats these plain scalars as bool/None, not str -
-# ruamel.yaml's YAML-1.2 resolver doesn't, so it won't quote them on its
-# own when dumping a brand-new plain `str` it didn't load with existing
-# quote styling.
-_AMBIGUOUS_SCALARS = frozenset(
-    {
-        "yes",
-        "Yes",
-        "YES",
-        "no",
-        "No",
-        "NO",
-        "true",
-        "True",
-        "TRUE",
-        "false",
-        "False",
-        "FALSE",
-        "on",
-        "On",
-        "ON",
-        "off",
-        "Off",
-        "OFF",
-        "null",
-        "Null",
-        "NULL",
-        "~",
-    }
-)
+# Same check + same reasoning as automation_manager.py's helper of the
+# same name: HA reads this file back with PyYAML (YAML 1.1), while
+# ruamel.yaml (YAML 1.2) won't quote a brand-new plain `str` that only
+# YAML 1.1 misreads - e.g. `off` (-> False) or `17:00:00` (-> 61200).
+_PYYAML_RESOLVER = PyYamlResolver()
+_PYYAML_STR_TAG = "tag:yaml.org,2002:str"
+
+
+def _pyyaml_misreads(value: str) -> bool:
+    """True if PyYAML would read this plain (unquoted) scalar as a non-str."""
+    return _PYYAML_RESOLVER.resolve(ScalarNode, value, (True, False)) != _PYYAML_STR_TAG
+
 
 # Every platform the template integration supports (confirmed by reading
 # homeassistant/components/template/const.py at this repo's pinned HA
@@ -145,7 +127,7 @@ def _load_yaml(content: str) -> Any:
 
 
 def _quote_ambiguous_scalars(value: Any) -> Any:
-    """Recursively force-quote plain strings PyYAML would misread as bool/None.
+    """Recursively force-quote plain strings PyYAML would misread as a non-str.
 
     Same helper duplicated in automation_manager.py - see that copy's
     docstring for the full reasoning.
@@ -154,7 +136,7 @@ def _quote_ambiguous_scalars(value: Any) -> Any:
         return {k: _quote_ambiguous_scalars(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_quote_ambiguous_scalars(v) for v in value]
-    if isinstance(value, str) and value in _AMBIGUOUS_SCALARS:
+    if isinstance(value, str) and _pyyaml_misreads(value):
         return DoubleQuotedScalarString(value)
     return value
 
