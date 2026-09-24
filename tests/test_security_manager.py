@@ -2316,7 +2316,9 @@ def test_validate_file_path_wraps_path_resolution_failure(
     """If Path.resolve() itself raises (e.g. a filesystem race or
     permission error), validate_file_path must report ERROR_INVALID_PATH
     instead of letting the raw OSError propagate."""
-    with patch.object(Path, "resolve", side_effect=OSError("simulated resolve failure")):
+    with patch.object(
+        Path, "resolve", side_effect=OSError("simulated resolve failure")
+    ):
         is_valid, error = security_manager.validate_file_path("configuration.yaml")
 
     assert is_valid is False

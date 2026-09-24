@@ -362,9 +362,7 @@ async def test_read_file_unexpected_error_wrapped_as_runtime_error(
 # --- write_file error branches ------------------------------------------------
 
 
-async def test_write_file_denied_on_blacklisted_path(
-    hass: HomeAssistant, file_manager
-):
+async def test_write_file_denied_on_blacklisted_path(hass: HomeAssistant, file_manager):
     """The denylist takes precedence over write_paths, same as for reads."""
     with pytest.raises(
         PermissionError, match="Access to blacklisted file denied: secrets.yaml"
@@ -372,9 +370,7 @@ async def test_write_file_denied_on_blacklisted_path(
         await file_manager.write_file("secrets.yaml", "a: 1\n")
 
 
-async def test_write_file_denied_on_path_traversal(
-    hass: HomeAssistant, file_manager
-):
+async def test_write_file_denied_on_path_traversal(hass: HomeAssistant, file_manager):
     """Path traversal is rejected before the write-paths check even runs."""
     with pytest.raises(ValueError, match="Invalid file path"):
         await file_manager.write_file("../evil.yaml", "a: 1\n")
@@ -528,7 +524,9 @@ async def test_list_files_unexpected_error_wrapped_as_runtime_error(
     hass: HomeAssistant, file_manager
 ):
     """An unexpected error while iterating the directory should be wrapped."""
-    with patch.object(Path, "iterdir", side_effect=OSError("simulated iterdir failure")):
+    with patch.object(
+        Path, "iterdir", side_effect=OSError("simulated iterdir failure")
+    ):
         with pytest.raises(RuntimeError, match="Error listing files"):
             await file_manager.list_files()
 
@@ -546,9 +544,7 @@ async def test_delete_file_denied_on_blacklisted_path(
         await file_manager.delete_file("secrets.yaml")
 
 
-async def test_delete_file_denied_on_path_traversal(
-    hass: HomeAssistant, file_manager
-):
+async def test_delete_file_denied_on_path_traversal(hass: HomeAssistant, file_manager):
     """Path traversal is rejected before the write-paths check even runs."""
     with pytest.raises(ValueError, match="Invalid file path"):
         await file_manager.delete_file("../evil.yaml")

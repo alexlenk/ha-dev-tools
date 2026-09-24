@@ -205,7 +205,9 @@ class TestValidationManager:
         """A YAMLError raised without a problem_mark (not every subclass sets
         one) should still fall back to line 1 rather than raising AttributeError."""
         with patch("yaml.safe_load", side_effect=yaml.YAMLError("plain error")):
-            result = validation_manager.validate_yaml("irrelevant: content", "test.yaml")
+            result = validation_manager.validate_yaml(
+                "irrelevant: content", "test.yaml"
+            )
 
         assert result.is_valid is False
         assert result.line_numbers == [1]
@@ -214,7 +216,9 @@ class TestValidationManager:
         """A non-YAMLError exception during parsing should be caught and
         reported rather than propagating out of validate_yaml."""
         with patch("yaml.safe_load", side_effect=ValueError("simulated failure")):
-            result = validation_manager.validate_yaml("irrelevant: content", "test.yaml")
+            result = validation_manager.validate_yaml(
+                "irrelevant: content", "test.yaml"
+            )
 
         assert result.is_valid is False
         assert "Unexpected validation error" in result.errors[0]

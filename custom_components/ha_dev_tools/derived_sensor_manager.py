@@ -75,10 +75,10 @@ passing it as None.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 import voluptuous_serialize
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType, section
 from homeassistant.helpers import config_validation as cv
@@ -178,7 +178,10 @@ _to_field_list = getattr(cv, "to_field_list", voluptuous_serialize.convert)
 def _serialize_schema(schema: Any) -> list[dict[str, Any]]:
     if schema is None:
         return []
-    return _to_field_list(schema, custom_serializer=cv.custom_serializer)
+    return cast(
+        list[dict[str, Any]],
+        _to_field_list(schema, custom_serializer=cv.custom_serializer),
+    )
 
 
 def _schema_field_names(schema: Any) -> list[str]:
@@ -242,11 +245,11 @@ def _entry_to_dict(entry: ConfigEntry) -> dict[str, Any]:
 
 async def _drive_flow(
     *,
-    init_result: dict[str, Any],
-    configure: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
+    init_result: ConfigFlowResult,
+    configure: Callable[[str, dict[str, Any]], Awaitable[ConfigFlowResult]],
     steps: dict[str, dict[str, Any]],
     options: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> ConfigFlowResult:
     """Step a config/options flow to completion using caller-supplied per-step input.
 
     Generic across single-step (min_max, utility_meter, integration,
@@ -296,7 +299,7 @@ async def _drive_flow(
             )
         attempted_steps.add(step_id)
         fields = _schema_field_names(data_schema)
-        if use_options:
+        if use_options and options is not None:
             if unknown := sorted(set(options) - set(fields)):
                 raise FlowAbortedError(
                     f"Not editable on step '{step_id}': {unknown} - usually "
@@ -348,7 +351,7 @@ def list_derived_sensors(
     """List every derived-sensor config entry, optionally scoped to one domain."""
     if domain is not None:
         _check_domain(domain)
-        domains = (domain,)
+        domains: tuple[str, ...] = (domain,)
     else:
         domains = DERIVED_SENSOR_DOMAINS
     entries = [

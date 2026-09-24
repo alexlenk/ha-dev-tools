@@ -66,7 +66,11 @@ async def test_write_then_read_energy_config(hass: HomeAssistant, admin_user):
         hass,
         admin_user,
         energy_sources=[
-            {"type": "grid", "stat_energy_from": "sensor.grid_import", "cost_adjustment_day": 0},
+            {
+                "type": "grid",
+                "stat_energy_from": "sensor.grid_import",
+                "cost_adjustment_day": 0,
+            },
         ],
     )
     read_back = await get_energy_config(hass, admin_user)
@@ -89,7 +93,11 @@ async def test_write_energy_config_omitted_field_leaves_section_untouched(
         hass,
         admin_user,
         energy_sources=[
-            {"type": "grid", "stat_energy_from": "sensor.grid_import", "cost_adjustment_day": 0},
+            {
+                "type": "grid",
+                "stat_energy_from": "sensor.grid_import",
+                "cost_adjustment_day": 0,
+            },
         ],
     )
 

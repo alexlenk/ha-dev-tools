@@ -1,7 +1,6 @@
 """Test LogManager functionality with Home Assistant fixtures."""
 
 import logging
-
 from datetime import datetime, timedelta
 from unittest.mock import patch
 

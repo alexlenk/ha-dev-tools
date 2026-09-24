@@ -174,7 +174,7 @@ async def _set_ref(hass: HomeAssistant, branch: str, sha: str) -> None:
     existing = await _get_ref_sha(hass, branch)
     if existing is None:
         url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs"
-        payload = {"ref": f"refs/heads/{branch}", "sha": sha}
+        payload: dict[str, Any] = {"ref": f"refs/heads/{branch}", "sha": sha}
         async with session.post(url, headers=_headers(hass), json=payload) as resp:
             resp.raise_for_status()
     elif existing != sha:
