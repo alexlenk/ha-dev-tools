@@ -227,7 +227,9 @@ class ScriptManager:
         document = await self._load_document(location.file_path)
         scripts = self._script_map(location.file_path, document) or {}
         if script_id in scripts:
-            return location, dict(scripts[script_id])
+            # The loaded mapping itself, not a dict() copy, so
+            # find_misread_scalars can report line numbers.
+            return location, scripts[script_id]
         # Shouldn't happen - find_script already confirmed presence.
         raise ScriptNotFoundError(f"No script with id '{script_id}' found")
 

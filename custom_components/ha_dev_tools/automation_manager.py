@@ -248,7 +248,9 @@ class AutomationManager:
         automations = self._automation_list(location.file_path, document) or []
         for entry in automations:
             if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
-                return location, dict(entry)
+                # The loaded mapping itself, not a dict() copy, so
+                # find_misread_scalars can report line numbers.
+                return location, entry
         # Shouldn't happen - find_automation already confirmed presence.
         raise AutomationNotFoundError(f"No automation with id '{automation_id}' found")
 

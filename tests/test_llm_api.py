@@ -871,6 +871,43 @@ async def test_get_automation_reports_currently_enabled_true(
 
 
 @pytest.mark.asyncio
+async def test_get_automation_reports_misread_values(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """Issue #97: 'config' shows the intended text, so a bare
+    `before: 17:00:00` looks fine - misread_values says HA reads 61200."""
+    manager = _automation_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: my_automation\n"
+        "  trigger: []\n"
+        "  condition:\n"
+        "  - condition: time\n"
+        "    after: '07:00:00'\n"
+        "    before: 17:00:00\n"
+        "  action: []\n"
+    )
+
+    result = await GetAutomationTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["config"]["condition"][0]["before"] == "17:00:00"
+    assert result["misread_values"] == [
+        {
+            "path": "condition[0].before",
+            "line": 6,
+            "written": "17:00:00",
+            "ha_reads_as": 61200,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_get_automation_reports_currently_enabled_false(
     hass: HomeAssistant, admin_user, tmp_path
 ):
@@ -969,6 +1006,28 @@ async def test_get_script_returns_config(hass: HomeAssistant, admin_user, tmp_pa
 
     assert result["file_path"] == "scripts.yaml"
     assert result["config"]["alias"] == "Mine"
+    assert result["misread_values"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_script_reports_misread_values(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """Issue #97: an unquoted `delay: 1:30` is read by HA as 90 seconds,
+    not 1h30m - silently, with no Repairs entry."""
+    manager = _script_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "scripts.yaml").write_text("my_script:\n  sequence:\n  - delay: 1:30\n")
+
+    result = await GetScriptTool(manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "my_script"}),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["misread_values"] == [
+        {"path": "sequence[0].delay", "line": 3, "written": "1:30", "ha_reads_as": 90}
+    ]
 
 
 @pytest.mark.asyncio
@@ -1930,6 +1989,38 @@ async def test_get_template_entity_tool_returns_config(
 
     assert result["file_path"] == "packages/emhas.yaml"
     assert result["config"]["name"] == "Target"
+    assert result["misread_values"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_template_entity_tool_reports_misread_values(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    """Issue #97. The template read path converts to plain dicts for
+    !secret/!include tags, so there's no line number - the path still
+    locates the value."""
+    _write_package(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "  - binary_sensor:\n"
+        "      - name: Target\n"
+        "        unique_id: target\n"
+        "        delay_on: 1:30\n"
+        '        state: "{{ true }}"\n',
+    )
+
+    result = await GetTemplateEntityTool(template_yaml_manager)._run(
+        hass,
+        llm.ToolInput(
+            tool_name="get_template_entity", tool_args={"unique_id": "target"}
+        ),
+        _llm_context(),
+    )
+
+    assert result["misread_values"] == [
+        {"path": "delay_on", "line": None, "written": "1:30", "ha_reads_as": 90}
+    ]
 
 
 @pytest.mark.asyncio
