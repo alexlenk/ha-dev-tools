@@ -436,6 +436,32 @@ async def test_create_entity_quotes_ambiguous_scalars(
 
 
 @pytest.mark.asyncio
+async def test_create_entity_quotes_base60_time_strings(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Same regression as automation_manager.py's equivalent test (issue
+    #91): an unquoted `17:00:00` reloads via HA's PyYAML loader as the int
+    61200."""
+    _write(tmp_path, "packages/emhas.yaml", "template: []\n")
+
+    result = await template_manager.create_entity(
+        "binary_sensor",
+        {
+            "name": "Uses time trigger",
+            "unique_id": "uses_time_trigger",
+            "state": "{{ true }}",
+        },
+        package="emhas.yaml",
+        triggers=[{"trigger": "time", "at": "17:00:00"}],
+    )
+
+    assert 'at: "17:00:00"' in result.content_after
+
+    parsed = pyyaml.safe_load((tmp_path / "packages/emhas.yaml").read_text())
+    assert parsed["template"][-1]["triggers"][0]["at"] == "17:00:00"
+
+
+@pytest.mark.asyncio
 async def test_create_entity_into_empty_package_file(
     template_manager, tmp_path, mock_reload_service
 ):
@@ -543,6 +569,35 @@ async def test_update_entity_in_place_preserves_siblings(
     assert parsed["template"][0]["triggers"] == [
         {"trigger": "state", "entity_id": "sensor.source"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_update_entity_preserves_formatting_of_unchanged_fields(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Issue #92 (same gap as write_automation's #91): editing one field used
+    to swap the whole entity for the caller's plain dict, so every untouched
+    field lost its original quote style and comments."""
+    _write(
+        tmp_path,
+        "packages/emhas.yaml",
+        "template:\n"
+        "- sensor:\n"
+        "  - name: 'Target'\n"
+        "    unique_id: 'target'\n"
+        "    unit_of_measurement: 'W'  # watts\n"
+        "    state: '{{ 1 }}'\n",
+    )
+    before = (tmp_path / "packages/emhas.yaml").read_text()
+
+    result = await template_manager.update_entity(
+        "target",
+        {"name": "Target", "unit_of_measurement": "W", "state": "{{ 2 }}"},
+    )
+
+    assert result.content_after == before.replace(
+        "    state: '{{ 1 }}'\n", "    state: '{{ 2 }}'\n"
+    )
 
 
 @pytest.mark.asyncio
