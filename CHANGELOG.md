@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.7] - 2026-09-28
+
+### Added
+- dev_tools' arm status is now visible without a write having to fail first (issue #63). `dev_tools_ping`, the one tool that works while not armed, returns `arm`. When armed, it shows `expires_at`, `minutes_left`, and the idle-window and 4-hour-cap expiry times. When not armed, it shows the command to run on the HA host. Every write tool's response also includes `arm`, so a long batch of writes sees expiry coming and doesn't fail partway through. No new tool.
+
 ## [2.20.6] - 2026-09-28
 
 ### Added
