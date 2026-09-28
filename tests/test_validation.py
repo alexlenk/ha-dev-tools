@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from custom_components.ha_dev_tools.validation import (
+    HA_YAML_TAGS,
     ValidationManager,
     ValidationResult,
 )
@@ -204,7 +205,7 @@ class TestValidationManager:
     def test_validate_yaml_error_without_problem_mark(self, validation_manager):
         """A YAMLError raised without a problem_mark (not every subclass sets
         one) should still fall back to line 1 rather than raising AttributeError."""
-        with patch("yaml.safe_load", side_effect=yaml.YAMLError("plain error")):
+        with patch("yaml.load", side_effect=yaml.YAMLError("plain error")):
             result = validation_manager.validate_yaml(
                 "irrelevant: content", "test.yaml"
             )
@@ -215,7 +216,7 @@ class TestValidationManager:
     def test_validate_yaml_unexpected_error(self, validation_manager):
         """A non-YAMLError exception during parsing should be caught and
         reported rather than propagating out of validate_yaml."""
-        with patch("yaml.safe_load", side_effect=ValueError("simulated failure")):
+        with patch("yaml.load", side_effect=ValueError("simulated failure")):
             result = validation_manager.validate_yaml(
                 "irrelevant: content", "test.yaml"
             )
@@ -262,3 +263,44 @@ class TestValidationManager:
         assert isinstance(result.errors, list)
         assert isinstance(result.warnings, list)
         assert isinstance(result.line_numbers, list)
+
+
+def test_home_assistant_tags_come_from_ha_own_loader():
+    """The accepted tags are exactly the ones HA's loader registers."""
+    assert {
+        "!secret",
+        "!include",
+        "!include_dir_list",
+        "!include_dir_merge_list",
+        "!include_dir_named",
+        "!include_dir_merge_named",
+        "!env_var",
+        "!input",
+    } <= HA_YAML_TAGS
+
+
+def test_validate_yaml_accepts_home_assistant_tags_without_resolving_them():
+    """Issue #115: a file using HA's own tags is valid YAML to HA, so it
+    must be valid here - checked, not resolved (no secrets.yaml exists)."""
+    content = (
+        "rest_command:\n"
+        "  restart:\n"
+        "    username: !secret doorbird_user\n"
+        "sensor: !include sensors.yaml\n"
+        "template: !include_dir_merge_list templates/\n"
+        "tagged_list: !include_dir_list [a, b]\n"
+        "tagged_map: !include_dir_named {a: 1}\n"
+        "path: !env_var EXTERNAL_DIRS\n"
+        "entity: !input motion_entity\n"
+    )
+    result = ValidationManager().validate_yaml(content, "packages/doorbird.yaml")
+    assert result.is_valid, result.errors
+
+
+def test_validate_yaml_still_rejects_unknown_tags():
+    """A typo'd tag fails to load in HA, so it still fails here."""
+    result = ValidationManager().validate_yaml(
+        "password: !secrets doorbird_password\n", "packages/doorbird.yaml"
+    )
+    assert not result.is_valid
+    assert "!secrets" in result.errors[0]

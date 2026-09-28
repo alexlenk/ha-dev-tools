@@ -300,7 +300,53 @@ def append_point(lines: list[str], container: Any) -> tuple[int, int] | None:
 _WRAP_KEY = "__ha_dev_tools_splice__"
 
 
-def render_item(yaml: Any, container: Any, key: Any, node: Any, indent: int) -> str:
+def _key_column(line: str) -> int:
+    """Column of a line's first key, past any `- ` item dashes before it."""
+    column = _indent(line)
+    rest = line[column:]
+    while rest.startswith("- "):
+        stripped = rest[2:].lstrip(" ")
+        column += len(rest) - len(stripped)
+        rest = stripped
+    return column
+
+
+def dash_offset(lines: list[str]) -> int:
+    """How far these lines indent a block sequence's dashes past the key
+    that owns it: 0 for `key:` / `- a` (ruamel's and HA's own style), 2
+    for `key:` / `  - a` (common in hand-written files). Taken from the
+    first nested sequence found; 0 if there's none or it's odd."""
+    for index, line in enumerate(lines):
+        if _is_skippable(line) or not line.split(" #", 1)[0].rstrip().endswith(":"):
+            continue
+        following = next(
+            (nxt for nxt in lines[index + 1 :] if not _is_skippable(nxt)), None
+        )
+        if following is not None and following.lstrip(" ").startswith("- "):
+            offset = _indent(following) - _key_column(line)
+            return offset if offset > 0 and offset % 2 == 0 else 0
+    return 0
+
+
+def _has_block_sequence(node: Any) -> bool:
+    """Whether dumping `node` writes a nested block (`- a`) sequence."""
+    if isinstance(node, list):
+        return bool(node) and not (
+            isinstance(node, CommentedSeq) and node.fa.flow_style()
+        )
+    if isinstance(node, dict):
+        return any(_has_block_sequence(value) for value in node.values())
+    return False
+
+
+def render_item(
+    yaml: Any,
+    container: Any,
+    key: Any,
+    node: Any,
+    indent: int,
+    offset: int = 0,
+) -> str:
     """One item rendered on its own at column `indent`, without the
     trailing blank/comment lines ruamel attaches to its last value.
 
@@ -310,29 +356,61 @@ def render_item(yaml: Any, container: Any, key: Any, node: Any, indent: int) -> 
     read at, so a shifted dump would move every `# comment` right too.
     Falls back to shifting for an odd indent, which the placeholders can't
     reach with ruamel's 2-space indent.
+
+    `offset` is the file's sequence dash offset (see dash_offset), so an
+    item written as `key:` / `  - a` keeps its nested lists that way
+    instead of being reflowed to ruamel's `key:` / `- a` (issue #115).
     """
-    item: Any = (
-        CommentedSeq([node])
-        if isinstance(container, CommentedSeq)
-        else CommentedMap({key: node})
+    if not _has_block_sequence(node):
+        offset = 0  # no nested list to place - keep ruamel's own layout
+    as_mapping = (
+        offset
+        and isinstance(container, CommentedSeq)
+        and isinstance(node, CommentedMap)
+        and bool(node)
+        and indent % 2 == 0
     )
-    depth, odd = divmod(indent, 2)
-    if isinstance(container, CommentedSeq) and indent:
-        # ruamel starts a block sequence at its parent key's own column, so
-        # a dash at column N needs the innermost placeholder key there too.
+    item: Any
+    if as_mapping:
+        # A list item's mapping, rendered as a mapping at its keys' column
+        # (indent + 2) with the dash put back afterwards: no shifting, so
+        # every `# comment` stays in its column.
+        item, depth, shift = node, indent // 2 + 1, 0
+    elif isinstance(container, CommentedSeq):
+        item = CommentedSeq([node])
+        # ruamel starts a block sequence `offset` columns right of its
+        # parent key, so a dash at column N needs the innermost placeholder
+        # key at N - offset (a root sequence has none, but still gets it).
+        depth, shift = divmod(indent - offset, 2)
         depth += 1
-    wrapper = item
-    if not odd:
-        for _ in range(depth):
-            wrapper = CommentedMap({_WRAP_KEY: wrapper})
-    buffer = StringIO()
-    yaml.dump(wrapper, buffer)
-    rendered = buffer.getvalue().splitlines(keepends=True)
-    if odd:
-        pad = " " * indent
-        rendered = [pad + line if line.strip() else line for line in rendered]
+        if not indent or depth < 1 or shift:
+            depth, shift = 0, indent - offset
     else:
-        rendered = rendered[depth:]
+        item = CommentedMap({key: node})
+        depth, shift = divmod(indent, 2)
+        if shift:
+            depth, shift = 0, indent
+    wrapper = item
+    for _ in range(depth):
+        wrapper = CommentedMap({_WRAP_KEY: wrapper})
+    saved = (yaml.map_indent, yaml.sequence_indent, yaml.sequence_dash_offset)
+    if offset:
+        yaml.indent(mapping=2, sequence=offset + 2, offset=offset)
+    buffer = StringIO()
+    try:
+        yaml.dump(wrapper, buffer)
+    finally:
+        yaml.map_indent, yaml.sequence_indent, yaml.sequence_dash_offset = saved
+    rendered = buffer.getvalue().splitlines(keepends=True)[depth:]
+    if as_mapping:
+        first = next(i for i, line in enumerate(rendered) if not _is_skippable(line))
+        line = rendered[first]
+        rendered[first] = line[:indent] + "- " + line[indent + 2 :]
+    elif shift > 0:
+        pad = " " * shift
+        rendered = [pad + line if line.strip() else line for line in rendered]
+    elif shift < 0:
+        rendered = [line[min(-shift, _indent(line)) :] for line in rendered]
     while rendered and _is_skippable(rendered[-1]):
         rendered.pop()
     return "".join(rendered)
@@ -382,7 +460,9 @@ def surgical_edit(
         if point is None:
             return None
         new_key = len(container) - 1 if isinstance(container, CommentedSeq) else key
-        rendered = render_item(yaml, container, new_key, container[new_key], point[1])
+        rendered = render_item(
+            yaml, container, new_key, container[new_key], point[1], dash_offset(lines)
+        )
         return splice(cast(str, original), point[0], point[0], rendered)
     span = item_span(lines, container, key) if lines else None
     apply()
@@ -391,7 +471,8 @@ def surgical_edit(
     start, end, indent = span
     if op == "delete":
         return splice(cast(str, original), start, end, "")
-    rendered = render_item(yaml, container, key, container[key], indent)
+    offset = dash_offset(lines[start:end]) or dash_offset(lines)
+    rendered = render_item(yaml, container, key, container[key], indent, offset)
     return splice(cast(str, original), start, end, rendered)
 
 
