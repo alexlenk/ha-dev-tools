@@ -56,3 +56,113 @@ async def test_reload_domain_without_reload_service(hass: HomeAssistant):
 
     assert result["reloaded"] is False
     assert "error" in result
+
+
+async def _setup_broken_automation(hass: HomeAssistant) -> None:
+    """Load HA's real automation integration with a trigger it can't set up
+    (issue #101's comma list) - HA then creates the unavailable entity and
+    its Repairs issue itself, nothing here is simulated."""
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": [
+                {
+                    "id": "fault_detection",
+                    "alias": "Fault Detection",
+                    "triggers": [{"trigger": "time_pattern", "minutes": "2,17,32,47"}],
+                    "actions": [],
+                },
+                {
+                    "id": "fine",
+                    "alias": "Fine",
+                    "triggers": [{"trigger": "time_pattern", "minutes": 2}],
+                    "actions": [],
+                },
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_check_ha_config_reports_automation_setup_failures(
+    hass: HomeAssistant, tmp_path: Path
+):
+    """Issue #89: HA's config check passes an automation it then refuses to
+    set up - the failure only shows as a Repairs issue. check_config must
+    report it and not claim the config is valid."""
+    (tmp_path / "configuration.yaml").write_text(_MINIMAL_CONFIG)
+    hass.config.config_dir = str(tmp_path)
+    await _setup_broken_automation(hass)
+
+    result = await config_tools.check_ha_config(hass)
+
+    assert result["errors"] == []
+    assert result["valid"] is False
+    assert len(result["setup_failures"]) == 1
+    failure = result["setup_failures"][0]
+    assert failure["domain"] == "automation"
+    assert failure["id"] == "fault_detection"
+    assert failure["entity_id"] == "automation.fault_detection"
+    assert "invalid time_pattern value" in failure["error"]
+
+    # Issues #88/#102: the same repair, rendered as the Repairs page shows it.
+    (repair,) = [r for r in result["repairs"] if r["domain"] == "automation"]
+    assert repair["title"] == "Automation Fault Detection failed to set up"
+    assert "its triggers could not be set up" in repair["description"]
+    assert "invalid time_pattern value" in repair["description"]
+    assert repair["severity"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_setup_error_finds_the_written_item_only(hass: HomeAssistant):
+    await _setup_broken_automation(hass)
+
+    error = config_tools.setup_error(hass, "automation", "fault_detection")
+    assert error is not None and "invalid time_pattern value" in error
+    assert config_tools.setup_error(hass, "automation", "fine") is None
+    assert config_tools.setup_error(hass, "script", "fault_detection") is None
+
+
+@pytest.mark.asyncio
+async def test_active_repairs_skips_dismissed_and_renders_unknown_keys(
+    hass: HomeAssistant,
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    ir.async_create_issue(
+        hass,
+        "demo_domain",
+        "shown",
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="no_such_key",
+        translation_placeholders={"x": "1"},
+    )
+    ir.async_create_issue(
+        hass,
+        "demo_domain",
+        "dismissed",
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="no_such_key",
+    )
+    ir.async_ignore_issue(hass, "demo_domain", "dismissed", True)
+
+    repairs = await config_tools.active_repairs(hass)
+
+    assert [r["issue_id"] for r in repairs] == ["shown"]
+    # No translation for this key: title/description None, raw key and
+    # placeholders still returned so the issue is identifiable.
+    assert repairs[0]["title"] is None
+    assert repairs[0]["translation_key"] == "no_such_key"
+    assert repairs[0]["placeholders"] == {"x": "1"}
+
+
+def test_render_keeps_unknown_placeholders_and_survives_bad_templates():
+    assert config_tools._render("Hi {name} {other}", {"name": "A"}) == "Hi A {other}"
+    assert config_tools._render("broken {", {}) == "broken {"
+    assert config_tools._render(None, {}) is None
