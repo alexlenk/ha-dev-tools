@@ -8,35 +8,46 @@ on:
 
 jobs:
   test:
+    # Both the minimum HA version hacs.json declares and the current HA
+    # release (issue #84): the code has HA-version-dependent branches, and
+    # only ever testing one version let the HA 2026.9 probatio break reach
+    # users. Both are required. Newer-than-current HA releases are covered
+    # by the nightly test-latest-ha.yml instead.
+    name: test (${{ matrix.ha }} HA)
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.14']
-    
+        include:
+          - ha: minimum
+            requirements: requirements-test-ha-min.txt
+          - ha: current
+            requirements: requirements-test.txt
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Python ${{ matrix.python-version }}
+
+      - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      
+          python-version: '3.14'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-test.txt
-      
+          pip install -r ${{ matrix.requirements }}
+
       - name: Run tests
         run: |
           PYTHONPATH=. pytest tests/ -v --cov=custom_components.ha_dev_tools --cov-report=term-missing --ignore=tests/property/
-      
+
       - name: Run property-based tests
         run: |
           PYTHONPATH=. pytest tests/property/ -v --tb=short
-      
+
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4
-        if: matrix.python-version == '3.14'
+        if: matrix.ha == 'current'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false

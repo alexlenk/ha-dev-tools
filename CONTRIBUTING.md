@@ -29,8 +29,10 @@ ha-dev-tools/
 ├── tests/                     # Flat pytest files, one per module above
 │   └── property/              # Hypothesis property-based tests
 ├── docs/                      # ARCHITECTURE.md, SECURITY.md
-├── .github/workflows/         # test.yml, hassfest.yml, validate.yml
-└── requirements-test.txt
+├── .github/workflows/         # test.yml, test-latest-ha.yml, hassfest.yml, validate.yml
+├── requirements-test.txt      # current HA release (default)
+├── requirements-test-ha-min.txt  # minimum HA from hacs.json
+└── requirements-test-common.txt  # shared by both
 ```
 
 ## Prerequisites
@@ -53,12 +55,25 @@ pip install -r requirements-test.txt
 
 `requirements-test.txt` pins `pytest-homeassistant-custom-component` to an
 exact version, which transitively pins an exact `homeassistant` version too
-- this isn't a loose floor, it's deliberately reproducible. If you bump
-either, re-verify the transitive `hassil`/`home-assistant-intents` pins
-against the `conversation` component's manifest at the matching git tag
-(see the comments in `requirements-test.txt` for why those matter and
-`docs/ARCHITECTURE.md` for the full story on what broke the last time this
-was assumed rather than checked).
+- this isn't a loose floor, it's deliberately reproducible. It targets the
+**current** HA release. CI also runs the suite against the **minimum** HA
+version in `hacs.json` (`requirements-test-ha-min.txt`), and a nightly
+workflow (`test-latest-ha.yml`) runs it against the newest HA release, so a
+breaking HA change shows up before users hit it (issue #84).
+
+**When the nightly run goes red** (a new HA release): bump
+`pytest-homeassistant-custom-component` in `requirements-test.txt`, then
+re-verify the `conversation` pins (`gazetteer-matcher`, `hassil`,
+`home-assistant-intents`) against `homeassistant/components/conversation/
+manifest.json` in the newly installed HA - the nightly job prints the
+component requirements it read. **When raising the minimum HA version**,
+update `hacs.json` and `requirements-test-ha-min.txt` together. See the
+comments in the requirements files for why each pin exists, and
+`docs/ARCHITECTURE.md` for what broke the last time a pin was assumed rather
+than checked.
+
+To test against the minimum HA locally, use a separate venv with
+`pip install -r requirements-test-ha-min.txt`.
 
 **A note on local verification:** if your local Python isn't genuinely
 3.14.2+, you may not be able to install the real dependency graph at all

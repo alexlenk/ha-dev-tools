@@ -1,0 +1,62 @@
+# Home Assistant integration test dependencies that don't depend on which
+# HA version is tested. Don't install this file on its own - install
+# requirements-test.txt (current HA, the default) or
+# requirements-test-ha-min.txt (the minimum HA in hacs.json), which both
+# include it. CI tests both; see .github/workflows/test.yml (issue #84).
+# Requires Python 3.14+ - HA's own Requires-Python is >=3.14.2 from 2026.3 on.
+
+# Core testing framework
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+
+# Property-based testing
+hypothesis>=6.0.0
+
+# Additional test utilities
+# aioresponses is NOT usable here, despite being listed as a dependency -
+# left unimported anywhere. homeassistant (both tested versions, 2026.8.2
+# and 2026.9.4) hard-pins aiohttp==3.14.3 exactly, not a floor - confirmed
+# directly by a real resolution failure, not assumed. aioresponses==0.7.9
+# (its latest release; confirmed no newer one exists) constructs
+# aiohttp.ClientResponse directly for every mocked call, and aiohttp
+# 3.14.0 added a new required keyword-only stream_writer argument
+# ClientResponse.__init__ now needs that aioresponses doesn't pass -
+# breaks every mocked call, GET and PUT alike (bisected directly: aiohttp
+# 3.13.0 works, 3.14.0 doesn't) - and since homeassistant's pin can't be
+# moved down to 3.13.x, aioresponses simply cannot mock anything in this
+# repo as things stand. tests/test_mirror.py uses a small hand-rolled
+# fake aiohttp session instead - see that file. Revisit this comment (and
+# whether aioresponses is worth keeping in this file at all) if a future
+# aioresponses release fixes the incompatibility.
+aioresponses>=0.7.0
+freezegun>=1.2.0
+
+# Core dependencies (should match manifest.json requirements)
+pyyaml>=6.0.0
+aiofiles>=23.0.0
+aiohttp>=3.8.0
+ruamel.yaml>=0.18.0
+# HA itself stopped pulling this in with 2026.9 (issue #84); manifest.json
+# requires it, so the test env has to install it explicitly too.
+voluptuous-serialize>=2.6.0
+
+# Transitive deps of homeassistant.components.mcp_server (its own
+# manifest.json requirements - identical at 2026.8.2 and 2026.9.4,
+# confirmed by reading both) - not installed automatically by
+# pytest-homeassistant-custom-component. Needed because test_mcp_repair.py
+# adds a real (Mock)ConfigEntry for the mcp_server domain, which HA's own
+# hass fixture then imports and unloads at test teardown like any other
+# loaded component. Move to the per-version files if they ever diverge.
+mcp==1.26.0
+aiohttp_sse==2.2.0
+anyio==4.13.0
+
+# Transitive dep of homeassistant.components.mqtt (its own manifest.json
+# requirement - identical at 2026.8.2 and 2026.9.4) - not installed
+# automatically by pytest-homeassistant-custom-component, same situation
+# as mcp_server's deps above. Needed because mqtt_manager.py imports
+# `homeassistant.components.mqtt` (`__init__.py` re-exports
+# async_subscribe from .client, which imports paho.mqtt.client directly)
+# for list_mqtt_topics.
+paho-mqtt==2.1.0

@@ -1,92 +1,28 @@
-# Home Assistant Integration Test Dependencies
-# Requires Python 3.14+ - see the homeassistant pin below for why.
-
-# Core testing framework
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
-pytest-cov>=4.0.0
-
-# Official Home Assistant testing framework - exact pin below, see that
-# comment for why (pins the homeassistant version transitively).
-
-# Property-based testing
-hypothesis>=6.0.0
-
-# Additional test utilities
-# aioresponses is NOT usable here, despite being listed as a dependency -
-# left unimported anywhere. homeassistant==2026.8.2 (pinned below,
-# transitively) hard-pins aiohttp==3.14.3 exactly, not a floor - confirmed
-# directly by a real resolution failure, not assumed. aioresponses==0.7.9
-# (its latest release; confirmed no newer one exists) constructs
-# aiohttp.ClientResponse directly for every mocked call, and aiohttp
-# 3.14.0 added a new required keyword-only stream_writer argument
-# ClientResponse.__init__ now needs that aioresponses doesn't pass -
-# breaks every mocked call, GET and PUT alike (bisected directly: aiohttp
-# 3.13.0 works, 3.14.0 doesn't) - and since homeassistant's pin can't be
-# moved down to 3.13.x, aioresponses simply cannot mock anything in this
-# repo as things stand. tests/test_mirror.py uses a small hand-rolled
-# fake aiohttp session instead - see that file. Revisit this comment (and
-# whether aioresponses is worth keeping in this file at all) if a future
-# aioresponses release fixes the incompatibility.
-aioresponses>=0.7.0
-freezegun>=1.2.0
-
-# Core dependencies (should match manifest.json requirements)
-pyyaml>=6.0.0
-aiofiles>=23.0.0
-aiohttp>=3.8.0
-ruamel.yaml>=0.18.0
+# Test dependencies against the CURRENT Home Assistant release (the
+# default for local runs). See requirements-test-common.txt for everything
+# not tied to an HA version; requirements-test-ha-min.txt tests the
+# minimum HA version in hacs.json. CI runs both (issue #84), and a nightly
+# workflow tests whatever HA was released most recently
+# (.github/workflows/test-latest-ha.yml) - when that goes red, bump this
+# file to the new release.
+-r requirements-test-common.txt
 
 # Transitive deps of homeassistant.helpers.llm -> homeassistant.components.
 # conversation -> default_agent, which isn't in homeassistant's own install
-# requirements (conversation is an optional/frontend-adjacent component,
-# whose own deps are loaded lazily at HA runtime via manifest.json rather
-# than the top-level package's install_requires) but gets imported
-# unconditionally the moment llm_api.py imports `llm`. Pinned exactly to
-# match homeassistant/components/conversation/manifest.json's own
-# requirements at the homeassistant version pinned below (confirmed by
-# reading that manifest at the matching git tag, not assumed) - re-verify
-# the same way if the homeassistant pin below ever changes.
-hassil==3.11.0
-home-assistant-intents==2026.7.30
+# requirements (conversation's deps are loaded lazily at HA runtime via its
+# manifest.json) but gets imported unconditionally the moment llm_api.py
+# imports `llm`. Pinned exactly to homeassistant/components/conversation/
+# manifest.json's requirements at the homeassistant version pinned below
+# (read from the installed 2026.9.4 package, not assumed) - re-verify the
+# same way whenever the pin below changes. gazetteer-matcher is new in 2026.9.
+gazetteer-matcher==1.1.0
+hassil==3.12.1
+home-assistant-intents==2026.8.28
 
-# Transitive deps of homeassistant.components.mcp_server (its own
-# manifest.json requirements, confirmed by reading it at the pinned
-# homeassistant version below) - not installed automatically by
-# pytest-homeassistant-custom-component. Needed because test_mcp_repair.py
-# adds a real (Mock)ConfigEntry for the mcp_server domain, which HA's own
-# hass fixture then imports and unloads at test teardown like any other
-# loaded component.
-mcp==1.26.0
-aiohttp_sse==2.2.0
-anyio==4.13.0
-
-# Transitive dep of homeassistant.components.mqtt (its own manifest.json
-# requirement, confirmed by reading it at the pinned homeassistant
-# version below) - not installed automatically by
-# pytest-homeassistant-custom-component, same situation as mcp_server's
-# deps above. Needed because mqtt_manager.py imports
-# `homeassistant.components.mqtt` (`__init__.py` re-exports
-# async_subscribe from .client, which imports paho.mqtt.client directly)
-# for list_mqtt_topics - re-verify the exact pin the same way if the
-# homeassistant pin below ever changes.
-paho-mqtt==2.1.0
-
-# Home Assistant core (required for integration testing).
-# Pinned via pytest-homeassistant-custom-component's own exact pin (below)
-# rather than a floor on `homeassistant` directly, because HA's own
-# Requires-Python has climbed release over release (>=3.12.0 through
-# 2025.1.x, >=3.13.0 for 2025.2-2025.4, >=3.13.2 for 2025.5-2026.2,
-# >=3.14.2 from 2026.3 on - checked directly against PyPI, not assumed).
-# An earlier version of this comment claimed mcp_server (which serves the
-# dev_tools llm.API over MCP, added in homeassistant/core's dev branch)
-# "hadn't reached a stable release yet" - that was wrong. It shipped in
-# 2026.3+; homeassistant==2026.8.2 has it. What was actually happening:
-# CI's Python 3.12/3.13 matrix couldn't install anything past 2025.1.4 (the
-# last release still supporting <3.14), so a bare `homeassistant>=2024.1.0`
-# floor silently resolved to the newest Python-3.12-compatible release
-# instead of erroring - it looked like "not on PyPI" but was really "not
-# installable on this interpreter". Fixed by moving the CI matrix to Python
-# 3.14 (see test.yml) and pinning here to a pytest-homeassistant-custom-
-# component release whose own exact homeassistant pin includes mcp_server.
-pytest-homeassistant-custom-component==0.13.356
+# Pins homeassistant==2026.9.4 transitively (the current release). HA is
+# pinned through pytest-homeassistant-custom-component's own exact pin
+# rather than a floor on `homeassistant`, because HA's Requires-Python has
+# climbed release over release (>=3.14.2 from 2026.3 on) - a bare floor on
+# an older interpreter silently resolves to an old release instead of
+# erroring.
+pytest-homeassistant-custom-component==0.13.367
