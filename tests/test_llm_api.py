@@ -1903,6 +1903,47 @@ async def test_update_derived_sensor_tool_calls_manager(hass: HomeAssistant):
 
 
 @pytest.mark.asyncio
+async def test_update_derived_sensor_propose_shows_current_and_changes(
+    hass: HomeAssistant,
+):
+    """Issue #86: the propose step used to echo only the caller's own
+    arguments, so the user confirming never saw what the entry holds or
+    what actually changes. Unknown entry ids fall back to the plain
+    preview - the real write reports the not-found error."""
+    tool = UpdateDerivedSensorTool()
+    preview = {
+        "current_options": {"state": "{{ 1 }}", "name": "X"},
+        "would_change": [{"field": "state", "from": "{{ 1 }}", "to": "{{ 2 }}"}],
+    }
+    args = {"entry_id": "abc", "options": {"state": "{{ 2 }}"}}
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.preview_update",
+        return_value=preview,
+    ) as mock_preview:
+        proposal = await tool._run(
+            hass,
+            llm.ToolInput(tool_name="update_derived_sensor", tool_args=args),
+            _llm_context(),
+        )
+    missing = await tool._run(
+        hass,
+        llm.ToolInput(
+            tool_name="update_derived_sensor",
+            tool_args={"entry_id": "nope", "options": {"state": "x"}},
+        ),
+        _llm_context(),
+    )
+
+    mock_preview.assert_called_once_with(hass, "abc", None, {"state": "{{ 2 }}"})
+    assert proposal["confirmation_required"] is True
+    assert proposal["would_apply"] == args
+    assert proposal["current_options"] == preview["current_options"]
+    assert proposal["would_change"] == preview["would_change"]
+    assert missing["confirmation_required"] is True
+    assert "would_change" not in missing
+
+
+@pytest.mark.asyncio
 async def test_update_derived_sensor_tool_passes_options_patch(hass: HomeAssistant):
     """The step-id-free `options` patch (issue #82) reaches the manager."""
     tool = UpdateDerivedSensorTool()
