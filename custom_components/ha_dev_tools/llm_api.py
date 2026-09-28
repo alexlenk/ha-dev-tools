@@ -25,6 +25,7 @@ from homeassistant.util.json import JsonObjectType, JsonValueType
 from . import (
     access_control,
     audit_manager,
+    config_snapshot,
     config_tools,
     dashboard_manager,
     derived_sensor_manager,
@@ -1044,7 +1045,9 @@ class CheckConfigTool(GatedTool):
         "are retrying, or need re-authentication, with HA's reason. "
         "Setup failures reflect the last reload: write_automation/"
         "write_script reload automatically and already return their own "
-        "item's 'setup_error'."
+        "item's 'setup_error'. With mirroring on, a passing check also "
+        "snapshots hand-edited config (configuration.yaml, its includes, "
+        "packages, custom_templates) to the mirror repo: 'config_snapshot'."
     )
     parameters = vol.Schema({})
 
@@ -1055,8 +1058,61 @@ class CheckConfigTool(GatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Run HA's own config check."""
-        return await config_tools.check_ha_config(hass)
+        """Run HA's own config check, then snapshot a passing config."""
+        result = await config_tools.check_ha_config(hass)
+        if mirror.is_mirror_enabled(hass):
+            # Only a config that passes HA's own check is snapshotted, so
+            # the mirror always holds a last-known-good copy (issue #105).
+            result["config_snapshot"] = (
+                {"skipped_all": "configuration check failed - kept last good copy"}
+                if result["errors"]
+                else await config_snapshot.async_snapshot(hass)
+            )
+        return cast(JsonObjectType, result)
+
+
+class GetConfigFileTool(GatedTool):
+    """A hand-edited config file's raw text - live, or its mirrored copy."""
+
+    name = "get_config_file"
+    description = (
+        "Read a hand-edited config file's raw text: configuration.yaml, any "
+        "file it (or those files) !include / !include_dir_*, packages/*.yaml "
+        "and custom_templates/*.jinja. Tags such as !secret and !include "
+        "are returned as written, never resolved. Use it when a file no "
+        "longer parses (get_automation/get_rest_command etc. can't read it "
+        "then) or to see exactly how it's written. source='mirror' returns "
+        "the mirror repo's copy instead - the last one that passed "
+        "check_config - to recover a broken block. A file is withheld if "
+        "any line looks like a literal credential (move it to secrets.yaml "
+        "with !secret); secrets.yaml itself is never returned. Without "
+        "'path', lists the files covered. Read-only."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("path"): str,
+            vol.Optional("source", default="live"): vol.In(["live", "mirror"]),
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Return the file (or the list of files)."""
+        args = tool_input.tool_args
+        try:
+            return cast(
+                JsonObjectType,
+                await config_snapshot.get_config_file(
+                    hass, args.get("path"), args.get("source", "live")
+                ),
+            )
+        except config_snapshot.ConfigFileError as exc:
+            return _tool_error(exc)
 
 
 class ReloadDomainTool(GatedTool):
@@ -2950,6 +3006,7 @@ class DevToolsAPI(llm.API):
                 ListAddonsTool(),
                 GetAddonLogsTool(),
                 CheckConfigTool(),
+                GetConfigFileTool(),
                 ReloadDomainTool(),
                 GetAutomationTool(self.automation_manager),
                 WriteAutomationTool(self.automation_manager),

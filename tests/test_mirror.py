@@ -580,3 +580,78 @@ async def test_mirror_dry_run_branches_proposed_off_resolved_default_branch(
     assert ref_branch_call[1].endswith("/git/ref/heads/develop")
     post_call = fake_session.calls[4]
     assert post_call[2]["json"]["sha"] == "develop-sha"
+
+
+# --- mirror_snapshots / read_mirrored (issue #105) --------------------------
+
+
+@pytest.mark.asyncio
+async def test_mirror_snapshots_commits_changed_skips_unchanged_and_credentials(
+    hass: HomeAssistant, mirror_entry
+):
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "live"}),  # repo info, once
+            _FakeResponse(404),  # new.yaml: not mirrored yet
+            _FakeResponse(201, {"content": {"sha": "s1"}}),  # PUT new.yaml
+            _FakeResponse(200, {"content": _b64("same\n"), "sha": "s2"}),
+            _FakeResponse(200, {"content": _b64("old\n"), "sha": "s3"}),
+            _FakeResponse(201, {"content": {"sha": "s4"}}),  # PUT changed.yaml
+        ]
+    )
+
+    with _patched(fake_session):
+        result = await mirror.mirror_snapshots(
+            hass,
+            [
+                ("new.yaml", "a: 1\n"),
+                ("leaky.yaml", "password: hunter2\n"),
+                ("same.yaml", "same\n"),
+                ("changed.yaml", "new\n"),
+            ],
+        )
+
+    assert result.committed == ("new.yaml", "changed.yaml")
+    assert result.unchanged == ("same.yaml",)
+    assert [path for path, _ in result.skipped] == ["leaky.yaml"]
+    assert "line 1: password" in result.skipped[0][1]
+    assert "hunter2" not in result.skipped[0][1]
+    puts = [call for call in fake_session.calls if call[0] == "PUT"]
+    assert [call[2]["json"]["message"] for call in puts] == [
+        "Mirror: new.yaml snapshot",
+        "Mirror: changed.yaml snapshot",
+    ]
+    assert puts[1][2]["json"]["sha"] == "s3"
+    assert all(call[2]["json"]["branch"] == "live" for call in puts)
+
+
+@pytest.mark.asyncio
+async def test_mirror_snapshots_reports_failures_without_raising(
+    hass: HomeAssistant, mirror_entry
+):
+    with _patched(FakeSession([_FakeResponse(500)])):
+        result = await mirror.mirror_snapshots(hass, [("a.yaml", "a: 1\n")])
+    assert result.skipped == (("a.yaml", "mirror push failed: HTTP 500"),)
+
+    fake_session = FakeSession(
+        [_FakeResponse(200, {"default_branch": "main"}), _FakeResponse(500)]
+    )
+    with _patched(fake_session):
+        result = await mirror.mirror_snapshots(hass, [("a.yaml", "a: 1\n")])
+    assert result.committed == ()
+    assert result.skipped == (("a.yaml", "mirror push failed: HTTP 500"),)
+
+
+@pytest.mark.asyncio
+async def test_read_mirrored_returns_content_or_none(hass: HomeAssistant, mirror_entry):
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "main"}),
+            _FakeResponse(200, {"content": _b64("a: 1\n"), "sha": "s"}),
+            _FakeResponse(200, {"default_branch": "main"}),
+            _FakeResponse(404),
+        ]
+    )
+    with _patched(fake_session):
+        assert await mirror.read_mirrored(hass, "a.yaml") == "a: 1\n"
+        assert await mirror.read_mirrored(hass, "b.yaml") is None

@@ -198,7 +198,8 @@ matters for setup, covered below.
 | `delete_automation` | Layout-aware, package-safe delete - resolves which file actually defines it first, refuses to guess if the id isn't found or is defined in more than one file |
 | `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
 | `list_rest_commands` / `get_rest_command` | Same layout-aware pattern, for `rest_command:` - resolves whether it lives in `configuration.yaml` or a `packages/*.yaml` file. Read-only - no write_rest_command yet |
-| `check_config` | Home Assistant's own full config validation |
+| `check_config` | Home Assistant's own full config validation. With git mirroring on, a passing check also snapshots your hand-edited config (below) |
+| `get_config_file` | Raw text of a hand-edited config file - `configuration.yaml`, anything it `!include`s, `packages/*.yaml`, `custom_templates/*.jinja` - with `!secret`/`!include` as written, live or (`source: mirror`) its last good snapshot. Reads a file that no longer parses, where the structured tools can't. Withholds any file with a literal credential in it; never returns `secrets.yaml` |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
 
 **Configure**
@@ -275,6 +276,16 @@ either way. Supported today: `write_automation`, `delete_automation`,
 `write_energy_config` (live mode only for both - neither has a
 compute-without-writing path to mirror in dry-run), the helper tools, the
 derived-sensor tools, and `delete_entity`/`delete_entities`.
+
+Config you edit by hand is mirrored too: `configuration.yaml`, every file it
+(or those files) `!include`s, `packages/`, and `custom_templates/` are
+committed as-is, one commit per changed file, at Home Assistant start, once
+a day, and on every `check_config` - but only while Home Assistant's own
+config check passes, so the mirror's latest copy is always a last known
+good one. An edit made over SSH then shows up as a diff, and
+`get_config_file` with `source: mirror` returns that last good copy to
+recover a broken block from. A file with a literal credential anywhere in it
+is skipped, and `secrets.yaml` never leaves the machine.
 
 ## Security
 

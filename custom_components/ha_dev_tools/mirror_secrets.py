@@ -12,6 +12,7 @@ general entropy/pattern secret scanner (gitleaks-style) - see issue #39's
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ruamel.yaml import YAML
@@ -102,4 +103,52 @@ def find_storage_credentials(content: str) -> list[str]:
         return ["<content did not parse as JSON - treated as unsafe to mirror>"]
     findings: list[str] = []
     _walk(data, path="", findings=findings)
+    return findings
+
+
+# Text-level check for raw config files (issue #105) - snapshots and
+# get_config_file return a hand-edited file verbatim, so a file is only
+# released if no line looks like it holds a literal credential. Stricter
+# than find_yaml_credentials on purpose: it also works on a file that no
+# longer parses (the case get_config_file exists for), on Jinja macros, on
+# comments, and inside strings (a JSON `payload` with "password": "...").
+# A false positive only means a refused read, never a leak.
+_TEXT_CREDENTIAL = re.compile(
+    r"""(?<![\w.-])["']?
+    ([\w.-]*(?:password|passwd|passcode|pwd|token|api_?key|secret|private_?key
+    |credential|authorization)[\w.-]*)
+    ["']?[ \t]*[:=](?!=)[ \t]*([^\s,}\]]*)""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# `key:` with nothing after it opens a nested block (its lines are checked
+# on their own); these are references or empty, not literal values.
+_SAFE_VALUES = {"", '""', "''", "!secret", "!env_var", "null", "~", "none"}
+_URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_BEARER = re.compile(r"\bbearer\s+[a-z0-9._~+/=-]{8,}", re.IGNORECASE)
+
+
+def find_text_credentials(content: str) -> list[str]:
+    """`line N: <key>` for every line that looks like it holds a literal
+    credential. Never includes the value itself."""
+    findings: list[str] = []
+    for number, line in enumerate(content.splitlines(), start=1):
+        for match in _TEXT_CREDENTIAL.finditer(line):
+            if match.group(2).lower() not in _SAFE_VALUES:
+                findings.append(f"line {number}: {match.group(1)}")
+        if _URL_USERINFO.search(line):
+            findings.append(f"line {number}: password in a URL")
+        if _BEARER.search(line):
+            findings.append(f"line {number}: bearer token")
+    return findings
+
+
+def find_file_credentials(path: str, content: str) -> list[str]:
+    """Credential findings for one raw config file: the text check, plus
+    find_yaml_credentials for a YAML file that parses (a broken one is left
+    to the text check alone rather than refused outright)."""
+    findings = find_text_credentials(content)
+    if path.endswith((".yaml", ".yml")):
+        structured = find_yaml_credentials(content)
+        if not (structured and structured[0].startswith("<content did not parse")):
+            findings += [f"key {finding}" for finding in structured]
     return findings

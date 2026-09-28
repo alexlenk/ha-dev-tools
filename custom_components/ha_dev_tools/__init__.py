@@ -15,7 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from . import access_control
+from . import access_control, config_snapshot
 from .automation_manager import AutomationManager
 from .const import DOMAIN
 from .file_manager import FileManager
@@ -66,9 +66,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["security_manager"] = security_manager
+
+    # Snapshots of hand-edited config to the mirror repo, at start and daily
+    # (issue #105) - a no-op while mirroring is off.
+    unsub_snapshots = config_snapshot.async_setup_snapshots(hass)
     hass.data[DOMAIN]["unsub_llm_api"] = unsub_llm_api
     hass.data[DOMAIN]["unsub_arm_cleanup"] = unsub_arm_cleanup
     hass.data[DOMAIN]["unsub_mcp_repair"] = unsub_mcp_repair
+    hass.data[DOMAIN]["unsub_snapshots"] = unsub_snapshots
 
     _LOGGER.info("HA Dev Tools set up")
     return True
@@ -88,6 +93,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub_mcp_repair = hass.data[DOMAIN].get("unsub_mcp_repair")
         if unsub_mcp_repair:
             unsub_mcp_repair()
+
+        unsub_snapshots = hass.data[DOMAIN].get("unsub_snapshots")
+        if unsub_snapshots:
+            unsub_snapshots()
 
         hass.data.pop(DOMAIN)
 

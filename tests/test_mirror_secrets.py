@@ -77,3 +77,68 @@ def test_find_storage_credentials_clean_data():
 def test_find_storage_credentials_unparseable_content_is_treated_as_unsafe():
     findings = mirror_secrets.find_storage_credentials("{not valid json")
     assert findings
+
+
+# --- find_text_credentials / find_file_credentials (issue #105) -------------
+
+
+def test_find_text_credentials_flags_literals_with_line_and_key_only():
+    content = (
+        "rest_command:\n"
+        "  door:\n"
+        "    url: http://doorbird/bha-api/restart.cgi\n"
+        "    password: hunter2\n"
+        '    payload: \'{"api_key": "abc"}\'\n'
+        "# old token: xyz\n"
+        "    url2: https://user:pass@host/x\n"
+        "    headers:\n"
+        "      Authorization: Bearer abcdefghijkl\n"
+        "{% set access_token = 'x' %}\n"
+    )
+    findings = mirror_secrets.find_text_credentials(content)
+    assert findings == [
+        "line 4: password",
+        "line 5: api_key",
+        "line 6: token",
+        "line 7: password in a URL",
+        "line 9: Authorization",
+        "line 9: bearer token",
+        "line 10: access_token",
+    ]
+    assert not any("hunter2" in finding for finding in findings)
+
+
+def test_find_text_credentials_allows_references_and_empty_values():
+    content = (
+        "password: !secret door_password\n"
+        "api_key: !env_var API_KEY\n"
+        "token:\n"
+        "  nested: 1\n"
+        'client_secret: ""\n'
+        "access_token: null\n"
+        "{% if token == 'x' %}{% endif %}\n"
+        "alias: Secrets are safe here\n"
+    )
+    assert mirror_secrets.find_text_credentials(content) == []
+
+
+def test_find_file_credentials_reads_a_file_that_no_longer_parses():
+    """The case get_config_file exists for: a truncated line broke the
+    file, but it holds no credential, so it isn't refused just for that."""
+    broken = 'rest_command:\n  door:\n    payload: \'{"a": 1>\n  x: [\n'
+    assert mirror_secrets.find_file_credentials("configuration.yaml", broken) == []
+    assert mirror_secrets.find_file_credentials(
+        "configuration.yaml", broken + "  password: hunter2\n"
+    ) == ["line 5: password"]
+
+
+def test_find_file_credentials_adds_the_structured_yaml_check():
+    content = "x:\n  password: hunter2\n"
+    assert mirror_secrets.find_file_credentials("packages/a.yaml", content) == [
+        "line 2: password",
+        "key x.password",
+    ]
+    # Not YAML: the text check alone.
+    assert mirror_secrets.find_file_credentials(
+        "custom_templates/a.jinja", content
+    ) == ["line 2: password"]

@@ -44,7 +44,11 @@ from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
-from custom_components.ha_dev_tools import access_control, helper_manager
+from custom_components.ha_dev_tools import (
+    access_control,
+    config_snapshot,
+    helper_manager,
+)
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
 from custom_components.ha_dev_tools.automation_manager import AutomationManager
 from custom_components.ha_dev_tools.const import (
@@ -79,6 +83,7 @@ from custom_components.ha_dev_tools.llm_api import (
     FindEntitiesTool,
     GetAddonLogsTool,
     GetAutomationTool,
+    GetConfigFileTool,
     GetDashboardTool,
     GetDerivedSensorTool,
     GetEnergyConfigTool,
@@ -221,6 +226,7 @@ async def test_dev_tools_real_tools_registered(
         "list_addons",
         "get_addon_logs",
         "check_config",
+        "get_config_file",
         "reload_domain",
         "get_automation",
         "write_automation",
@@ -824,6 +830,62 @@ async def test_check_config_tool_calls_manager(hass: HomeAssistant):
 
     assert result == {"valid": True}
     mock_check.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_check_config_tool_snapshots_only_a_passing_config(hass: HomeAssistant):
+    """Issue #105: with mirroring on, a passing check snapshots hand-edited
+    config; a failing one keeps the mirror's last good copy."""
+    snapshot = AsyncMock(return_value={"committed": ["configuration.yaml"]})
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.config_snapshot.async_snapshot",
+            snapshot,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.config_tools.check_ha_config",
+            AsyncMock(side_effect=[{"errors": []}, {"errors": [{"message": "x"}]}]),
+        ),
+    ):
+        passing = await CheckConfigTool()._run(
+            hass, llm.ToolInput(tool_name="check_config", tool_args={}), _llm_context()
+        )
+        failing = await CheckConfigTool()._run(
+            hass, llm.ToolInput(tool_name="check_config", tool_args={}), _llm_context()
+        )
+
+    assert passing["config_snapshot"] == {"committed": ["configuration.yaml"]}
+    assert "configuration check failed" in failing["config_snapshot"]["skipped_all"]
+    snapshot.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_get_config_file_tool_returns_file_or_error(hass: HomeAssistant):
+    target = "custom_components.ha_dev_tools.llm_api.config_snapshot.get_config_file"
+    with patch(target, AsyncMock(return_value={"path": "a.yaml"})) as mock_get:
+        result = await GetConfigFileTool()._run(
+            hass,
+            llm.ToolInput(
+                tool_name="get_config_file",
+                tool_args={"path": "a.yaml", "source": "mirror"},
+            ),
+            _llm_context(),
+        )
+    assert result == {"path": "a.yaml"}
+    mock_get.assert_called_once_with(hass, "a.yaml", "mirror")
+
+    error = config_snapshot.ConfigFileError("withheld")
+    with patch(target, AsyncMock(side_effect=error)):
+        result = await GetConfigFileTool()._run(
+            hass,
+            llm.ToolInput(tool_name="get_config_file", tool_args={}),
+            _llm_context(),
+        )
+    assert result == {"error": "withheld", "error_type": "ConfigFileError"}
 
 
 @pytest.mark.asyncio

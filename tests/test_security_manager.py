@@ -2081,6 +2081,12 @@ def test_remove_from_denylist_default_sensitive_file(hass: HomeAssistant):
     # Should no longer be in denylist
     assert "secrets.yaml" not in manager.denylist
 
+    # ...but "*/secrets.yaml" (a secrets.yaml in any folder, issue #105)
+    # still covers it until that entry is removed too.
+    assert manager.validate_file_path("secrets.yaml") == (False, "BLACKLISTED_FILE")
+    assert manager.is_denylisted("packages/secrets.yaml") is True
+    manager.remove_from_denylist("*/secrets.yaml")
+
     # In strict allowlist mode, it's now accessible because:
     # 1. It's no longer in denylist
     # 2. It matches the /config/*.yaml pattern in read_paths
@@ -2423,3 +2429,23 @@ def test_get_security_mode_is_always_allowlist(hass: HomeAssistant, security_man
     """The system only ever operates in strict allowlist mode - no
     branches here, but never called by any existing test either."""
     assert security_manager.get_security_mode() == "allowlist"
+
+
+def test_secrets_yaml_is_denied_in_every_folder(hass: HomeAssistant):
+    """Issue #105: HA reads a secrets.yaml from subfolders too."""
+    manager = SecurityManager(hass, {})
+    for path in ("secrets.yaml", "packages/secrets.yaml", "packages/a/secrets.yaml"):
+        assert manager.validate_file_path(path) == (False, "BLACKLISTED_FILE")
+    assert manager.validate_file_path("packages/not_secrets.yaml") == (True, None)
+
+
+def test_custom_templates_are_readable_not_writable(hass: HomeAssistant):
+    manager = SecurityManager(hass, {})
+    assert manager.validate_file_path("custom_templates/macros.jinja") == (True, None)
+    assert manager.validate_file_path("custom_templates/sub/x.jinja") == (True, None)
+    assert (
+        manager.validate_file_path("custom_templates/macros.jinja", operation="write")[
+            0
+        ]
+        is False
+    )

@@ -379,3 +379,74 @@ async def mirror_dry_run(
         return MirrorResult(mirrored=False, reason=f"mirror push failed: {exc}")
 
     return MirrorResult(mirrored=True, commits=tuple(commits), branch=branch)
+
+
+@dataclass(frozen=True)
+class SnapshotResult:
+    """What mirror_snapshots() did, per file."""
+
+    committed: tuple[str, ...] = ()
+    unchanged: tuple[str, ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()  # (path, reason)
+
+
+async def mirror_snapshots(
+    hass: HomeAssistant, files: list[tuple[str, str]]
+) -> SnapshotResult:
+    """Commit each hand-edited config file (issue #105) to the mirror repo's
+    default branch as-is, one commit per file whose content changed.
+
+    Unlike mirror_write() there's no before/after pair: nothing here wrote
+    the file, so the snapshot itself is what records an edit made outside
+    the write tools (by hand, over SSH, ...) as a diff. A file with a
+    literal credential anywhere in it (mirror_secrets.find_file_credentials)
+    is skipped. Never raises - failures are reported per file.
+    """
+    committed: list[str] = []
+    unchanged: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    try:
+        branch = await _get_default_branch(hass)
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        _LOGGER.warning("Config snapshot failed: %s", exc)
+        return SnapshotResult(
+            skipped=tuple((path, f"mirror push failed: {exc}") for path, _ in files)
+        )
+    for path, content in files:
+        findings = mirror_secrets.find_file_credentials(path, content)
+        if findings:
+            skipped.append((path, _snapshot_skip_reason(findings)))
+            continue
+        try:
+            current = await _get_current(hass, path, branch=branch)
+            if current is not None and current[0] == content:
+                unchanged.append(path)
+                continue
+            await _put(
+                hass,
+                path,
+                content,
+                message=f"Mirror: {path} snapshot",
+                sha=current[1] if current is not None else None,
+                branch=branch,
+            )
+            committed.append(path)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            _LOGGER.warning("Config snapshot of %s failed: %s", path, exc)
+            skipped.append((path, f"mirror push failed: {exc}"))
+    return SnapshotResult(tuple(committed), tuple(unchanged), tuple(skipped))
+
+
+def _snapshot_skip_reason(findings: list[str]) -> str:
+    return (
+        f"looks like it holds a literal credential ({', '.join(findings)}) - "
+        "move it to secrets.yaml (`!secret`) to include this file."
+    )
+
+
+async def read_mirrored(hass: HomeAssistant, path: str) -> str | None:
+    """The mirror repo's current copy of `path` on its default branch, or
+    None if it has none. Raises on a failed request."""
+    branch = await _get_default_branch(hass)
+    current = await _get_current(hass, path, branch=branch)
+    return current[0] if current is not None else None
