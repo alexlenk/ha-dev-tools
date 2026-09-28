@@ -338,3 +338,97 @@ async def test_async_snapshot_if_valid_uses_ha_real_config_check(
         result = await config_snapshot.async_snapshot_if_valid(hass)
     assert "configuration check failed" in result["skipped_all"]
     snapshot.assert_called_once()
+
+
+# --- get_config_file with key (issue #15) ------------------------------------
+
+_IRRIGATION = (
+    "# Garden\n"
+    "irrigation_unlimited:\n"
+    "  controllers:\n"
+    "    - name: Garden\n"
+    "      zones:\n"
+    "        - name: Lawn\n"
+    "\n"
+    "          # a comment inside the block\n"
+    "          switch_entity_id: valve.gardena_water_computer\n"
+    "\n"
+    "# trailing comment, not part of it\n"
+    "rest_command:\n"
+    "  gardena:\n"
+    "    password: hunter2\n"
+    "sensor:\n"
+    "- platform: time_date\n"
+    "irrigation_unlimited_extra: 1\n"
+)
+
+
+def test_top_level_blocks_by_text():
+    assert config_snapshot.top_level_blocks(_IRRIGATION, "irrigation_unlimited") == [
+        (2, 9, "".join(_IRRIGATION.splitlines(keepends=True)[1:9]))
+    ]
+    # `key:` / `- item` at column 0 stays in the block; a prefix doesn't match.
+    assert config_snapshot.top_level_blocks(_IRRIGATION, "sensor") == [
+        (15, 16, "sensor:\n- platform: time_date\n")
+    ]
+    assert config_snapshot.top_level_blocks("a: 1\nb:\n", "b") == [(2, 2, "b:\n")]
+    assert config_snapshot.top_level_blocks("  irrigation: 1\n", "irrigation") == []
+
+
+@pytest.mark.asyncio
+async def test_get_config_file_key_finds_the_block_wherever_it_lives(
+    hass: HomeAssistant, config_dir
+):
+    """The block is returned even though its file also holds a literal
+    password elsewhere - which withholds the whole file."""
+    _write(config_dir, "packages/sub/heating.yaml", _IRRIGATION)
+    _write(config_dir, "sensors.yaml", "- platform: time_date\n")
+
+    result = await config_snapshot.get_config_file(hass, key="irrigation_unlimited")
+    assert result["key"] == "irrigation_unlimited"
+    assert [block["path"] for block in result["blocks"]] == [
+        "packages/sub/heating.yaml"
+    ]
+    block = result["blocks"][0]
+    assert block["lines"] == [2, 9]
+    assert "valve.gardena_water_computer" in block["content"]
+    assert "hunter2" not in block["content"]
+
+    with pytest.raises(ConfigFileError, match="withheld"):
+        await config_snapshot.get_config_file(hass, "packages/sub/heating.yaml")
+
+    withheld = await config_snapshot.get_config_file(
+        hass, "packages/sub/heating.yaml", key="rest_command"
+    )
+    assert "content" not in withheld["blocks"][0]
+    assert "line 3: password" in withheld["blocks"][0]["withheld"]
+    assert "hunter2" not in withheld["blocks"][0]["withheld"]
+
+
+@pytest.mark.asyncio
+async def test_get_config_file_key_errors(hass: HomeAssistant, config_dir):
+    with pytest.raises(ConfigFileError, match="No top-level 'nope:' in any"):
+        await config_snapshot.get_config_file(hass, key="nope")
+    with pytest.raises(ConfigFileError, match="No top-level 'nope:' in 'sensors.yaml'"):
+        await config_snapshot.get_config_file(hass, "sensors.yaml", key="nope")
+    with pytest.raises(ConfigFileError, match="needs a path"):
+        await config_snapshot.get_config_file(hass, key="sensor", source="mirror")
+    # An unreadable file is skipped in a search, but not when it's the target.
+    (config_dir / "extra.yaml").write_bytes(b"a: \xff\n")
+    result = await config_snapshot.get_config_file(hass, key="sensor")
+    assert [block["path"] for block in result["blocks"]] == ["configuration.yaml"]
+    with pytest.raises(ConfigFileError, match="Reading 'extra.yaml' failed"):
+        await config_snapshot.get_config_file(hass, "extra.yaml", key="a")
+
+
+@pytest.mark.asyncio
+async def test_get_config_file_key_from_the_mirror(hass: HomeAssistant, config_dir):
+    with (
+        patch.object(mirror, "is_mirror_enabled", return_value=True),
+        patch.object(mirror, "read_mirrored", AsyncMock(return_value=_IRRIGATION)),
+    ):
+        result = await config_snapshot.get_config_file(
+            hass, "sensors.yaml", "mirror", key="irrigation_unlimited"
+        )
+    assert result["source"] == "mirror"
+    assert result["blocks"][0]["lines"] == [2, 9]

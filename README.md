@@ -199,7 +199,7 @@ matters for setup, covered below.
 | `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
 | `list_rest_commands` / `get_rest_command` | Same layout-aware pattern, for `rest_command:` - resolves whether it lives in `configuration.yaml` or a `packages/*.yaml` file. Read-only - no write_rest_command yet |
 | `check_config` | Home Assistant's own full config validation. With git mirroring on, a passing check also snapshots your hand-edited config (below) |
-| `get_config_file` | Raw text of a hand-edited config file - `configuration.yaml`, anything it `!include`s, `packages/*.yaml`, `custom_templates/*.jinja` - with `!secret`/`!include` as written, live or (`source: mirror`) its last good snapshot. Reads a file that no longer parses, where the structured tools can't. Withholds any file with a literal credential in it; never returns `secrets.yaml` |
+| `get_config_file` | Raw text of a hand-edited config file - `configuration.yaml`, anything it `!include`s, `packages/*.yaml`, `custom_templates/*.jinja` - with `!secret`/`!include` as written, live or (`source: mirror`) its last good snapshot. Reads a file that no longer parses, where the structured tools can't. `key` (e.g. `irrigation_unlimited`) returns just that top-level block, wherever it lives - an integration's own YAML config. Withholds a file (or with `key`, a block) with a literal credential in it; never returns `secrets.yaml` |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
 
 **Configure**
