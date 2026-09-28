@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.10] - 2026-09-28
+
+### Added
+- `audit_automations` now lints templates and conditions (issue #36; built into the existing tool rather than a new `lint_automation` tool):
+  - `template_errors`: every template string in an automation is compiled with HA's own template engine, so a syntax error shows up with HA's error and its path (e.g. `actions[0].data.message`) instead of only when the automation fires.
+  - `constant_conditions`: conditions that always or never pass, i.e. `{{ true }}`/`{{ false }}` template conditions (including the shorthand and YAML booleans) and an empty `and`/`or`.
+
+  The design doc's more heuristic rules (`choose` without `default`, a condition on an entity no trigger supplies, possible feedback loops) are deliberately not implemented. They're routinely intentional, so they'd mostly be noise. HA-schema validation of each automation is already covered by `check_config`'s `setup_failures`.
+
 ## [2.20.9] - 2026-09-28
 
 ### Fixed

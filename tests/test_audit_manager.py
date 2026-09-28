@@ -308,3 +308,101 @@ async def test_audit_reports_values_home_assistant_misreads(
             "currently_enabled": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_audit_reports_template_syntax_errors(automation_manager, tmp_path):
+    """Issue #36: a template HA can't compile only fails when the automation
+    fires. The audit compiles every template string up front."""
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: broken\n"
+        "  triggers: []\n"
+        "  conditions:\n"
+        "  - condition: template\n"
+        "    value_template: \"{{ states('sensor.x') | float > 3 }}\"\n"
+        "  actions:\n"
+        "  - action: notify.x\n"
+        "    data:\n"
+        "      message: \"{{ states('sensor.x' }}\"\n"
+        "- id: fine\n"
+        "  actions:\n"
+        "  - action: notify.x\n"
+        "    data:\n"
+        "      message: \"{{ states('sensor.x') }} and plain text\"\n",
+    )
+
+    result = await audit_automations(automation_manager.hass, automation_manager)
+
+    (finding,) = result["template_errors"]
+    assert finding["automation_id"] == "broken"
+    (error,) = finding["findings"]
+    assert error["path"] == "actions[0].data.message"
+    assert error["template"] == "{{ states('sensor.x' }}"
+    assert "TemplateSyntaxError" in error["error"]
+
+
+@pytest.mark.asyncio
+async def test_audit_reports_constant_conditions(automation_manager, tmp_path):
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: constant\n"
+        "  triggers: []\n"
+        "  conditions:\n"
+        "  - condition: template\n"
+        "    value_template: '{{ false }}'\n"
+        "  - '{{TRUE}}'\n"
+        "  - condition: or\n"
+        "    conditions: []\n"
+        "  actions:\n"
+        "  - choose:\n"
+        "    - conditions:\n"
+        "      - condition: and\n"
+        "        conditions: []\n"
+        "      sequence: []\n"
+        "- id: real\n"
+        "  conditions:\n"
+        "  - condition: template\n"
+        "    value_template: \"{{ is_state('sun.sun', 'above_horizon') }}\"\n"
+        "  - condition: state\n"
+        "    entity_id: switch.x\n"
+        "    state: 'on'\n"
+        "  actions: []\n",
+    )
+
+    result = await audit_automations(automation_manager.hass, automation_manager)
+
+    (finding,) = result["constant_conditions"]
+    assert finding["automation_id"] == "constant"
+    assert finding["findings"] == [
+        {"path": "actions[0].choose[0].conditions[0]", "always": True},
+        {"path": "conditions[0]", "always": False},
+        {"path": "conditions[1]", "always": True},
+        {"path": "conditions[2]", "always": False},
+    ]
+    assert result["template_errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_audit_constant_conditions_include_yaml_booleans(
+    automation_manager, tmp_path
+):
+    _write(
+        tmp_path,
+        "automations.yaml",
+        "- id: bool\n"
+        "  conditions:\n"
+        "  - condition: template\n"
+        "    value_template: false\n"
+        "  - condition: template\n"
+        "    value_template: 42\n"
+        "  actions: []\n",
+    )
+
+    result = await audit_automations(automation_manager.hass, automation_manager)
+
+    assert result["constant_conditions"][0]["findings"] == [
+        {"path": "conditions[0]", "always": False}
+    ]

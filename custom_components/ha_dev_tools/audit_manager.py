@@ -13,8 +13,21 @@ than they look (`before: 17:00:00` -> 61200, `state: off` -> False) -
 these silently disable the automation, while every read through this
 integration shows the intended string (issue #96).
 
-Scope: duplicate ids, unavailable-entity references and misread values
-are the checks that are cheap and reliable to detect statically.
+It also statically lints (issue #36, folded in here rather than a
+separate lint_automation tool): every template string is compiled with
+HA's own template engine, so a syntax error shows up before the
+automation runs rather than when it fires; and conditions that are
+constant (`{{ true }}`/`{{ false }}` templates, an empty and/or) are
+flagged, since they silently always or never pass. The design doc's
+more heuristic rules (a `choose` without `default`, a condition on an
+entity no trigger supplies, possible feedback loops) are deliberately
+not implemented - each is routinely intentional, so they'd mostly be
+noise. HA-schema validation of each automation is check_config's
+`setup_failures` (issue #89), from what HA actually loaded.
+
+Scope: duplicate ids, unavailable-entity references, misread values,
+template syntax and constant conditions are the checks that are cheap
+and reliable to detect statically.
 Overlapping-trigger race detection and unhandled rest_command/
 shell_command failures (also called out in docs/ARCHITECTURE.md) are
 real but need more careful semantic analysis to avoid false
@@ -27,6 +40,8 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.core import HomeAssistant, State
+from homeassistant.exceptions import TemplateError
+from homeassistant.helpers.template import Template, is_template_string
 
 from .automation_manager import AutomationManager
 from .yaml_style import find_misread_scalars
@@ -50,6 +65,70 @@ def _iter_entity_ids(node: Any) -> list[str]:
         for item in node:
             found.extend(_iter_entity_ids(item))
     return found
+
+
+_CONSTANT_TEMPLATES = {"{{true}}": True, "{{false}}": False}
+
+
+def _walk(node: Any, path: str = "") -> list[tuple[str, Any]]:
+    """Every (path, value) in a config tree, paths like `actions[0].data`."""
+    found: list[tuple[str, Any]] = [(path, node)]
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.extend(_walk(value, f"{path}.{key}" if path else str(key)))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found.extend(_walk(value, f"{path}[{index}]"))
+    return found
+
+
+def _template_errors(hass: HomeAssistant, entry: Any) -> list[dict[str, Any]]:
+    """Template strings HA's own engine can't compile, with its error."""
+    errors = []
+    for path, value in _walk(entry):
+        if isinstance(value, str) and is_template_string(value):
+            try:
+                Template(value, hass).ensure_valid()
+            except TemplateError as err:
+                errors.append({"path": path, "template": value, "error": str(err)})
+    return errors
+
+
+def _constant(value: Any) -> bool | None:
+    """True/False if a template condition's value is a literal constant."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _CONSTANT_TEMPLATES.get("".join(value.split()).lower())
+    return None
+
+
+def _constant_conditions(entry: Any) -> list[dict[str, Any]]:
+    """Conditions that always or never pass, whatever the state."""
+    found = []
+    for path, value in _walk(entry):
+        if not isinstance(value, dict):
+            continue
+        kind = value.get("condition")
+        always: bool | None = None
+        if kind == "template":
+            always = _constant(value.get("value_template"))
+        elif kind in ("and", "or") and value.get("conditions") == []:
+            always = kind == "and"  # empty and: vacuously true; empty or: false
+        if always is not None:
+            found.append({"path": path, "always": always})
+        # Shorthand template conditions: a bare "{{ false }}" list item.
+        for key in ("condition", "conditions"):
+            items = value.get(key)
+            if not isinstance(items, list):
+                continue
+            for index, item in enumerate(items):
+                if (always := _constant(item)) is not None and not isinstance(
+                    item, bool
+                ):
+                    child = f"{path}.{key}" if path else key
+                    found.append({"path": f"{child}[{index}]", "always": always})
+    return sorted(found, key=lambda finding: finding["path"])
 
 
 def find_automation_state(hass: HomeAssistant, automation_id: str) -> State | None:
@@ -85,6 +164,8 @@ async def audit_automations(
     id_locations: dict[str, list[str]] = {}
     unavailable_findings: list[dict[str, Any]] = []
     misread_findings: list[dict[str, Any]] = []
+    template_findings: list[dict[str, Any]] = []
+    constant_findings: list[dict[str, Any]] = []
     currently_disabled: list[str] = []
 
     for location, entry in all_automations:
@@ -135,6 +216,20 @@ async def audit_automations(
                 }
             )
 
+        for findings, found in (
+            (template_findings, _template_errors(hass, entry)),
+            (constant_findings, _constant_conditions(entry)),
+        ):
+            if found:
+                findings.append(
+                    {
+                        "automation_id": automation_id,
+                        "file_path": location.file_path,
+                        "findings": found,
+                        "currently_enabled": currently_enabled,
+                    }
+                )
+
     duplicate_findings = [
         {"automation_id": automation_id, "files": files}
         for automation_id, files in id_locations.items()
@@ -146,6 +241,8 @@ async def audit_automations(
         "duplicate_ids": duplicate_findings,
         "references_unavailable_entities": unavailable_findings,
         "misread_values": misread_findings,
+        "template_errors": template_findings,
+        "constant_conditions": constant_findings,
         "currently_disabled": sorted(currently_disabled),
         "note": (
             "Overlapping-trigger race detection and unhandled "
