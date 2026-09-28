@@ -949,3 +949,101 @@ async def test_delete_automations_batch_is_all_or_nothing(
     # Nothing was written or reloaded by any refused batch.
     assert (tmp_path / "automations.yaml").read_text() == _HAND_FORMATTED
     mock_reload_service.assert_not_called()
+
+
+async def test_write_automation_in_package_with_ha_tags(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Issue #115: a package that also holds `!secret` credentials (or any
+    other HA-only tag) must still be writable, and every tag must survive
+    the write verbatim."""
+    original = (
+        "automation:\n"
+        "  - id: doorbird_nightly_restart\n"
+        "    alias: Nightly restart\n"
+        "    triggers:\n"
+        "      - trigger: time\n"
+        '        at: "04:00:00"\n'
+        "    actions:\n"
+        "      - action: notify.mobile_app\n"
+        "        data:\n"
+        "          message: Restarted\n"
+        "          data:\n"
+        "            push:\n"
+        "              critical: true\n"
+        "rest_command:\n"
+        "  doorbird_restart:\n"
+        "    url: http://doorbird/bha-api/restart.cgi\n"
+        "    username: !secret doorbird_hoftor_username\n"
+        "    password: !secret doorbird_hoftor_password\n"
+        "sensor: !include sensors.yaml\n"
+        "template: !include_dir_merge_list templates/\n"
+        "homeassistant:\n"
+        "  customize: !include_dir_named customize/\n"
+        "  allowlist_external_dirs: !env_var EXTERNAL_DIRS\n"
+    )
+    _write(tmp_path, "packages/doorbird.yaml", original)
+
+    await automation_manager.write_automation(
+        "doorbird_nightly_restart",
+        {
+            "alias": "Nightly restart",
+            "triggers": [{"trigger": "time", "at": "04:00:00"}],
+            "actions": [
+                {
+                    "action": "notify.mobile_app",
+                    "data": {
+                        "message": "Restarted",
+                        "data": {"push": {"critical": False}},
+                    },
+                }
+            ],
+        },
+        package="doorbird.yaml",
+    )
+
+    raw = (tmp_path / "packages/doorbird.yaml").read_text()
+    assert raw == original.replace("critical: true", "critical: false")
+    mock_reload_service.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_write_automation_keeps_indented_nested_lists_in_automations_yaml(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Issue #115: a root-level automations.yaml whose nested lists are
+    written `key:` / `  - item` keeps that style in the edited automation."""
+    original = (
+        "- id: a\n"
+        "  alias: A\n"
+        "  triggers:\n"
+        "    - trigger: state\n"
+        "      entity_id: binary_sensor.door\n"
+        "  actions:\n"
+        "    - action: light.turn_on\n"
+        "      target:\n"
+        "        entity_id:\n"
+        "          - light.hall\n"
+        "- id: b\n"
+        "  alias: B\n"
+        "  actions: []\n"
+    )
+    _write(tmp_path, "automations.yaml", original)
+
+    await automation_manager.write_automation(
+        "a",
+        {
+            "alias": "A",
+            "triggers": [{"trigger": "state", "entity_id": "binary_sensor.door"}],
+            "actions": [
+                {
+                    "action": "light.turn_on",
+                    "target": {"entity_id": ["light.hall", "light.porch"]},
+                }
+            ],
+        },
+    )
+
+    assert (tmp_path / "automations.yaml").read_text() == original.replace(
+        "          - light.hall\n", "          - light.hall\n          - light.porch\n"
+    )

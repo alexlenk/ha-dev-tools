@@ -468,3 +468,39 @@ async def test_write_script_rewrites_only_the_edited_script(
 
     added = await script_manager.write_script("added", {"sequence": []})
     assert added.content_after == edited.content_after + "added:\n  sequence: []\n"
+
+
+@pytest.mark.asyncio
+async def test_write_script_in_package_with_ha_tags_keeps_indented_lists(
+    script_manager, tmp_path, mock_reload_service
+):
+    """Issue #115: `!secret` elsewhere in the package no longer blocks the
+    write, and the script's `key:` / `  - item` lists keep that style."""
+    original = (
+        "script:\n"
+        "  restart_doorbird:\n"
+        "    alias: Restart DoorBird\n"
+        "    sequence:\n"
+        "      - action: rest_command.doorbird_restart\n"
+        "      - delay: 5\n"
+        "rest_command:\n"
+        "  doorbird_restart:\n"
+        "    url: http://doorbird/bha-api/restart.cgi\n"
+        "    password: !secret doorbird_password\n"
+    )
+    _write(tmp_path, "packages/doorbird.yaml", original)
+
+    await script_manager.write_script(
+        "restart_doorbird",
+        {
+            "alias": "Restart DoorBird",
+            "sequence": [
+                {"action": "rest_command.doorbird_restart"},
+                {"delay": 10},
+            ],
+        },
+    )
+
+    assert (tmp_path / "packages/doorbird.yaml").read_text() == original.replace(
+        "delay: 5", "delay: 10"
+    )

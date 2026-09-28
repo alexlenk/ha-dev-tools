@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.14] - 2026-09-28
+
+### Fixed
+- `write_automation`, `write_script` and the template-entity writers no longer refuse to write a file that uses Home Assistant's own YAML tags anywhere in it (issue #115). A package with `password: !secret ...` in a `rest_command` next to the automation being edited failed its confirmed write with "could not determine a constructor for the tag '!secret'", and the same happened for `!include`, `!include_dir_*`, `!env_var` and `!input`. Validation now accepts exactly the tags HA's own loader knows, without resolving them (no secrets or included files are read), so a typo like `!secrets` is still rejected. The tags are kept verbatim in the written file.
+- Editing an automation, script or template entity keeps its nested lists in the file's own style (issue #115). In a file written `triggers:` / `  - trigger: ...` (dashes indented under their key, common in hand-written YAML), the edited item's nested lists came back unindented, so a one-word change still showed up as a reflow of the whole item. The re-rendered item now uses the same dash indentation as the original, and a newly added item follows the file's style.
+
 ## [2.20.13] - 2026-09-28
 
 ### Added

@@ -6,11 +6,43 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import yaml
+from annotatedyaml.loader import PythonSafeLoader as _HomeAssistantLoader
 
 _LOGGER = logging.getLogger(__name__)
+
+# The tags Home Assistant's own loader understands (`!secret`, `!include`,
+# `!include_dir_*`, `!env_var`, `!input`), read from that loader so a tag
+# HA adds later is accepted too. Validation checks they're well-formed but
+# never resolves them - no secrets.yaml or included file is read here.
+HA_YAML_TAGS = frozenset(
+    tag
+    for tag in _HomeAssistantLoader.yaml_constructors
+    if isinstance(tag, str) and tag.startswith("!")
+)
+
+
+class _HomeAssistantTagLoader(yaml.SafeLoader):
+    """SafeLoader that also accepts Home Assistant's tags (issue #115).
+
+    A plain SafeLoader rejects any file using them - e.g. a package with
+    `password: !secret ...` next to the automation being written - while an
+    unknown tag (a typo like `!secrets`) still fails, as it would in HA.
+    """
+
+
+def _construct_tagged(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_mapping(node)  # type: ignore[arg-type]
+
+
+for _tag in HA_YAML_TAGS:
+    _HomeAssistantTagLoader.add_constructor(_tag, _construct_tagged)
 
 
 @dataclass
@@ -28,7 +60,7 @@ class ValidationManager:
 
     def __init__(self) -> None:
         """Initialize the validation manager."""
-        self.yaml_loader = yaml.SafeLoader
+        self.yaml_loader = _HomeAssistantTagLoader
         _LOGGER.info("ValidationManager initialized")
 
     def validate_content(self, content: str, file_path: str) -> ValidationResult:
@@ -71,7 +103,7 @@ class ValidationManager:
 
         try:
             # Parse YAML content
-            parsed_data = yaml.safe_load(content)
+            parsed_data = yaml.load(content, Loader=self.yaml_loader)  # nosec B506
 
             # Basic validation for configuration.yaml
             if file_path == "configuration.yaml":

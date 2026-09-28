@@ -12,6 +12,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from custom_components.ha_dev_tools.yaml_style import (
     append_point,
+    dash_offset,
     find_misread_scalars,
     item_span,
     merge_preserving_style,
@@ -180,3 +181,64 @@ def test_render_item_drops_trailing_blank_lines_ruamel_attaches():
     re-rendering it would duplicate the blank line the splice keeps."""
     seq = _load("- a: 1\n\n- b: 2\n")
     assert render_item(_yaml(), seq, 0, seq[0], 0) == "- a: 1\n"
+
+
+def test_dash_offset_reads_the_nested_list_style():
+    assert dash_offset(["a:\n", "- 1\n"]) == 0
+    assert dash_offset(["a:\n", "  - 1\n"]) == 2
+    assert dash_offset(["a:  # note\n", "\n", "# c\n", "    - 1\n"]) == 4
+    # The key after an item's own dash is what owns the nested list.
+    assert dash_offset(["- id: x\n", "  actions:\n", "    - a: 1\n"]) == 2
+    assert dash_offset(["  - actions:\n", "      - a: 1\n"]) == 2
+    assert dash_offset(["a:\n", "   - 1\n"]) == 0  # odd: not reproducible
+    assert dash_offset(["a:\n", "  b: 1\n"]) == 0  # no nested list
+    assert dash_offset(["a: 1\n", "b:\n"]) == 0  # key with nothing after it
+
+
+def test_render_item_keeps_the_files_list_offset():
+    """Issue #115: nested lists keep `key:` / `  - a`, at every placement."""
+    seq = _load("- id: a   # keep\n  actions:\n    - x: 1   # inner\n")
+    root = render_item(_yaml(), seq, 0, seq[0], 0, 2)
+    assert root == "- id: a   # keep\n  actions:\n    - x: 1   # inner\n"
+    nested_seq = _load("k:\n  - id: a   # keep\n    actions:\n      - x: 1\n")["k"]
+    nested = render_item(_yaml(), nested_seq, 0, nested_seq[0], 2, 2)
+    assert nested == "  - id: a   # keep\n    actions:\n      - x: 1\n"
+    seq = _load("- id: a\n  actions:\n    - x: 1\n")
+    odd = render_item(_yaml(), seq, 0, seq[0], 3, 2)
+    assert odd == "   - id: a\n     actions:\n       - x: 1\n"
+    mapping = _load("s:\n  sequence:\n    - x: 1\n")
+    assert render_item(_yaml(), mapping, "s", mapping["s"], 2, 2) == (
+        "  s:\n    sequence:\n      - x: 1\n"
+    )
+    assert render_item(_yaml(), mapping, "s", mapping["s"], 3, 2) == (
+        "   s:\n     sequence:\n       - x: 1\n"
+    )
+    # The caller's YAML instance is left exactly as it was.
+    yaml = _yaml()
+    render_item(yaml, seq, 0, seq[0], 2, 2)
+    assert (yaml.map_indent, yaml.sequence_indent, yaml.sequence_dash_offset) == (
+        None,
+        None,
+        0,
+    )
+
+
+def test_render_item_offset_for_a_list_item_that_is_not_a_mapping():
+    """A list of lists has no keys to anchor on - placed by shifting, and
+    still the same data at the right column (spliced_or_full checks it)."""
+    root = _load("- - a\n  - - b\n")
+    rendered = render_item(_yaml(), root, 0, root[0], 0, 2)
+    assert rendered.startswith("- ") and _load(rendered) == [["a", ["b"]]]
+    nested = _load("k:\n  - - a\n    - - b\n")["k"]
+    for indent, offset in ((2, 2), (1, 4)):
+        rendered = render_item(_yaml(), nested, 0, nested[0], indent, offset)
+        assert rendered.startswith(" " * indent + "- ")
+        assert _load("k:\n" + rendered)["k"] == [["a", ["b"]]]
+
+
+def test_render_item_ignores_the_offset_without_a_nested_block_list():
+    """Nothing to place, so ruamel's own layout (and comment columns) stay."""
+    seq = _load("- id: a   # keep\n  flow: [1, 2]\n  empty: []\n")
+    assert render_item(_yaml(), seq, 0, seq[0], 0, 2) == (
+        "- id: a   # keep\n  flow: [1, 2]\n  empty: []\n"
+    )

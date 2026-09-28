@@ -813,11 +813,13 @@ async def test_template_update_and_create_touch_only_their_own_lines(
         package="emhas.yaml",
     )
     assert created.content_after.startswith(updated.content_after)
+    # The appended block follows the file's own `key:` / `  - item` list
+    # style too, rather than ruamel's `key:` / `- item` (issue #115).
     assert created.content_after[len(updated.content_after) :] == (
         "  - sensor:\n"
-        "    - name: Added\n"
-        "      unique_id: added\n"
-        "      state: '{{ 3 }}'\n"
+        "      - name: Added\n"
+        "        unique_id: added\n"
+        "        state: '{{ 3 }}'\n"
     )
 
 
