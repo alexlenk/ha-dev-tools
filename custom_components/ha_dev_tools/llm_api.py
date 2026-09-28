@@ -2353,7 +2353,10 @@ class AuditAutomationsTool(GatedTool):
         "again with write_automation, which quotes such values. "
         "Does not yet detect overlapping-trigger race conditions or "
         "unhandled rest_command/shell_command failures (see the result's "
-        "'note' field)."
+        "'note' field). 'template_errors' lists templates HA's own "
+        "engine can't compile (they'd only fail when the automation "
+        "fires), and 'constant_conditions' conditions that always/never "
+        "pass ({{ true }}/{{ false }} templates, an empty and/or)."
     )
     parameters = vol.Schema({})
 
