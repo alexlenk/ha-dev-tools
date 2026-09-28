@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.13] - 2026-09-28
+
+### Added
+- `delete_helper`, `delete_derived_sensor` and `delete_template_entity` can delete several items in one call, like `delete_automation` in 2.20.12 (issue #66). Pass `item_ids`, `entry_ids` or `unique_ids` instead of the single id. One confirmation covers the batch, and every id is checked before any item is deleted: helper ids against HA's current list, derived-sensor entries by lookup, template unique_ids by resolving their location. An unknown or repeated id refuses the whole batch. Mirroring pushes one commit per storage file or per template file for the batch (one per entry for derived sensors). No new tools.
+
 ## [2.20.12] - 2026-09-28
 
 ### Added
