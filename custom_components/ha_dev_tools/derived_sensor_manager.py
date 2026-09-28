@@ -232,6 +232,48 @@ def _merge_step_input(
     return merged
 
 
+def _changes(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
+    """Every leaf that differs between two option dicts, as dotted paths
+    (sections are nested dicts - e.g. `advanced_options.unit_of_measurement`)."""
+    if isinstance(before, Mapping) and isinstance(after, Mapping):
+        changes: list[dict[str, Any]] = []
+        for key in [*before, *(k for k in after if k not in before)]:
+            child = f"{path}.{key}" if path else str(key)
+            changes.extend(_changes(before.get(key), after.get(key), child))
+        return changes
+    if before == after:
+        return []
+    return [{"field": path, "from": before, "to": after}]
+
+
+def preview_update(
+    hass: HomeAssistant,
+    entry_id: str,
+    steps: dict[str, dict[str, Any]] | None = None,
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """What update_derived_sensor would change, without starting a flow (issue #86).
+
+    Lays the caller's input over the entry's stored options the same way
+    _step_flow lays it over each step's current values (_merge_step_input:
+    nested sections merge, None clears a field), then diffs. It's the
+    requested change: HA's own validation still runs on the real write and
+    may reject or normalize it, and a field that isn't editable after
+    creation only shows up as an error then.
+    """
+    current = dict(_get_entry(hass, entry_id).options)
+    proposed = current
+    if options is not None:
+        proposed = _merge_step_input(proposed, options)
+    for step_input in (steps or {}).values():
+        if isinstance(step_input, Mapping):
+            proposed = _merge_step_input(
+                proposed,
+                {k: v for k, v in step_input.items() if k != "next_step_id"},
+            )
+    return {"current_options": current, "would_change": _changes(current, proposed)}
+
+
 def _entry_to_dict(entry: ConfigEntry) -> dict[str, Any]:
     return {
         "entry_id": entry.entry_id,

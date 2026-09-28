@@ -375,11 +375,13 @@ class WriteGatedTool(GatedTool):
                 "confirmation_required": True,
                 "action": self.name,
                 "would_apply": preview,
+                **await self._preview_context(hass, tool_input),
                 "confirm_token": new_token,
                 "note": (
                     "Show the user the full would_apply content above - the "
                     "complete config/definition, not just its id or a "
-                    "summary of it - and ask them to confirm before calling "
+                    "summary of it (and would_change, where present) - and ask "
+                    "them to confirm before calling "
                     "again with the identical arguments plus "
                     f"confirm_token={new_token!r}. Expires in {minutes} "
                     "minutes."
@@ -391,6 +393,7 @@ class WriteGatedTool(GatedTool):
                 "dry_run": True,
                 "action": self.name,
                 "would_apply": preview,
+                **await self._preview_context(hass, tool_input),
                 "note": (
                     "Dry-run mode is enabled for this integration - no "
                     "changes were made. Show the user the full would_apply "
@@ -416,6 +419,18 @@ class WriteGatedTool(GatedTool):
     ) -> JsonObjectType:
         """Subclasses implement their actual write logic here, not _run."""
         raise NotImplementedError
+
+    async def _preview_context(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput
+    ) -> JsonObjectType:
+        """Override to add read-only context to the propose and dry-run
+        responses, next to would_apply - e.g. what the target currently
+        holds and what would change (issue #86). would_apply alone only
+        echoes the caller's own arguments, so for a partial update the user
+        confirming it never sees what it actually changes. Must not write
+        anything; a failure here should return {} rather than raise - the
+        real write reports its own errors."""
+        return {}
 
     async def _dry_run_mirror(
         self,
@@ -1639,6 +1654,20 @@ class UpdateDerivedSensorTool(WriteGatedTool):
             vol.Optional("options"): dict,
         }
     )
+
+    @override
+    async def _preview_context(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput
+    ) -> JsonObjectType:
+        """The entry's current options and the fields this call would change."""
+        args = tool_input.tool_args
+        try:
+            preview = derived_sensor_manager.preview_update(
+                hass, args["entry_id"], args.get("steps"), args.get("options")
+            )
+        except DerivedSensorNotFoundError:
+            return {}
+        return cast(JsonObjectType, preview)
 
     @override
     async def _write(

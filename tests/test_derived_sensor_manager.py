@@ -21,6 +21,7 @@ from custom_components.ha_dev_tools.derived_sensor_manager import (
     delete_derived_sensor,
     get_derived_sensor,
     list_derived_sensors,
+    preview_update,
     reload_derived_sensor,
     update_derived_sensor,
 )
@@ -693,3 +694,60 @@ async def test_flow_that_aborts_itself_still_reports_its_reason(
     with pytest.raises(FlowAbortedError, match="already_configured"):
         await create_derived_sensor(hass, "statistics", steps)
     assert hass.config_entries.flow.async_progress() == []
+
+
+# --- preview_update: what an update would change (issue #86) ------------------
+
+
+async def test_preview_update_options_patch_lists_only_changed_fields(
+    hass: HomeAssistant,
+):
+    created, device_id = await _template_sensor_with_device(hass)
+
+    preview = preview_update(
+        hass,
+        created["entry_id"],
+        options={
+            "state": "{{ 2 }}",
+            "unit_of_measurement": "W",  # unchanged - not listed
+            "device_id": None,  # cleared
+            "additional_options": {"availability": "{{ false }}"},  # in a section
+        },
+    )
+
+    assert preview["current_options"] == created["options"]
+    assert preview["would_change"] == [
+        {"field": "state", "from": "{{ 1 }}", "to": "{{ 2 }}"},
+        {"field": "device_id", "from": device_id, "to": None},
+        {
+            "field": "additional_options.availability",
+            "from": "{{ true }}",
+            "to": "{{ false }}",
+        },
+    ]
+    # Nothing was written or started.
+    assert (
+        get_derived_sensor(hass, created["entry_id"])["options"] == created["options"]
+    )
+    assert hass.config_entries.options.async_progress() == []
+
+
+async def test_preview_update_steps_mode_and_no_op(hass: HomeAssistant):
+    created, _ = await _template_sensor_with_device(hass)
+
+    changed = preview_update(
+        hass,
+        created["entry_id"],
+        steps={"init": {"next_step_id": "sensor"}, "sensor": {"state": "{{ 3 }}"}},
+    )
+    unchanged = preview_update(hass, created["entry_id"], options={"state": "{{ 1 }}"})
+
+    assert changed["would_change"] == [
+        {"field": "state", "from": "{{ 1 }}", "to": "{{ 3 }}"}
+    ]
+    assert unchanged["would_change"] == []
+
+
+async def test_preview_update_unknown_entry_raises(hass: HomeAssistant):
+    with pytest.raises(DerivedSensorNotFoundError):
+        preview_update(hass, "nonexistent", options={"state": "x"})

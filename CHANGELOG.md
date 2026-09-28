@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.6] - 2026-09-28
+
+### Added
+- `update_derived_sensor`'s confirmation step now shows the entry's `current_options` and `would_change`: each field the call would change, with `from` and `to` values (issue #86). Before, it only echoed the caller's own arguments, so whoever confirmed a partial update never saw what the entry held or what would actually change. Section fields are listed as dotted paths (e.g. `additional_options.availability`). A field set to `null` shows as cleared. It's computed without starting a flow. HA's own validation still runs on the real write. Any write tool can now add this kind of context to its confirmation step (`WriteGatedTool._preview_context`).
+
 ### Changed
 - CI now tests the current Home Assistant release (2026.9.4) as well as the minimum from `hacs.json` (2026.8.2). A nightly workflow also tests the newest HA release (issue #84). Until now only 2026.8.2 was tested, so HA 2026.9's probatio change reached users before CI noticed. The test requirements are split into `requirements-test.txt` (current HA, the default), `requirements-test-ha-min.txt` and a shared `requirements-test-common.txt`. On 2026.9 the test env also needs `voluptuous-serialize` and `gazetteer-matcher`, which HA itself no longer pulls in. No runtime changes.
 
