@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.11] - 2026-09-28
+
+### Added
+- `reload_domain` can now reload integrations set up through the UI (issue #14), e.g. a cloud or local-push integration whose connection is stuck, which previously needed a full HA restart. These have no `<domain>.reload` service, so their config entry is reloaded instead, the same as the UI's "Reload". A domain with several entries lists them with their state, and you pick one with the new `entry_id` parameter. `ha_dev_tools` and `mcp_server` are never reloaded, since that would drop the calling session. No new tool.
+- `check_config` returns `config_entry_problems`: UI-set-up integrations whose setup failed or is being retried, whose migration or unload failed, or that are waiting for the user to re-authenticate, each with HA's own reason. Re-authentication needs the user's credentials, so it's surfaced rather than started. HA's own Repairs entry for it also appears in `repairs`.
+
 ## [2.20.10] - 2026-09-28
 
 ### Added

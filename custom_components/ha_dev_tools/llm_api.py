@@ -1040,6 +1040,8 @@ class CheckConfigTool(GatedTool):
         "refused to set up (e.g. an invalid trigger value), with HA's own "
         "error - these make 'valid' false. 'repairs' lists every active "
         "Repairs issue with the title/description the Repairs page shows. "
+        "'config_entry_problems' lists UI-set-up integrations that failed, "
+        "are retrying, or need re-authentication, with HA's reason. "
         "Setup failures reflect the last reload: write_automation/"
         "write_script reload automatically and already return their own "
         "item's 'setup_error'."
@@ -1065,9 +1067,19 @@ class ReloadDomainTool(GatedTool):
         "Reload a domain's configuration without restarting Home Assistant "
         "- e.g. domain='automation' after editing automations. Most config "
         "domains (automation, script, scene, input_boolean, ...) support "
-        "this; call check_config first if you're not sure the edit is valid."
+        "this; call check_config first if you're not sure the edit is valid. "
+        "An integration set up through the UI (e.g. a cloud or local-push "
+        "integration with a wedged connection) has its config entry reloaded "
+        "instead, like the UI's Reload; if the domain has several entries, "
+        "pass entry_id (the entries are listed otherwise). check_config's "
+        "config_entry_problems lists entries that failed, are retrying, or "
+        "need re-authentication (re-auth needs the user's credentials: point "
+        "them to Settings > Devices & services). Never reloads ha_dev_tools "
+        "or mcp_server, which would drop this session."
     )
-    parameters = vol.Schema({vol.Required("domain"): str})
+    parameters = vol.Schema(
+        {vol.Required("domain"): str, vol.Optional("entry_id"): str}
+    )
 
     @override
     async def _run(
@@ -1077,7 +1089,9 @@ class ReloadDomainTool(GatedTool):
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """Reload the given domain."""
-        return await config_tools.reload_domain(hass, tool_input.tool_args["domain"])
+        return await config_tools.reload_domain(
+            hass, tool_input.tool_args["domain"], tool_input.tool_args.get("entry_id")
+        )
 
 
 class GetAutomationTool(GatedTool):
