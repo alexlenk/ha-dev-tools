@@ -1,7 +1,7 @@
 """Tests for config validation and reload (config_tools.py)."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -166,3 +166,107 @@ def test_render_keeps_unknown_placeholders_and_survives_bad_templates():
     assert config_tools._render("Hi {name} {other}", {"name": "A"}) == "Hi A {other}"
     assert config_tools._render("broken {", {}) == "broken {"
     assert config_tools._render(None, {}) is None
+
+
+# --- Config-entry reload and problems (issue #14) ----------------------------
+
+
+def _entry(
+    hass: HomeAssistant, domain: str, title: str, state=None, reason=None, **kwargs
+):
+    """A config entry for a made-up domain (a real integration's domain would
+    be imported and unloaded at teardown)."""
+    from homeassistant.config_entries import ConfigEntryState
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(domain=domain, title=title, **kwargs)
+    entry.add_to_hass(hass)
+    entry.mock_state(hass, state or ConfigEntryState.LOADED, reason)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_reload_domain_reloads_a_config_entry_integration(hass: HomeAssistant):
+    """A UI-set-up integration has no <domain>.reload service - its config
+    entry is reloaded instead, like the UI's Reload."""
+    entry = _entry(hass, "test_nuki", "Nuki Bridge")
+    with patch.object(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    ) as mock_reload:
+        result = await config_tools.reload_domain(hass, "test_nuki")
+
+    mock_reload.assert_awaited_once_with(entry.entry_id)
+    assert result["reloaded"] is True
+    assert result["entry"]["entry_id"] == entry.entry_id
+    assert result["entry"]["title"] == "Nuki Bridge"
+
+
+@pytest.mark.asyncio
+async def test_reload_domain_with_several_entries_asks_for_entry_id(
+    hass: HomeAssistant,
+):
+    first = _entry(hass, "test_ecowitt", "Garden")
+    second = _entry(hass, "test_ecowitt", "Roof")
+
+    ambiguous = await config_tools.reload_domain(hass, "test_ecowitt")
+    with patch.object(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    ) as mock_reload:
+        picked = await config_tools.reload_domain(hass, "test_ecowitt", second.entry_id)
+    missing = await config_tools.reload_domain(hass, "test_ecowitt", "nope")
+
+    assert ambiguous["reloaded"] is False
+    assert {e["entry_id"] for e in ambiguous["entries"]} == {
+        first.entry_id,
+        second.entry_id,
+    }
+    mock_reload.assert_awaited_once_with(second.entry_id)
+    assert picked["reloaded"] is True
+    assert missing["reloaded"] is False and "No config entry 'nope'" in missing["error"]
+
+
+@pytest.mark.asyncio
+async def test_reload_domain_refuses_to_drop_its_own_session(hass: HomeAssistant):
+    for domain in ("ha_dev_tools", "mcp_server"):
+        result = await config_tools.reload_domain(hass, domain)
+        assert result["reloaded"] is False
+        assert "Refusing to reload" in result["error"]
+
+
+def test_config_entry_problems_lists_failed_retrying_and_reauth(hass: HomeAssistant):
+    from homeassistant.config_entries import (
+        SOURCE_REAUTH,
+        ConfigEntryDisabler,
+        ConfigEntryState,
+    )
+
+    _entry(hass, "test_fine", "Fine")
+    failed = _entry(
+        hass, "test_ecowitt", "Garden", ConfigEntryState.SETUP_ERROR, "HTTP 500"
+    )
+    retrying = _entry(hass, "test_nuki", "Bridge", ConfigEntryState.SETUP_RETRY)
+    blink = _entry(hass, "test_blink", "Blink")
+    _entry(
+        hass,
+        "test_old",
+        "Old",
+        ConfigEntryState.SETUP_ERROR,
+        disabled_by=ConfigEntryDisabler.USER,
+    )
+
+    with patch.object(
+        hass.config_entries.flow,
+        "async_progress",
+        return_value=[
+            {"context": {"source": SOURCE_REAUTH, "entry_id": blink.entry_id}}
+        ],
+    ):
+        problems = config_tools.config_entry_problems(hass)
+
+    by_id = {p["entry_id"]: p for p in problems}
+    assert set(by_id) == {failed.entry_id, retrying.entry_id, blink.entry_id}
+    assert by_id[failed.entry_id]["state"] == "setup_error"
+    assert by_id[failed.entry_id]["reason"] == "HTTP 500"
+    assert by_id[retrying.entry_id]["state"] == "setup_retry"
+    assert by_id[blink.entry_id]["reauth_required"] is True
+    assert by_id[blink.entry_id]["state"] == "loaded"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import string
 from typing import Any
 
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.check_config import async_check_ha_config_file
@@ -30,6 +31,13 @@ from homeassistant.helpers.translation import async_get_translations
 # the item's id at the end of the `edit` placeholder (/config/<domain>/
 # edit/<id>) and HA's own error text in `error`.
 _SETUP_FAILURE_DOMAINS = ("automation", "script")
+
+_PROBLEM_STATES = (
+    ConfigEntryState.SETUP_ERROR,
+    ConfigEntryState.SETUP_RETRY,
+    ConfigEntryState.MIGRATION_ERROR,
+    ConfigEntryState.FAILED_UNLOAD,
+)
 
 
 class _KeepMissing(dict[str, Any]):
@@ -140,15 +148,91 @@ async def check_ha_config(hass: HomeAssistant) -> dict[str, Any]:
         ],
         "setup_failures": setup_failures,
         "repairs": repairs,
+        "config_entry_problems": config_entry_problems(hass),
     }
 
 
-async def reload_domain(hass: HomeAssistant, domain: str) -> dict[str, Any]:
-    """Call `<domain>.reload` (e.g. automation, script, scene) instead of restarting."""
-    if not hass.services.has_service(domain, "reload"):
+# Reloading these would tear down the MCP session making the call.
+_NEVER_RELOAD = ("ha_dev_tools", "mcp_server")
+
+
+def _entry_summary(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
+    reauth = any(
+        flow["context"].get("source") == SOURCE_REAUTH
+        and flow["context"].get("entry_id") == entry.entry_id
+        for flow in hass.config_entries.flow.async_progress()
+    )
+    return {
+        "entry_id": entry.entry_id,
+        "domain": entry.domain,
+        "title": entry.title,
+        "state": entry.state.value,
+        "reason": entry.reason,
+        "reauth_required": reauth,
+    }
+
+
+def config_entry_problems(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Config entries (UI-set-up integrations) that aren't working (issue #14):
+    failed or retrying setup, a failed migration/unload, or waiting for the
+    user to re-authenticate - with HA's own reason. Disabled entries are
+    skipped: that's deliberate, not a problem."""
+    problems = []
+    for entry in hass.config_entries.async_entries():
+        if entry.disabled_by is not None:
+            continue
+        summary = _entry_summary(hass, entry)
+        if entry.state in _PROBLEM_STATES or summary["reauth_required"]:
+            problems.append(summary)
+    return problems
+
+
+async def reload_domain(
+    hass: HomeAssistant, domain: str, entry_id: str | None = None
+) -> dict[str, Any]:
+    """Reload a domain without restarting Home Assistant.
+
+    YAML domains (automation, script, scene, ...) use `<domain>.reload`.
+    An integration set up through the UI has no such service - its config
+    entry is reloaded instead, the same as the UI's "Reload" (issue #14).
+    `entry_id` picks one entry explicitly; without it, a domain with
+    several entries returns them to choose from rather than reloading all.
+    """
+    if domain in _NEVER_RELOAD:
         return {
             "reloaded": False,
-            "error": f"Domain '{domain}' has no reload service",
+            "error": (
+                f"Refusing to reload '{domain}': it serves this MCP session, "
+                "so reloading it would drop the connection mid-call."
+            ),
         }
-    await hass.services.async_call(domain, "reload", blocking=True)
-    return {"reloaded": True, "domain": domain}
+    if entry_id is None and hass.services.has_service(domain, "reload"):
+        await hass.services.async_call(domain, "reload", blocking=True)
+        return {"reloaded": True, "domain": domain}
+
+    entries = hass.config_entries.async_entries(domain)
+    if entry_id is not None:
+        entries = [e for e in entries if e.entry_id == entry_id]
+    if not entries:
+        return {
+            "reloaded": False,
+            "error": (
+                f"No config entry '{entry_id}' for domain '{domain}'"
+                if entry_id is not None
+                else f"Domain '{domain}' has no reload service and no config entries"
+            ),
+        }
+    if len(entries) > 1:
+        return {
+            "reloaded": False,
+            "error": f"Domain '{domain}' has {len(entries)} config entries - "
+            "pass entry_id to pick one.",
+            "entries": [_entry_summary(hass, e) for e in entries],
+        }
+    entry = entries[0]
+    reloaded = await hass.config_entries.async_reload(entry.entry_id)
+    return {
+        "reloaded": reloaded,
+        "domain": domain,
+        "entry": _entry_summary(hass, entry),
+    }

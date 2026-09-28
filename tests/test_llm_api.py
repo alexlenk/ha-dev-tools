@@ -839,7 +839,7 @@ async def test_reload_domain_tool_calls_manager(hass: HomeAssistant):
         )
 
     assert result == {"reloaded": True}
-    mock_reload.assert_called_once_with(hass, "automation")
+    mock_reload.assert_called_once_with(hass, "automation", None)
 
 
 # --- GetAutomationTool / currently_enabled ----------------------------------
