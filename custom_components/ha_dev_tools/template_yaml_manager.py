@@ -54,7 +54,11 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from .file_manager import FileManager
-from .yaml_style import merge_preserving_style, quote_ambiguous_scalars
+from .yaml_style import (
+    merge_preserving_style,
+    quote_ambiguous_scalars,
+    to_json_safe,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,28 +113,6 @@ def _load_yaml(content: str) -> Any:
     callable only defers load() to the executor - `_new_yaml()` itself is
     evaluated eagerly on the event loop before being passed in."""
     return _new_yaml().load(content)
-
-
-def _to_plain(value: Any) -> Any:
-    """Recursively convert ruamel's round-trip types into plain JSON-safe values.
-
-    CommentedMap/CommentedSeq already subclass dict/list so most values pass
-    through fine, but a raw HA YAML tag this loader doesn't understand
-    (!secret, !include, ...) - which can legitimately appear inside a
-    template entity's own config, e.g. an availability template built from
-    a !secret value - loads as a TaggedScalar, which is not JSON-safe. Never
-    resolves what a !secret/!include actually points to (this only ever
-    reads the tag name and its literal argument) - appropriate given this
-    is a read path that shouldn't leak secrets.yaml contents.
-    """
-    if isinstance(value, dict):
-        return {k: _to_plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_to_plain(v) for v in value]
-    tag = getattr(value, "tag", None)
-    if tag is not None and hasattr(value, "value"):
-        return f"{tag.value} {value.value}"
-    return value
 
 
 @dataclass(frozen=True)
@@ -294,7 +276,7 @@ class TemplateYamlManager:
                                 "entity_index": entity_index,
                                 "unique_id": entity_conf.get("unique_id"),
                                 "name": entity_conf.get("name"),
-                                "config": _to_plain(dict(entity_conf)),
+                                "config": to_json_safe(dict(entity_conf)),
                             }
                         )
         return results
@@ -355,7 +337,7 @@ class TemplateYamlManager:
         entity_conf = blocks[location.block_index][location.platform][
             location.entity_index
         ]
-        return location, _to_plain(dict(entity_conf))
+        return location, to_json_safe(dict(entity_conf))
 
     async def create_entity(
         self,

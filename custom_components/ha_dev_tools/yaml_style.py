@@ -66,6 +66,28 @@ def quote_ambiguous_scalars(value: Any) -> Any:
     return value
 
 
+def to_json_safe(value: Any) -> Any:
+    """Recursively convert ruamel's round-trip types into plain JSON-safe values.
+
+    CommentedMap/CommentedSeq already subclass dict/list and ScalarStrings
+    subclass str, so most values pass through fine - but a raw HA YAML tag
+    this loader doesn't understand (!secret, !include, !env_var, ...) loads
+    as a TaggedScalar, which is not JSON serializable, and crashed every
+    read tool returning config that contained one (issue #90). A tag is
+    returned as its literal `!tag argument` text: never resolved, so a read
+    never leaks secrets.yaml contents. Scalars keep their own types, so
+    find_misread_scalars works on the result too (minus line numbers).
+    """
+    if isinstance(value, dict):
+        return {k: to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_json_safe(v) for v in value]
+    tag = getattr(value, "tag", None)
+    if tag is not None and hasattr(value, "value"):
+        return f"{tag.value} {value.value}"
+    return value
+
+
 def _pyyaml_reading(value: str) -> Any:
     """What PyYAML (so Home Assistant) actually reads this plain scalar as,
     in a JSON-safe form for tool responses."""

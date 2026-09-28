@@ -636,3 +636,60 @@ def test_step_schema_helpers_handle_no_schema_and_plain_keys():
 async def test_non_object_step_input_raises_flow_aborted(hass: HomeAssistant):
     with pytest.raises(FlowAbortedError, match="must be an object"):
         await create_derived_sensor(hass, "min_max", {"user": ["not", "a", "dict"]})
+
+
+# --- Flows stopped early are aborted, not left in progress (issue #85) --------
+
+
+async def test_stopped_config_flow_is_not_left_in_progress(
+    hass: HomeAssistant, _source_entities
+):
+    with pytest.raises(FlowStepRequiredError):
+        await create_derived_sensor(hass, "min_max", {})
+
+    assert hass.config_entries.flow.async_progress() == []
+
+
+async def test_stopped_options_flows_are_not_left_in_progress(
+    hass: HomeAssistant, _source_entities
+):
+    created = await create_derived_sensor(
+        hass,
+        "min_max",
+        {
+            "user": {
+                "entity_ids": ["sensor.a", "sensor.b"],
+                "type": "max",
+                "round_digits": 2,
+                "name": "Test MinMax",
+            }
+        },
+    )
+
+    # Discovery (needs_input) and a rejected patch key both stop partway.
+    with pytest.raises(FlowStepRequiredError):
+        await update_derived_sensor(hass, created["entry_id"], {})
+    with pytest.raises(FlowAbortedError, match="Not editable"):
+        await update_derived_sensor(
+            hass, created["entry_id"], options={"not_a_field": 1}
+        )
+
+    assert hass.config_entries.options.async_progress() == []
+
+
+async def test_flow_that_aborts_itself_still_reports_its_reason(
+    hass: HomeAssistant, _source_entities
+):
+    """A flow ending in an ABORT result is already gone from HA's flow
+    manager, so the cleanup's own abort raises UnknownFlow - which must not
+    replace the real FlowAbortedError the caller gets."""
+    steps = {
+        "user": {"entity_id": "sensor.a", "name": "Test Statistics"},
+        "state_characteristic": {"state_characteristic": "mean"},
+        "options": {"sampling_size": 20, "precision": 2},
+    }
+    await create_derived_sensor(hass, "statistics", steps)
+
+    with pytest.raises(FlowAbortedError, match="already_configured"):
+        await create_derived_sensor(hass, "statistics", steps)
+    assert hass.config_entries.flow.async_progress() == []

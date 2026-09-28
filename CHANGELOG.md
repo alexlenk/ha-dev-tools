@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.4] - 2026-09-28
+
+### Fixed
+- `get_rest_command` and `list_rest_commands` crashed with `Object of type TaggedScalar is not JSON serializable` when a rest_command used `!secret` (or another HA YAML tag), and one such command broke the whole listing (issue #90). `get_automation`, `get_script` and `list_scripts` crashed the same way on a `!secret` in an automation or script. Tags are now returned as their literal text (e.g. `"!secret doorbird_auth"`) and never resolved, so reads don't leak `secrets.yaml`. `get_template_entity` already did this. The conversion now lives in `yaml_style.to_json_safe`, shared by every read tool.
+- `create_derived_sensor` and `update_derived_sensor` left Home Assistant config/options flows in progress whenever they stopped early: schema discovery (`needs_input`), rejected input, or a field that can't be edited (issue #85). Each call left an orphaned flow until HA restarted. The flow is now aborted whenever the tool stops before finishing.
+
 ## [2.20.3] - 2026-09-24
 
 ### Added
