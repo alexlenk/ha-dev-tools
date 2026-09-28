@@ -41,6 +41,9 @@ DEFAULT_READ_ONLY_PATHS = [
     "/config/scripts.yaml",
     "/config/scenes.yaml",
     "/config/packages/**/*.yaml",
+    # Jinja macros HA loads for templates - read-only, for get_config_file
+    # and config snapshots (issue #105).
+    "/config/custom_templates/**/*.jinja",
 ]
 
 # Default write paths - exactly what write_automation/write_script can
@@ -58,6 +61,10 @@ DEFAULT_WRITE_PATHS = [
 # Default denylist (always enforced) - includes sensitive storage files with patterns
 DEFAULT_DENYLIST = [
     "secrets.yaml",
+    # HA looks a `!secret` up in the secrets.yaml of every folder from the
+    # including file up to /config, so one in packages/ (say) holds real
+    # secrets too - denied at any depth (fnmatch's * spans folders; #105).
+    "*/secrets.yaml",
     ".HA_VERSION",
     "home-assistant.log",
     ".storage/auth*",
@@ -91,6 +98,7 @@ ALLOWED_EXTENSIONS = {
     ".json",
     ".txt",
     ".py",
+    ".jinja",  # custom_templates/**/*.jinja, the extension HA loads
     ".jinja2",
 }
 

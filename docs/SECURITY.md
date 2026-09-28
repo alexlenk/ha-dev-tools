@@ -122,13 +122,26 @@ There's currently no way to customize this - it's defaults-only (no
 (`custom_components/ha_dev_tools/const.py`):
 
 - **Readable**: main config files (`configuration.yaml`, `automations.yaml`,
-  `scripts.yaml`, `scenes.yaml`), `packages/**/*.yaml`, and the storage files
-  behind dashboards/helpers/scenes/scripts.
+  `scripts.yaml`, `scenes.yaml`), `packages/**/*.yaml`,
+  `custom_templates/**/*.jinja`, and the storage files behind
+  dashboards/helpers/scenes/scripts. `get_config_file` and config snapshots
+  also cover every file a readable config file `!include`s: Home Assistant
+  reads an included file as part of the file that includes it, so it's
+  covered by that file's read permission (the denylist still applies).
 - **Writable**: exactly what `write_automation` needs and nothing more -
   `automations.yaml` and `packages/**/*.yaml`.
-- **Always denied**: `secrets.yaml`, all auth/credential storage, the arm
-  file itself, and a handful of other sensitive system files - regardless of
-  what read/write defaults say.
+- **Always denied**: `secrets.yaml` (in any folder - Home Assistant also
+  reads one from a subfolder such as `packages/`), all auth/credential
+  storage, the arm file itself, and a handful of other sensitive system
+  files - regardless of what read/write defaults say.
+
+`get_config_file` returns a file's raw text, so it adds one more rule: a
+file is withheld entirely if any line of it looks like a literal credential
+(a credential-shaped key with a value that isn't a `!secret`/`!env_var`
+reference, a password in a URL, a bearer token), including in comments and
+inside strings such as a JSON `payload`. The response names the line and
+key, never the value. Config snapshots to the mirror repo use the same
+check.
 
 An earlier version of this project had a `configuration.yaml`-based
 `ha_dev_tools: security:` block for customizing this - it was removed

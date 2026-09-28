@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.21.0] - 2026-09-28
+
+### Added
+- Hand-edited config is now mirrored (issue #105). With git mirroring on, `configuration.yaml`, every file it (or those files) `!include`s or `!include_dir_*`s, `packages/**/*.yaml` and `custom_templates/**/*.jinja` are committed to the mirror repo as-is, one commit per changed file. This happens at Home Assistant start, once a day, and on every `check_config`, but only while Home Assistant's own config check passes. The mirror's latest copy is therefore always a last-known-good one, and edits made over SSH or by hand show up as diffs. Previously only files touched by a write tool were ever mirrored, so `configuration.yaml` never was. `check_config` reports what it committed or skipped as `config_snapshot`.
+- `get_config_file`: the raw text of any of those files, with `!secret`/`!include` returned as written and never resolved (issue #105). `source: mirror` returns the last good snapshot instead of the live file. It reads a file that no longer parses, where `get_rest_command` and the other structured tools can't, so a broken block can be seen and repaired without SSH. Without `path`, it lists the files it covers and why each is included. Read-only.
+- Snapshots and `get_config_file` release a file only if no line of it looks like a literal credential: a credential-shaped key with a value that isn't a `!secret`/`!env_var` reference, a password in a URL, or a bearer token. Comments and strings such as a JSON `payload` are checked too, and so is a file that no longer parses. A withheld file is reported with the line and key, never the value. `secrets.yaml` is never returned or mirrored.
+
+### Security
+- A `secrets.yaml` in a subfolder (e.g. `packages/secrets.yaml`) is now denied like the top-level one. Home Assistant looks `!secret` values up in every folder from the including file up to `/config`, so these hold real secrets too, and their keys are arbitrary names no credential check would recognize.
+
+### Changed
+- `custom_templates/**/*.jinja` is readable by default (read-only), and `.jinja`, the extension Home Assistant loads templates from, is an allowed file extension (`.jinja2` already was).
+
 ## [2.20.14] - 2026-09-28
 
 ### Fixed
