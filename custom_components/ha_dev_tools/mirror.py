@@ -206,13 +206,23 @@ _SCANNERS = {
 }
 
 
+def _scan(content: str, content_type: str) -> list[str]:
+    """The structured check for the content's shape, plus the text-level
+    one config snapshots use (issue #119): the structured check alone only
+    sees a credential-shaped key, so a password inside a string - a JSON
+    `payload`, a URL's user:password@, a bearer header, a comment - was
+    pushed as-is."""
+    return mirror_secrets.find_text_credentials(content) + _SCANNERS[content_type](
+        content
+    )
+
+
 def _credential_findings(
     content_before: str | None, content_after: str, content_type: str
 ) -> list[str]:
-    scan = _SCANNERS[content_type]
-    findings = scan(content_after)
+    findings = _scan(content_after, content_type)
     if content_before is not None:
-        findings = findings + scan(content_before)
+        findings = findings + _scan(content_before, content_type)
     return findings
 
 

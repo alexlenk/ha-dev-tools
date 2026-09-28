@@ -83,6 +83,15 @@ tool call the agent has to remember to make.
 
 ### Tier 2 - offline behavioral simulation (a separate project, not this repo)
 
+> **Status: not planned** (issue #37, closed 2026-09-28). Tier 1 is
+> effectively in place: `audit_automations` compiles every template with
+> HA's own engine and flags constant conditions and misread values, and
+> `check_config` reports automations HA refused to set up. Every real bug
+> seen so far was of that static kind. Tier 2 would be a separate product
+> (isolated core, state snapshots, mocked services, scenario format, CI
+> tracking the instance's HA version) for comparatively little. The design
+> below stays as the starting point if that changes.
+
 Not built inside `ha_dev_tools`, and not run on the live instance, for
 reasons specific to this integration's constraints:
 

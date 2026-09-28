@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.22.1] - 2026-09-28
+
+### Security
+- Mirroring a tool's write now checks for credentials inside strings too (issue #119). Previously only a credential-shaped key with a plain value was caught. So a `rest_command` payload like `'{"password": "..."}'`, a password in a URL (`https://user:pass@host`), an `Authorization: Bearer ...` header or a commented-out credential was pushed to the mirror repo as-is. Every mirror push, whether a write, a dry-run or a snapshot, now uses the same text-level check that config snapshots use (#105), in addition to the structured one. A flagged file is skipped and reported with the line and key, never the value. `true`/`false` values no longer count as credentials, so a flag like `show_token: true` doesn't block mirroring.
+
+### Changed
+- Tier-2 behavioral simulation (issue #37) is marked not planned in `docs/AUTOMATION_TESTING_DESIGN.md`, with the reasons why.
+
 ## [2.22.0] - 2026-09-28
 
 ### Added

@@ -121,8 +121,20 @@ _TEXT_CREDENTIAL = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 # `key:` with nothing after it opens a nested block (its lines are checked
-# on their own); these are references or empty, not literal values.
-_SAFE_VALUES = {"", '""', "''", "!secret", "!env_var", "null", "~", "none"}
+# on their own); these are references, empty, or a flag (`show_token:
+# true`) - not literal credentials.
+_SAFE_VALUES = {
+    "",
+    '""',
+    "''",
+    "!secret",
+    "!env_var",
+    "null",
+    "~",
+    "none",
+    "true",
+    "false",
+}
 _URL_USERINFO = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 _BEARER = re.compile(r"\bbearer\s+[a-z0-9._~+/=-]{8,}", re.IGNORECASE)
 
