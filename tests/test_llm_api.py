@@ -217,6 +217,7 @@ async def test_dev_tools_real_tools_registered(
         "entity_health_report",
         "delete_entity",
         "delete_entities",
+        "update_entities",
         "list_mqtt_topics",
         "render_template",
         "validate_template",
@@ -4887,3 +4888,112 @@ async def test_delete_template_entity_tool_batch(
             _llm_context(),
         )
     ).mirrored is False
+
+
+# --- helper tools: area and person domains (issue #117) ---------------------
+
+
+@pytest.mark.asyncio
+async def test_helper_tools_mirror_areas_as_the_area_list(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    """.storage/core.area_registry is denylisted, so area writes mirror the
+    area list itself (areas.json), read before and right after each write."""
+    assert await async_setup_component(hass, "config", {})
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+
+    async def run(tool, args):
+        with (
+            patch(
+                "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+                return_value=True,
+            ),
+            patch(
+                "custom_components.ha_dev_tools.llm_api.mirror.mirror_write",
+                mirror_write,
+            ),
+        ):
+            return await tool._write(
+                hass,
+                llm.ToolInput(tool_name=tool.name, tool_args=args),
+                _llm_context(admin_user.id),
+            )
+
+    def names(content: str | None) -> list[str]:
+        return sorted(area["name"] for area in json.loads(content or "[]"))
+
+    created = await run(
+        CreateHelperTool(), {"domain": "area", "config": {"name": "Garage"}}
+    )
+    call = mirror_write.await_args.kwargs
+    assert call["path"] == "areas.json"
+    assert names(call["content_before"]) == []
+    assert names(call["content_after"]) == ["Garage"]
+    assert created["mirror"]["mirrored"] is True
+
+    await run(
+        UpdateHelperTool(),
+        {"domain": "area", "item_id": created["id"], "config": {"name": "Workshop"}},
+    )
+    call = mirror_write.await_args.kwargs
+    assert (names(call["content_before"]), names(call["content_after"])) == (
+        ["Garage"],
+        ["Workshop"],
+    )
+
+    await run(DeleteHelperTool(), {"domain": "area", "item_ids": [created["id"]]})
+    call = mirror_write.await_args.kwargs
+    assert (names(call["content_before"]), names(call["content_after"])) == (
+        ["Workshop"],
+        [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_helper_tools_never_mirror_persons(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    assert await async_setup_component(hass, "person", {})
+    mirror_write = AsyncMock()
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        created = await CreateHelperTool()._write(
+            hass,
+            llm.ToolInput(
+                tool_name="create_helper",
+                tool_args={"domain": "person", "config": {"name": "Alex"}},
+            ),
+            _llm_context(admin_user.id),
+        )
+        updated = await UpdateHelperTool()._write(
+            hass,
+            llm.ToolInput(
+                tool_name="update_helper",
+                tool_args={
+                    "domain": "person",
+                    "item_id": created["id"],
+                    "config": {"device_trackers": ["device_tracker.alex_iphone"]},
+                },
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert updated["device_trackers"] == ["device_tracker.alex_iphone"]
+    assert created["mirror"]["mirrored"] is False
+    assert "personal data" in updated["mirror"]["reason"]
+    mirror_write.assert_not_called()

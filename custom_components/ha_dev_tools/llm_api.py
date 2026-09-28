@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, cast, override
 
 import voluptuous as vol
+from homeassistant.auth.models import User
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
@@ -35,6 +36,8 @@ from . import (
     history_manager,
     mirror,
     mqtt_manager,
+    references,
+    registry_manager,
     service_call_manager,
     supervisor_manager,
     template_manager,
@@ -396,7 +399,7 @@ class WriteGatedTool(GatedTool):
                 "confirmation_required": True,
                 "action": self.name,
                 "would_apply": preview,
-                **await self._preview_context(hass, tool_input),
+                **await self._preview_context(hass, tool_input, llm_context),
                 "confirm_token": new_token,
                 "note": (
                     "Show the user the full would_apply content above - the "
@@ -414,7 +417,7 @@ class WriteGatedTool(GatedTool):
                 "dry_run": True,
                 "action": self.name,
                 "would_apply": preview,
-                **await self._preview_context(hass, tool_input),
+                **await self._preview_context(hass, tool_input, llm_context),
                 "note": (
                     "Dry-run mode is enabled for this integration - no "
                     "changes were made. Show the user the full would_apply "
@@ -442,7 +445,10 @@ class WriteGatedTool(GatedTool):
         raise NotImplementedError
 
     async def _preview_context(
-        self, hass: HomeAssistant, tool_input: llm.ToolInput
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """Override to add read-only context to the propose and dry-run
         responses, next to would_apply - e.g. what the target currently
@@ -696,6 +702,186 @@ class DeleteEntitiesTool(WriteGatedTool):
             )
             response["mirror"] = _mirror_result_payload(mirror_result)
         return response
+
+
+_UPDATE_ITEM = vol.Schema(
+    {
+        vol.Optional("entity_id"): str,
+        vol.Optional("device_id"): str,
+        vol.Optional("new_entity_id"): str,
+        vol.Optional("name"): vol.Any(str, None),
+        vol.Optional("area"): vol.Any(str, None),
+        vol.Optional("device_class"): vol.Any(str, None),
+        vol.Optional("icon"): vol.Any(str, None),
+        vol.Optional("disabled"): bool,
+        vol.Optional("hidden"): bool,
+        vol.Optional("show_as"): vol.In(registry_manager.SHOW_AS_DOMAINS),
+    }
+)
+
+
+def _renames(plans: list[registry_manager.PlannedUpdate]) -> list[tuple[str, str]]:
+    return [
+        (plan.target, plan.ws_changes["new_entity_id"])
+        for plan in plans
+        if plan.ws_changes.get("new_entity_id", plan.target) != plan.target
+    ]
+
+
+class UpdateEntitiesTool(WriteGatedTool):
+    """Batch entity/device registry changes - see registry_manager.py."""
+
+    name = "update_entities"
+    description = (
+        "Change entities and devices the way their settings dialogs in the "
+        "UI do, several in one call. Each item names one entity_id or "
+        "device_id and the fields to set. Entity: new_entity_id (rename), "
+        "name, area (room, by name or id), device_class (e.g. show a "
+        "binary_sensor as a door or window), icon, disabled, hidden, and "
+        "show_as for a switch (cover/fan/light/lock/siren/valve - the UI's "
+        "'Show as', which also hides the switch). Device: name, area, "
+        "disabled. null clears name/area/device_class/icon back to the "
+        "default. Every item is checked before anything changes; an unknown "
+        "entity, device or room refuses the whole batch (rooms are matched "
+        "exactly - list them with list_helpers domain='area', create one "
+        "with create_helper domain='area'). A rename doesn't rename the id "
+        "where it's used: the preview lists every reference (YAML config, "
+        "dashboards, persons' trackers, helper config entries); with "
+        "update_references=true, the ones that can be written are rewritten "
+        "(automations.yaml, scripts.yaml, packages/, storage dashboards, "
+        "persons) and YAML reloaded - the rest are reported. Enabling an "
+        "entity reloads its integration after a short delay, as in the UI."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("items"): vol.All([_UPDATE_ITEM], vol.Length(min=1)),
+            vol.Optional("update_references"): bool,
+        }
+    )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """What each item changes, problems, and a rename's references."""
+        try:
+            plans = registry_manager.plan_updates(hass, tool_input.tool_args["items"])
+        except registry_manager.RegistryUpdateError as exc:
+            return {"problems": str(exc)}
+        context: JsonObjectType = {
+            "would_change": [
+                {
+                    f"{plan.kind}_id": plan.target,
+                    "changes": cast(JsonValueType, plan.changes),
+                    **({"show_as": plan.show_as} if plan.show_as else {}),
+                }
+                for plan in plans
+            ]
+        }
+        if renames := _renames(plans):
+            try:
+                user = await helper_manager.resolve_user(hass, llm_context)
+                context["references"] = {
+                    old: cast(
+                        JsonValueType,
+                        await references.find_references(hass, user, old),
+                    )
+                    for old, _ in renames
+                }
+            except (UnresolvedUserError, WebSocketCommandError):
+                return context
+            context["references_note"] = (
+                "These still name the old entity_id after the rename. With "
+                "update_references=true, the writable ones are rewritten."
+            )
+        return context
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Apply the batch, then rewrite or report a rename's references."""
+        args = tool_input.tool_args
+        mirroring = mirror.is_mirror_enabled(hass)
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            plans = registry_manager.plan_updates(hass, args["items"])
+        except (UnresolvedUserError, registry_manager.RegistryUpdateError) as exc:
+            return _tool_error(exc)
+        before = [registry_manager.snapshot(hass, plan, plan.target) for plan in plans]
+        results = await registry_manager.apply_updates(hass, user, plans)
+        response: JsonObjectType = {"results": cast(JsonValueType, results)}
+
+        applied = {result.get("entity_id") for result in results if "changed" in result}
+        refs: JsonObjectType = {}
+        for old, new in _renames(plans):
+            if new not in applied:
+                continue
+            try:
+                refs[old] = await self._handle_references(
+                    hass, user, old, new, rewrite=bool(args.get("update_references"))
+                )
+            except WebSocketCommandError as exc:
+                # The rename itself already happened - report, don't raise.
+                refs[old] = {"error": f"references not checked: {exc}"}
+        if refs:
+            response["references"] = refs
+
+        if mirroring:
+            after = [
+                registry_manager.snapshot(
+                    hass, plan, str(result.get("entity_id", plan.target))
+                )
+                for plan, result in zip(plans, results)
+            ]
+            mirror_result = await mirror.mirror_write(
+                hass,
+                path=(
+                    "entities/update-"
+                    f"{dt_util.utcnow().strftime('%Y%m%dT%H%M%SZ')}.json"
+                ),
+                content_before=json.dumps(before, indent=2),
+                content_after=json.dumps(after, indent=2),
+                content_type="json",
+            )
+            response["mirror"] = _mirror_result_payload(mirror_result)
+        return response
+
+    async def _handle_references(
+        self, hass: HomeAssistant, user: User, old: str, new: str, *, rewrite: bool
+    ) -> JsonObjectType:
+        """Rewrite a rename's references if asked; report what's left."""
+        entry: JsonObjectType = {}
+        if rewrite:
+            result = await references.rewrite_references(hass, user, old, new)
+            entry["rewritten"] = cast(JsonValueType, result.rewritten)
+            if result.errors:
+                entry["errors"] = cast(JsonValueType, result.errors)
+            if result.reloaded:
+                entry["reloaded"] = cast(JsonValueType, result.reloaded)
+            if mirror.is_mirror_enabled(hass):
+                entry["mirror"] = [
+                    _mirror_result_payload(
+                        await mirror.mirror_write(
+                            hass,
+                            path=item.path,
+                            content_before=item.before,
+                            content_after=item.after,
+                            content_type=item.content_type,
+                        )
+                    )
+                    for item in result.mirror
+                ]
+        entry["still_referenced"] = cast(
+            JsonValueType, await references.find_references(hass, user, old)
+        )
+        return entry
 
 
 class ListMqttTopicsTool(GatedTool):
@@ -1437,6 +1623,61 @@ def _helper_domain_schema() -> vol.In:
     return vol.In(HELPER_DOMAINS)
 
 
+# person and area storage (.storage/person, .storage/core.area_registry)
+# is denylisted, so those two can't be mirrored the way helpers are (issue
+# #117): areas are mirrored as the area list itself, persons not at all -
+# their data is personal, which is why .storage/person is denylisted.
+_AREAS_MIRROR_PATH = "areas.json"
+_PERSON_NOT_MIRRORED: JsonObjectType = {
+    "mirrored": False,
+    "reason": "person data isn't mirrored - it's personal data "
+    "(.storage/person is denylisted for the same reason).",
+}
+
+
+async def _helper_state(hass: HomeAssistant, user: User, domain: str) -> str | None:
+    """What a helper write's mirror records as "before": the domain's
+    storage file, or for areas the area list."""
+    if domain == "person":
+        return None
+    if domain == "area":
+        areas = await helper_manager.list_helpers(hass, user, domain)
+        return json.dumps(areas, indent=2, sort_keys=True)
+    return await _read_storage_file(hass, f".storage/{domain}")
+
+
+async def _mirror_helper_write(
+    hass: HomeAssistant,
+    user: User,
+    domain: str,
+    content_before: str | None,
+    *,
+    upsert: JsonObjectType | None = None,
+    remove_ids: list[str] | None = None,
+) -> JsonObjectType:
+    """Mirror one helper write (see _helper_state) and return its payload."""
+    if domain == "person":
+        return _PERSON_NOT_MIRRORED
+    if domain == "area":
+        path = _AREAS_MIRROR_PATH
+        content_after = cast(str, await _helper_state(hass, user, domain))
+    else:
+        path = f".storage/{domain}"
+        content_after = _reconstruct_helper_storage_json(content_before, upsert=upsert)
+        for item_id in remove_ids or []:
+            content_after = _reconstruct_helper_storage_json(
+                content_after, remove_id=item_id
+            )
+    result = await mirror.mirror_write(
+        hass,
+        path=path,
+        content_before=content_before,
+        content_after=content_after,
+        content_type="json",
+    )
+    return _mirror_result_payload(result)
+
+
 class ListHelpersTool(GatedTool):
     """List every storage-defined item in a helper domain (input_boolean, counter, etc.)."""
 
@@ -1447,7 +1688,10 @@ class ListHelpersTool(GatedTool):
         "schedule) currently defined via the UI/storage in the given "
         "domain. Does not include YAML-defined helpers of the same "
         "domain - those aren't reachable this way (see get_automation's "
-        "'layout-aware' approach for the analogous YAML case)."
+        "'layout-aware' approach for the analogous YAML case). Also "
+        "domain='area' for the rooms (areas) - the ids update_entities "
+        "assigns - and domain='person' for UI-made persons, with their "
+        "device_trackers."
     )
     parameters = vol.Schema({vol.Required("domain"): _helper_domain_schema()})
 
@@ -1482,7 +1726,10 @@ class CreateHelperTool(WriteGatedTool):
         "the same mechanism the UI's Helpers page uses. 'config' fields "
         "vary by domain - e.g. input_boolean/counter/timer mainly need "
         "'name'; input_number additionally needs 'min'/'max'; "
-        "input_select needs 'options' (a list)."
+        "input_select needs 'options' (a list). domain='area' creates a "
+        "room ('name', optional 'icon', 'floor_id', 'aliases'); "
+        "domain='person' a person ('name', optional 'device_trackers', "
+        "'user_id')."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("domain"): _helper_domain_schema(), vol.Required("config"): dict}
@@ -1497,12 +1744,15 @@ class CreateHelperTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Create the helper."""
         args = tool_input.tool_args
-        storage_path = f".storage/{args['domain']}"
+        domain = args["domain"]
+        mirroring = mirror.is_mirror_enabled(hass)
         try:
-            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
+            content_before = (
+                await _helper_state(hass, user, domain) if mirroring else None
+            )
             created = await helper_manager.create_helper(
-                hass, user, args["domain"], args["config"]
+                hass, user, domain, args["config"]
             )
         except (
             UnresolvedUserError,
@@ -1511,18 +1761,10 @@ class CreateHelperTool(WriteGatedTool):
         ) as exc:
             return _tool_error(exc)
         response: JsonObjectType = dict(created)
-        if mirror.is_mirror_enabled(hass):
-            content_after = _reconstruct_helper_storage_json(
-                content_before, upsert=created
+        if mirroring:
+            response["mirror"] = await _mirror_helper_write(
+                hass, user, domain, content_before, upsert=created
             )
-            mirror_result = await mirror.mirror_write(
-                hass,
-                path=storage_path,
-                content_before=content_before,
-                content_after=content_after,
-                content_type="json",
-            )
-            response["mirror"] = _mirror_result_payload(mirror_result)
         return response
 
 
@@ -1534,7 +1776,9 @@ class UpdateHelperTool(WriteGatedTool):
         "Update an existing storage-defined helper by id. Only works on "
         "helpers created via the UI/storage, not YAML-defined ones - "
         "list_helpers' results only include the former for exactly this "
-        "reason."
+        "reason. Only the fields in 'config' change. domain='area' renames "
+        "a room or sets its icon/floor; domain='person' e.g. sets "
+        "'device_trackers' (the full list) to link trackers to a person."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -1553,12 +1797,15 @@ class UpdateHelperTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Update the helper."""
         args = tool_input.tool_args
-        storage_path = f".storage/{args['domain']}"
+        domain = args["domain"]
+        mirroring = mirror.is_mirror_enabled(hass)
         try:
-            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
+            content_before = (
+                await _helper_state(hass, user, domain) if mirroring else None
+            )
             updated = await helper_manager.update_helper(
-                hass, user, args["domain"], args["item_id"], args["config"]
+                hass, user, domain, args["item_id"], args["config"]
             )
         except (
             UnresolvedUserError,
@@ -1567,18 +1814,10 @@ class UpdateHelperTool(WriteGatedTool):
         ) as exc:
             return _tool_error(exc)
         response: JsonObjectType = dict(updated)
-        if mirror.is_mirror_enabled(hass):
-            content_after = _reconstruct_helper_storage_json(
-                content_before, upsert=updated
+        if mirroring:
+            response["mirror"] = await _mirror_helper_write(
+                hass, user, domain, content_before, upsert=updated
             )
-            mirror_result = await mirror.mirror_write(
-                hass,
-                path=storage_path,
-                content_before=content_before,
-                content_after=content_after,
-                content_type="json",
-            )
-            response["mirror"] = _mirror_result_payload(mirror_result)
         return response
 
 
@@ -1609,11 +1848,13 @@ class DeleteHelperTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Delete the helper(s)."""
         args = tool_input.tool_args
-        storage_path = f".storage/{args['domain']}"
+        mirroring = mirror.is_mirror_enabled(hass)
         try:
             ids = _one_or_many(args, "item_id", "item_ids")
-            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
+            content_before = (
+                await _helper_state(hass, user, args["domain"]) if mirroring else None
+            )
             if len(ids) > 1 or "item_ids" in args:
                 # All-or-nothing: check every id exists before deleting any.
                 existing = {
@@ -1641,22 +1882,10 @@ class DeleteHelperTool(WriteGatedTool):
             if "item_id" in args
             else {"deleted": cast(JsonValueType, ids), "domain": args["domain"]}
         )
-        if mirror.is_mirror_enabled(hass):
-            content_after = _reconstruct_helper_storage_json(
-                content_before, remove_id=ids[0]
+        if mirroring:
+            response["mirror"] = await _mirror_helper_write(
+                hass, user, args["domain"], content_before, remove_ids=ids
             )
-            for item_id in ids[1:]:
-                content_after = _reconstruct_helper_storage_json(
-                    content_after, remove_id=item_id
-                )
-            mirror_result = await mirror.mirror_write(
-                hass,
-                path=storage_path,
-                content_before=content_before,
-                content_after=content_after,
-                content_type="json",
-            )
-            response["mirror"] = _mirror_result_payload(mirror_result)
         return response
 
 
@@ -1833,7 +2062,10 @@ class UpdateDerivedSensorTool(WriteGatedTool):
 
     @override
     async def _preview_context(
-        self, hass: HomeAssistant, tool_input: llm.ToolInput
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """The entry's current options and the fields this call would change."""
         args = tool_input.tool_args
@@ -2997,6 +3229,7 @@ class DevToolsAPI(llm.API):
                 EntityHealthReportTool(),
                 DeleteEntityTool(),
                 DeleteEntitiesTool(),
+                UpdateEntitiesTool(),
                 ListMqttTopicsTool(),
                 RenderTemplateTool(),
                 ValidateTemplateTool(),
