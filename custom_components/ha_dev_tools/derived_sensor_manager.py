@@ -75,12 +75,13 @@ passing it as None.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from typing import Any, cast
 
 import voluptuous_serialize
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType, section
+from homeassistant.data_entry_flow import FlowResultType, UnknownFlow, section
 from homeassistant.helpers import config_validation as cv
 from voluptuous import Invalid as VoluptuousInvalid
 from voluptuous import Marker
@@ -247,6 +248,35 @@ async def _drive_flow(
     *,
     init_result: ConfigFlowResult,
     configure: Callable[[str, dict[str, Any]], Awaitable[ConfigFlowResult]],
+    abort: Callable[[str], None],
+    steps: dict[str, dict[str, Any]],
+    options: dict[str, Any] | None = None,
+) -> ConfigFlowResult:
+    """Drive a flow with _step_flow, aborting it if that stops early (issue #85).
+
+    A flow started with async_init stays in HA's flow manager until it
+    finishes. _step_flow stops partway by design - FlowStepRequiredError
+    for discovery or a step still needing input, FlowAbortedError for
+    rejected input - and the discovery workflow invites repeated calls, so
+    each one used to leave an orphaned in-progress flow behind until HA
+    restarted. Abort it on any exception instead. A flow that already
+    ended itself (an ABORT result) is gone from the manager, which raises
+    UnknownFlow - nothing left to clean up.
+    """
+    try:
+        return await _step_flow(
+            init_result=init_result, configure=configure, steps=steps, options=options
+        )
+    except BaseException:
+        with suppress(UnknownFlow):
+            abort(init_result["flow_id"])
+        raise
+
+
+async def _step_flow(
+    *,
+    init_result: ConfigFlowResult,
+    configure: Callable[[str, dict[str, Any]], Awaitable[ConfigFlowResult]],
     steps: dict[str, dict[str, Any]],
     options: dict[str, Any] | None = None,
 ) -> ConfigFlowResult:
@@ -384,6 +414,7 @@ async def create_derived_sensor(
     result = await _drive_flow(
         init_result=init_result,
         configure=hass.config_entries.flow.async_configure,
+        abort=hass.config_entries.flow.async_abort,
         steps=steps or {},
     )
     return _entry_to_dict(result["result"])
@@ -399,7 +430,7 @@ async def update_derived_sensor(
 
     Either `steps` (same per-step discovery shape as create_derived_sensor)
     or `options` (a flat patch of just the fields to change, no step id
-    needed - see _drive_flow), not both. Fields left out of either keep
+    needed - see _step_flow), not both. Fields left out of either keep
     their current values. A successful finish updates the entry's options
     and reloads it automatically (see module docstring) - no separate
     reload call needed here.
@@ -411,6 +442,7 @@ async def update_derived_sensor(
     await _drive_flow(
         init_result=init_result,
         configure=hass.config_entries.options.async_configure,
+        abort=hass.config_entries.options.async_abort,
         steps=steps or {},
         options=options,
     )

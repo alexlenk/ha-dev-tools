@@ -78,7 +78,7 @@ from .template_yaml_manager import (
     TemplateYamlManager,
 )
 from .ws_call import WebSocketCommandError
-from .yaml_style import find_misread_scalars
+from .yaml_style import find_misread_scalars, to_json_safe
 
 API_ID = "dev_tools"
 API_NAME = "HA Dev Tools"
@@ -1071,7 +1071,7 @@ class GetAutomationTool(GatedTool):
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
-            "config": config,
+            "config": to_json_safe(config),
             "currently_enabled": (
                 None if live_state is None else live_state.state == "on"
             ),
@@ -2452,7 +2452,7 @@ class ListScriptsTool(GatedTool):
                 "script_id": script_id,
                 "file_path": location.file_path,
                 "is_package": location.is_package,
-                "config": config,
+                "config": to_json_safe(config),
             }
             for location, script_id, config in await self._manager.all_scripts()
         ]
@@ -2493,7 +2493,7 @@ class GetScriptTool(GatedTool):
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
-            "config": config,
+            "config": to_json_safe(config),
             "misread_values": cast(JsonValueType, find_misread_scalars(config)),
         }
 
@@ -2618,7 +2618,7 @@ class ListRestCommandsTool(GatedTool):
                 "rest_command_id": rest_command_id,
                 "file_path": location.file_path,
                 "is_package": location.is_package,
-                "config": config,
+                "config": to_json_safe(config),
             }
             for location, rest_command_id, config in await self._manager.all_rest_commands()
         ]
@@ -2661,7 +2661,7 @@ class GetRestCommandTool(GatedTool):
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
-            "config": config,
+            "config": to_json_safe(config),
         }
 
 

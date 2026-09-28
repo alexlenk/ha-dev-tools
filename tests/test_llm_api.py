@@ -1183,6 +1183,94 @@ async def test_list_rest_commands_returns_every_command(
     assert ids == {"a", "b"}
 
 
+@pytest.mark.asyncio
+async def test_rest_command_reads_with_secret_tag_are_json_safe(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """Issue #90: a `!secret` value loads as a ruamel TaggedScalar, which
+    isn't JSON serializable - one such rest_command crashed both
+    get_rest_command and the whole list_rest_commands listing. The tag is
+    reported as its literal `!secret name` text, never resolved."""
+    manager = _rest_command_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "configuration.yaml").write_text(
+        "rest_command:\n"
+        "  doorbird:\n"
+        "    url: http://door/rfid\n"
+        "    headers:\n"
+        "      authorization: !secret doorbird_auth\n"
+        "  plain:\n"
+        "    url: http://plain\n"
+    )
+
+    got = await GetRestCommandTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_rest_command", tool_args={"rest_command_id": "doorbird"}
+        ),
+        _llm_context(admin_user.id),
+    )
+    listed = await ListRestCommandsTool(manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="list_rest_commands", tool_args={}),
+        _llm_context(admin_user.id),
+    )
+
+    json.dumps(got)
+    json.dumps(listed)
+    assert got["config"]["headers"]["authorization"] == "!secret doorbird_auth"
+    assert {item["rest_command_id"] for item in listed["items"]} == {
+        "doorbird",
+        "plain",
+    }
+
+
+@pytest.mark.asyncio
+async def test_automation_and_script_reads_with_secret_tag_are_json_safe(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """Same crash as #90, in get_automation/get_script/list_scripts - they
+    return loaded ruamel nodes too."""
+    automation_manager = _automation_manager(hass, tmp_path)
+    script_manager = _script_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "automations.yaml").write_text(
+        "- id: notify\n"
+        "  trigger: []\n"
+        "  action:\n"
+        "  - action: notify.x\n"
+        "    data:\n"
+        "      target: !secret my_phone\n"
+    )
+    (tmp_path / "scripts.yaml").write_text(
+        "call:\n  sequence:\n  - action: notify.x\n    data:\n"
+        "      target: !secret my_phone\n"
+    )
+
+    automation = await GetAutomationTool(automation_manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "notify"}
+        ),
+        _llm_context(admin_user.id),
+    )
+    script = await GetScriptTool(script_manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "call"}),
+        _llm_context(admin_user.id),
+    )
+    scripts = await ListScriptsTool(script_manager).async_call(
+        hass,
+        llm.ToolInput(tool_name="list_scripts", tool_args={}),
+        _llm_context(admin_user.id),
+    )
+
+    for result in (automation, script, scripts):
+        json.dumps(result)
+    assert automation["config"]["action"][0]["data"]["target"] == "!secret my_phone"
+    assert script["config"]["sequence"][0]["data"]["target"] == "!secret my_phone"
+
+
 # --- WriteGatedTool / dry-run ------------------------------------------------
 
 
