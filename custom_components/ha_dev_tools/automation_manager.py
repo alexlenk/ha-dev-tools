@@ -37,6 +37,7 @@ from .file_manager import FileManager
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
+    remove_items,
     spliced_or_full,
     surgical_edit,
 )
@@ -386,58 +387,98 @@ class AutomationManager:
         rather than guessing. `expected_hash` and `dry_run` behave exactly
         the same as write_automation's identical parameters.
         """
-        location = await self.find_automation(automation_id)
-        content_before = await self.file_manager.read_file(location.file_path)
-        document = await self.hass.async_add_executor_job(_load_yaml, content_before)
-        content_after = await self.hass.async_add_executor_job(
-            self._build_delete_content,
-            location,
-            document,
-            automation_id,
-            content_before,
+        (result,) = await self.delete_automations(
+            [automation_id], expected_hash=expected_hash, dry_run=dry_run
         )
+        return result
 
-        if dry_run:
-            return AutomationWriteResult(
-                location=location,
-                content_before=content_before,
-                content_after=content_after,
+    async def delete_automations(
+        self,
+        automation_ids: list[str],
+        *,
+        expected_hash: str | None = None,
+        dry_run: bool = False,
+    ) -> list[AutomationWriteResult]:
+        """Delete several automations in one go (issue #66), one result per file.
+
+        All-or-nothing up front, like delete_entities: every id is resolved
+        before anything is written, so an unknown or ambiguous id (or one
+        listed twice) refuses the whole batch rather than half-applying it.
+        Each affected file is then written once, with all its targets
+        removed, and automations reload once at the end. `expected_hash`
+        is a single file's hash, so it's only accepted when every id lives
+        in the same file.
+        """
+        ids = [str(automation_id) for automation_id in automation_ids]
+        if not ids:
+            raise ValueError("No automation ids given")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"Automation ids listed more than once: {ids}")
+        by_file: dict[str, tuple[AutomationLocation, list[str]]] = {}
+        for automation_id in ids:
+            location = await self.find_automation(automation_id)
+            by_file.setdefault(location.file_path, (location, []))[1].append(
+                automation_id
+            )
+        if expected_hash is not None and len(by_file) > 1:
+            raise ValueError(
+                "expected_hash is one file's hash, but these automations are "
+                f"in {len(by_file)} files: {sorted(by_file)}"
             )
 
-        await self.file_manager.write_file(
-            location.file_path,
-            content_after,
-            expected_hash=expected_hash,
-            validate_before_write=True,
-        )
+        results = []
+        for location, file_ids in by_file.values():
+            content_before = await self.file_manager.read_file(location.file_path)
+            document = await self.hass.async_add_executor_job(
+                _load_yaml, content_before
+            )
+            content_after = await self.hass.async_add_executor_job(
+                self._build_delete_content,
+                location,
+                document,
+                file_ids,
+                content_before,
+            )
+            results.append(
+                AutomationWriteResult(
+                    location=location,
+                    content_before=content_before,
+                    content_after=content_after,
+                )
+            )
+        if dry_run:
+            return results
 
+        for result in results:
+            await self.file_manager.write_file(
+                result.location.file_path,
+                result.content_after,
+                expected_hash=expected_hash,
+                validate_before_write=True,
+            )
         await self.hass.services.async_call("automation", "reload", blocking=True)
         _LOGGER.info(
-            "Deleted automation '%s' from %s and reloaded automations",
-            automation_id,
-            location.file_path,
+            "Deleted automation(s) %s from %s and reloaded automations",
+            ids,
+            sorted(by_file),
         )
-        return AutomationWriteResult(
-            location=location,
-            content_before=content_before,
-            content_after=content_after,
-        )
+        return results
 
     def _build_delete_content(
         self,
         location: AutomationLocation,
         document: Any,
-        automation_id: str,
+        automation_ids: list[str],
         original: str | None = None,
     ) -> str:
-        """Synchronous: remove the automation from its document, return the new file content.
+        """Synchronous: remove the automations from their document, return the new file content.
 
-        Only the automation's own lines are removed from `original` where
-        possible - see yaml_style.surgical_edit (issue #53).
+        Only the automations' own lines are removed from `original` where
+        possible - see yaml_style.remove_items (issue #53).
 
         Unlike _build_content, this never needs to handle a missing/empty
         document or automation list - find_automation() (called by every
-        caller before this) already confirmed automation_id lives in
+        caller before this) already confirmed each id lives in
         location.file_path, so document and its automation list are always
         already there. The one normalization still needed is a package's
         single-mapping `automation:` form (vs. a list) - see
@@ -455,18 +496,13 @@ class AutomationManager:
                 document["automation"] = automations
                 spliceable = False
 
-        spliced = None
-        for i, entry in enumerate(automations):
-            if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
-                spliced = surgical_edit(
-                    original if spliceable else None,
-                    automations,
-                    i,
-                    "delete",
-                    yaml,
-                    lambda i=i: automations.__delitem__(i),
-                )
-                break
+        targets = {str(automation_id) for automation_id in automation_ids}
+        indices = [
+            i
+            for i, entry in enumerate(automations)
+            if isinstance(entry, dict) and str(entry.get("id")) in targets
+        ]
+        spliced = remove_items(original if spliceable else None, automations, indices)
 
         from io import StringIO
 

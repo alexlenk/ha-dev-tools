@@ -113,6 +113,7 @@ from custom_components.ha_dev_tools.llm_api import (
     WriteScriptTool,
 )
 from custom_components.ha_dev_tools.log_manager import LogManager
+from custom_components.ha_dev_tools.mirror import MirrorResult
 from custom_components.ha_dev_tools.mqtt_manager import MqttNotAvailableError
 from custom_components.ha_dev_tools.rest_command_manager import RestCommandManager
 from custom_components.ha_dev_tools.script_manager import ScriptManager
@@ -1134,6 +1135,82 @@ def _reload_raising_setup_repair(hass: HomeAssistant, domain: str, item_id: str)
         )
 
     hass.services.async_register(domain, "reload", _reload)
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_batch(hass: HomeAssistant, admin_user, tmp_path):
+    """Issue #66: automation_ids deletes several under one confirmation."""
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    hass.services.async_register("automation", "reload", AsyncMock())
+    (tmp_path / "automations.yaml").write_text(
+        "- id: a\n  actions: []\n- id: b\n  actions: []\n- id: keep\n  actions: []\n"
+    )
+    tool = DeleteAutomationTool(manager)
+
+    result = await _confirm(hass, tool, admin_user, {"automation_ids": ["a", "b"]})
+    both = await tool._write(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_automation",
+            tool_args={"automation_id": "keep", "automation_ids": ["keep"]},
+        ),
+        _llm_context(admin_user.id),
+    )
+    batch_dry_run = await tool._dry_run_mirror(
+        hass,
+        llm.ToolInput(
+            tool_name="delete_automation", tool_args={"automation_ids": ["keep"]}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert result["deleted"] == ["a", "b"]
+    assert result["files"] == [{"file_path": "automations.yaml", "is_package": False}]
+    assert (tmp_path / "automations.yaml").read_text() == "- id: keep\n  actions: []\n"
+    assert "exactly one of automation_id or automation_ids" in both["error"]
+    assert batch_dry_run.mirrored is False
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_tool_batch_mirrors_each_file(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    manager = _write_automation_manager(hass, tmp_path)
+    _arm(hass)
+    hass.services.async_register("automation", "reload", AsyncMock())
+    (tmp_path / "automations.yaml").write_text("- id: a\n  actions: []\n")
+    (tmp_path / "packages").mkdir()
+    (tmp_path / "packages" / "p.yaml").write_text(
+        "automation:\n  - id: b\n    actions: []\n"
+    )
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("before", "after"))
+    )
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        result = await DeleteAutomationTool(manager)._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_automation", tool_args={"automation_ids": ["a", "b"]}
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    assert [call.kwargs["path"] for call in mirror_write.await_args_list] == [
+        "automations.yaml",
+        "packages/p.yaml",
+    ]
+    assert len(result["mirror"]) == 2
+    assert all(entry["mirrored"] for entry in result["mirror"])
 
 
 @pytest.mark.asyncio

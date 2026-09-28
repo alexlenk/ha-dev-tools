@@ -887,3 +887,65 @@ async def test_write_automation_splices_inside_a_package_file(
     )
 
     assert result.content_after == package.replace("alias: Old", "alias: New")
+
+
+# --- Batch delete (issue #66) ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_automations_batch_across_files(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Issue #66: many automations in one call - each file written once with
+    only its targets' lines removed, one reload for the whole batch."""
+    _write(tmp_path, "automations.yaml", _HAND_FORMATTED)
+    package = (
+        "automation:\n"
+        "  - id: pkg_a\n"
+        "    actions: []\n"
+        "  - id: pkg_keep\n"
+        "    actions: []\n"
+    )
+    _write(tmp_path, "packages/p.yaml", package)
+
+    results = await automation_manager.delete_automations(["target", "pkg_a", "last"])
+
+    by_file = {r.location.file_path: r for r in results}
+    assert by_file["automations.yaml"].content_after == (
+        _HAND_FORMATTED.replace(
+            "- id: target   # keep me\n  alias: Old\n  triggers: []\n  actions: []\n",
+            "",
+        ).replace(
+            "# last one\n- id: last\n  alias: Last\n  actions: []\n", "# last one\n"
+        )
+    )
+    assert by_file["packages/p.yaml"].content_after == (
+        "automation:\n  - id: pkg_keep\n    actions: []\n"
+    )
+    assert (tmp_path / "packages/p.yaml").read_text() == by_file[
+        "packages/p.yaml"
+    ].content_after
+    mock_reload_service.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_automations_batch_is_all_or_nothing(
+    automation_manager, tmp_path, mock_reload_service
+):
+    _write(tmp_path, "automations.yaml", _HAND_FORMATTED)
+    _write(tmp_path, "packages/p.yaml", "automation:\n  - id: pkg\n    actions: []\n")
+
+    with pytest.raises(AutomationNotFoundError):
+        await automation_manager.delete_automations(["target", "nope"])
+    with pytest.raises(ValueError, match="more than once"):
+        await automation_manager.delete_automations(["target", "target"])
+    with pytest.raises(ValueError, match="No automation ids"):
+        await automation_manager.delete_automations([])
+    with pytest.raises(ValueError, match="expected_hash is one file's hash"):
+        await automation_manager.delete_automations(
+            ["target", "pkg"], expected_hash="abc"
+        )
+
+    # Nothing was written or reloaded by any refused batch.
+    assert (tmp_path / "automations.yaml").read_text() == _HAND_FORMATTED
+    mock_reload_service.assert_not_called()

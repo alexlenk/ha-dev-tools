@@ -1252,14 +1252,18 @@ class DeleteAutomationTool(WriteGatedTool):
         "Delete an automation by id, resolving which file actually defines "
         "it (default file or a package) first - refuses to guess if the id "
         "isn't found or is defined in more than one file, rather than "
-        "silently no-oping or deleting the wrong one. Always reloads "
-        "automations afterward - never requires a restart. Pass "
-        "expected_hash (from get_file_metadata or a prior read) to detect "
-        "concurrent edits."
+        "silently no-oping or deleting the wrong one. To delete several at "
+        "once, pass automation_ids (a list) instead of automation_id: one "
+        "confirmation for the batch, every id checked before anything is "
+        "deleted (one bad id refuses the whole batch), each file written "
+        "once. Always reloads automations afterward - never requires a "
+        "restart. Pass expected_hash (from get_file_metadata or a prior "
+        "read) to detect concurrent edits (single-file deletes only)."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
-            vol.Required("automation_id"): str,
+            vol.Optional("automation_id"): str,
+            vol.Optional("automation_ids"): [str],
             vol.Optional("expected_hash"): str,
         }
     )
@@ -1268,6 +1272,16 @@ class DeleteAutomationTool(WriteGatedTool):
         """Init with the AutomationManager backing this tool."""
         self._manager = automation_manager
 
+    @staticmethod
+    def _ids(args: dict[str, Any]) -> list[str]:
+        """The ids to delete - exactly one of automation_id/automation_ids."""
+        single, batch = args.get("automation_id"), args.get("automation_ids")
+        if single is not None and batch is None:
+            return [single]
+        if batch is not None and single is None:
+            return list(batch)
+        raise ValueError("Pass exactly one of automation_id or automation_ids")
+
     @override
     async def _write(
         self,
@@ -1275,27 +1289,48 @@ class DeleteAutomationTool(WriteGatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Delete the automation from its correct file and reload."""
+        """Delete the automation(s) from their correct file(s) and reload."""
         args = tool_input.tool_args
         try:
-            result = await self._manager.delete_automation(
-                args["automation_id"],
-                expected_hash=args.get("expected_hash"),
+            ids = self._ids(args)
+            results = await self._manager.delete_automations(
+                ids, expected_hash=args.get("expected_hash")
             )
         except (AutomationNotFoundError, DuplicateAutomationIdError, ValueError) as exc:
             return _tool_error(exc)
-        response: JsonObjectType = {
-            "deleted": True,
-            "file_path": result.location.file_path,
-            "is_package": result.location.is_package,
+        if args.get("automation_id") is not None:
+            (result,) = results
+            response: JsonObjectType = {
+                "deleted": True,
+                "file_path": result.location.file_path,
+                "is_package": result.location.is_package,
+            }
+            return await _mirror_file_write(
+                hass,
+                response,
+                file_path=result.location.file_path,
+                content_before=result.content_before,
+                content_after=result.content_after,
+            )
+        response = {
+            "deleted": cast(JsonValueType, ids),
+            "files": [
+                {"file_path": r.location.file_path, "is_package": r.location.is_package}
+                for r in results
+            ],
         }
-        return await _mirror_file_write(
-            hass,
-            response,
-            file_path=result.location.file_path,
-            content_before=result.content_before,
-            content_after=result.content_after,
-        )
+        if mirror.is_mirror_enabled(hass):
+            mirrored = []
+            for result in results:
+                mirror_result = await mirror.mirror_write(
+                    hass,
+                    path=result.location.file_path,
+                    content_before=result.content_before,
+                    content_after=result.content_after,
+                )
+                mirrored.append(_mirror_result_payload(mirror_result))
+            response["mirror"] = cast(JsonValueType, mirrored)
+        return response
 
     @override
     async def _dry_run_mirror(
@@ -1306,8 +1341,14 @@ class DeleteAutomationTool(WriteGatedTool):
     ) -> mirror.MirrorResult | None:
         """Compute this call's would-be (post-delete) content and mirror it
         to a proposed/automation-<id> branch, same pattern as
-        WriteAutomationTool's identical hook."""
+        WriteAutomationTool's identical hook. A batch spans possibly several
+        files and ids, so it has no single proposed branch - not mirrored."""
         args = tool_input.tool_args
+        if args.get("automation_id") is None:
+            return mirror.MirrorResult(
+                mirrored=False,
+                reason="Dry-run mirroring covers single deletes (automation_id) only.",
+            )
         try:
             result = await self._manager.delete_automation(
                 args["automation_id"],

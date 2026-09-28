@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.12] - 2026-09-28
+
+### Added
+- `delete_automation` can delete several automations in one call (issue #66). Pass `automation_ids` (a list) instead of `automation_id`: one confirmation covers the batch, instead of a propose/confirm pair per automation. Every id is resolved before anything is written, so an unknown, ambiguous or repeated id refuses the whole batch rather than applying part of it. Each affected file is written once, with only the removed automations' lines taken out, and automations reload once. When mirroring is on, each file gets its own mirror commit. `expected_hash` is accepted only when every id is in the same file. No new tool.
+
 ## [2.20.11] - 2026-09-28
 
 ### Added
