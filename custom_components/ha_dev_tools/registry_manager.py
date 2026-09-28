@@ -228,7 +228,9 @@ def plan_updates(
     return plans
 
 
-def _device_snapshot(device: dr.DeviceEntry) -> dict[str, Any]:
+def _device_snapshot(device: Any) -> dict[str, Any]:
+    # Any: current HA's registry also returns a ChildDeviceEntry, a type
+    # the minimum supported HA doesn't have; both have these fields.
     return {
         "device_id": device.id,
         "name": device.name,
