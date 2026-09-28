@@ -111,6 +111,7 @@ from custom_components.ha_dev_tools.llm_api import (
     WriteEnergyConfigTool,
     WriteGatedTool,
     WriteScriptTool,
+    _one_or_many,
 )
 from custom_components.ha_dev_tools.log_manager import LogManager
 from custom_components.ha_dev_tools.mirror import MirrorResult
@@ -4588,3 +4589,239 @@ async def test_delete_template_entity_tool_dry_run_mirrors_to_proposed_branch(
     # Nothing live actually changed:
     raw = (tmp_path / "packages/emhas.yaml").read_text()
     assert "gone" in raw
+
+
+# --- Batch deletes for helpers, derived sensors, template entities (#66) -----
+
+
+def test_one_or_many_rules():
+    assert _one_or_many({"x": "a"}, "x", "xs") == ["a"]
+    assert _one_or_many({"xs": ["a", "b"]}, "x", "xs") == ["a", "b"]
+    for args, message in (
+        ({}, "exactly one of x or xs"),
+        ({"x": "a", "xs": ["a"]}, "exactly one of x or xs"),
+        ({"xs": []}, "xs is empty"),
+        ({"xs": ["a", "a"]}, "more than once"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _one_or_many(args, "x", "xs")
+
+
+@pytest.mark.asyncio
+async def test_delete_helper_tool_batch_is_all_or_nothing(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    assert await async_setup_component(hass, "input_boolean", {})
+    one = await helper_manager.create_helper(
+        hass, admin_user, "input_boolean", {"name": "One"}
+    )
+    two = await helper_manager.create_helper(
+        hass, admin_user, "input_boolean", {"name": "Two"}
+    )
+    tool = DeleteHelperTool()
+
+    async def delete(ids):
+        with patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(return_value=None),
+        ):
+            return await tool._write(
+                hass,
+                llm.ToolInput(
+                    tool_name="delete_helper",
+                    tool_args={"domain": "input_boolean", "item_ids": ids},
+                ),
+                _llm_context(admin_user.id),
+            )
+
+    refused = await delete([one["id"], "missing"])
+    remaining = await helper_manager.list_helpers(hass, admin_user, "input_boolean")
+    assert "missing" in refused["error"] and "nothing was deleted" in refused["error"]
+    assert {item["id"] for item in remaining} == {one["id"], two["id"]}
+
+    deleted = await delete([one["id"], two["id"]])
+    assert deleted == {"deleted": [one["id"], two["id"]], "domain": "input_boolean"}
+    assert await helper_manager.list_helpers(hass, admin_user, "input_boolean") == []
+
+
+@pytest.mark.asyncio
+async def test_delete_helper_tool_batch_mirrors_all_removals_in_one_commit(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    assert await async_setup_component(hass, "input_boolean", {})
+    one = await helper_manager.create_helper(
+        hass, admin_user, "input_boolean", {"name": "One"}
+    )
+    two = await helper_manager.create_helper(
+        hass, admin_user, "input_boolean", {"name": "Two"}
+    )
+    before = json.dumps({"version": 1, "data": {"items": [one, two]}})
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api._read_storage_file",
+            AsyncMock(return_value=before),
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        await DeleteHelperTool()._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_helper",
+                tool_args={
+                    "domain": "input_boolean",
+                    "item_ids": [one["id"], two["id"]],
+                },
+            ),
+            _llm_context(admin_user.id),
+        )
+
+    mirror_write.assert_awaited_once()
+    after = json.loads(mirror_write.await_args.kwargs["content_after"])
+    assert after["data"]["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_derived_sensor_tool_batch(hass: HomeAssistant):
+    def get(hass, entry_id):
+        if entry_id == "unknown":
+            raise DerivedSensorNotFoundError(entry_id)
+        return {"entry_id": entry_id, "domain": "min_max"}
+
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.get_derived_sensor",
+            side_effect=get,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.derived_sensor_manager.delete_derived_sensor",
+            AsyncMock(
+                side_effect=lambda hass, entry_id: {
+                    "deleted": True,
+                    "entry_id": entry_id,
+                }
+            ),
+        ) as mock_delete,
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        tool = DeleteDerivedSensorTool()
+        refused = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_derived_sensor",
+                tool_args={"entry_ids": ["a", "unknown"]},
+            ),
+            _llm_context(),
+        )
+        assert refused["error_type"] == "DerivedSensorNotFoundError"
+        mock_delete.assert_not_called()
+
+        deleted = await tool._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_derived_sensor", tool_args={"entry_ids": ["a", "b"]}
+            ),
+            _llm_context(),
+        )
+
+    assert deleted["deleted"] == ["a", "b"]
+    assert [c.kwargs["path"] for c in mirror_write.await_args_list] == [
+        "derived_sensors/min_max/a.json",
+        "derived_sensors/min_max/b.json",
+    ]
+    assert len(deleted["mirror"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_template_entity_tool_batch(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    package = (
+        "template:\n"
+        "- sensor:\n"
+        "  - name: A\n"
+        "    unique_id: a\n"
+        "    state: '{{ 1 }}'\n"
+        "  - name: Keep\n"
+        "    unique_id: keep\n"
+        "    state: '{{ 2 }}'\n"
+        "- sensor:\n"
+        "  - name: B\n"
+        "    unique_id: b\n"
+        "    state: '{{ 3 }}'\n"
+    )
+    _write_package(tmp_path, "packages/emhas.yaml", package)
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+
+    def call(args):
+        return tool._write(
+            hass,
+            llm.ToolInput(tool_name="delete_template_entity", tool_args=args),
+            _llm_context(),
+        )
+
+    refused = await call({"unique_ids": ["a", "nope"]})
+    assert refused["error_type"] == "TemplateEntityNotFoundError"
+    assert (tmp_path / "packages/emhas.yaml").read_text() == package
+
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        deleted = await call({"unique_ids": ["a", "b"]})
+
+    expected = (
+        "template:\n"
+        "- sensor:\n"
+        "  - name: Keep\n"
+        "    unique_id: keep\n"
+        "    state: '{{ 2 }}'\n"
+    )
+    assert deleted["deleted"] == ["a", "b"]
+    assert deleted["files"] == ["packages/emhas.yaml"]
+    assert (tmp_path / "packages/emhas.yaml").read_text() == expected
+    # One mirror commit for the file: first delete's before, last delete's after.
+    mirror_write.assert_awaited_once()
+    assert mirror_write.await_args.kwargs["content_before"] == package
+    assert mirror_write.await_args.kwargs["content_after"] == expected
+    assert (
+        await tool._dry_run_mirror(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_template_entity", tool_args={"unique_ids": ["keep"]}
+            ),
+            _llm_context(),
+        )
+    ).mirrored is False

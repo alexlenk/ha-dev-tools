@@ -1244,6 +1244,29 @@ class WriteAutomationTool(WriteGatedTool):
         )
 
 
+def _one_or_many(args: dict[str, Any], single: str, many: str) -> list[str]:
+    """The ids a delete tool acts on (issue #66): exactly one of `single`
+    (one id) or `many` (a list of ids, each at most once)."""
+    one, several = args.get(single), args.get(many)
+    if one is not None and several is None:
+        return [one]
+    if several is not None and one is None:
+        ids = [str(item) for item in several]
+        if not ids:
+            raise ValueError(f"{many} is empty")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"{many} lists an id more than once: {ids}")
+        return ids
+    raise ValueError(f"Pass exactly one of {single} or {many}")
+
+
+_NO_BATCH_DRY_RUN_MIRROR = mirror.MirrorResult(
+    mirrored=False,
+    reason="Dry-run mirroring covers single deletes only - a batch has no "
+    "single proposed/<kind>-<id> branch.",
+)
+
+
 class DeleteAutomationTool(WriteGatedTool):
     """Layout-aware, package-safe automation delete - see docs/ARCHITECTURE.md."""
 
@@ -1272,16 +1295,6 @@ class DeleteAutomationTool(WriteGatedTool):
         """Init with the AutomationManager backing this tool."""
         self._manager = automation_manager
 
-    @staticmethod
-    def _ids(args: dict[str, Any]) -> list[str]:
-        """The ids to delete - exactly one of automation_id/automation_ids."""
-        single, batch = args.get("automation_id"), args.get("automation_ids")
-        if single is not None and batch is None:
-            return [single]
-        if batch is not None and single is None:
-            return list(batch)
-        raise ValueError("Pass exactly one of automation_id or automation_ids")
-
     @override
     async def _write(
         self,
@@ -1292,7 +1305,7 @@ class DeleteAutomationTool(WriteGatedTool):
         """Delete the automation(s) from their correct file(s) and reload."""
         args = tool_input.tool_args
         try:
-            ids = self._ids(args)
+            ids = _one_or_many(args, "automation_id", "automation_ids")
             results = await self._manager.delete_automations(
                 ids, expected_hash=args.get("expected_hash")
             )
@@ -1345,10 +1358,7 @@ class DeleteAutomationTool(WriteGatedTool):
         files and ids, so it has no single proposed branch - not mirrored."""
         args = tool_input.tool_args
         if args.get("automation_id") is None:
-            return mirror.MirrorResult(
-                mirrored=False,
-                reason="Dry-run mirroring covers single deletes (automation_id) only.",
-            )
+            return _NO_BATCH_DRY_RUN_MIRROR
         try:
             result = await self._manager.delete_automation(
                 args["automation_id"],
@@ -1520,9 +1530,18 @@ class DeleteHelperTool(WriteGatedTool):
     """Delete a helper item by id."""
 
     name = "delete_helper"
-    description = "Delete a storage-defined helper by id." + _CONFIRM_TOKEN_NOTE
+    description = (
+        "Delete a storage-defined helper by id. To delete several of the "
+        "same domain at once, pass item_ids (a list) instead of item_id: one "
+        "confirmation, and every id is checked to exist before any is "
+        "deleted."
+    ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
-        {vol.Required("domain"): _helper_domain_schema(), vol.Required("item_id"): str}
+        {
+            vol.Required("domain"): _helper_domain_schema(),
+            vol.Optional("item_id"): str,
+            vol.Optional("item_ids"): [str],
+        }
     )
 
     @override
@@ -1532,30 +1551,48 @@ class DeleteHelperTool(WriteGatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Delete the helper."""
+        """Delete the helper(s)."""
         args = tool_input.tool_args
         storage_path = f".storage/{args['domain']}"
         try:
+            ids = _one_or_many(args, "item_id", "item_ids")
             content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
-            await helper_manager.delete_helper(
-                hass, user, args["domain"], args["item_id"]
-            )
+            if len(ids) > 1 or "item_ids" in args:
+                # All-or-nothing: check every id exists before deleting any.
+                existing = {
+                    str(item.get("id"))
+                    for item in await helper_manager.list_helpers(
+                        hass, user, args["domain"]
+                    )
+                }
+                if missing := [i for i in ids if i not in existing]:
+                    raise ValueError(
+                        f"No {args['domain']} helper with id(s) {missing} - "
+                        "nothing was deleted"
+                    )
+            for item_id in ids:
+                await helper_manager.delete_helper(hass, user, args["domain"], item_id)
         except (
             UnresolvedUserError,
             InvalidHelperDomainError,
             WebSocketCommandError,
+            ValueError,
         ) as exc:
             return _tool_error(exc)
-        response: JsonObjectType = {
-            "deleted": True,
-            "domain": args["domain"],
-            "item_id": args["item_id"],
-        }
+        response: JsonObjectType = (
+            {"deleted": True, "domain": args["domain"], "item_id": args["item_id"]}
+            if "item_id" in args
+            else {"deleted": cast(JsonValueType, ids), "domain": args["domain"]}
+        )
         if mirror.is_mirror_enabled(hass):
             content_after = _reconstruct_helper_storage_json(
-                content_before, remove_id=args["item_id"]
+                content_before, remove_id=ids[0]
             )
+            for item_id in ids[1:]:
+                content_after = _reconstruct_helper_storage_json(
+                    content_after, remove_id=item_id
+                )
             mirror_result = await mirror.mirror_write(
                 hass,
                 path=storage_path,
@@ -1799,9 +1836,14 @@ class DeleteDerivedSensorTool(WriteGatedTool):
 
     name = "delete_derived_sensor"
     description = (
-        "Delete a calculated/derived sensor helper by its entry id."
+        "Delete a calculated/derived sensor helper by its entry id. To "
+        "delete several at once, pass entry_ids (a list) instead of "
+        "entry_id: one confirmation, and every id is checked to exist "
+        "before any is deleted."
     ) + _CONFIRM_TOKEN_NOTE
-    parameters = _write_schema({vol.Required("entry_id"): str})
+    parameters = _write_schema(
+        {vol.Optional("entry_id"): str, vol.Optional("entry_ids"): [str]}
+    )
 
     @override
     async def _write(
@@ -1810,29 +1852,47 @@ class DeleteDerivedSensorTool(WriteGatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Delete the derived-sensor entry."""
-        entry_id = tool_input.tool_args["entry_id"]
+        """Delete the derived-sensor entry (or entries)."""
+        args = tool_input.tool_args
         try:
-            # Only fetched when mirroring is on - same reasoning as
-            # UpdateDerivedSensorTool's identical guard.
-            before = (
-                derived_sensor_manager.get_derived_sensor(hass, entry_id)
-                if mirror.is_mirror_enabled(hass)
-                else None
+            ids = _one_or_many(args, "entry_id", "entry_ids")
+            # A batch looks every entry up before deleting any, so an
+            # unknown id refuses the whole batch; the lookups double as the
+            # mirror's "before" content. A single delete only needs them for
+            # mirroring - delete_derived_sensor reports not-found itself.
+            befores = (
+                {
+                    entry_id: derived_sensor_manager.get_derived_sensor(hass, entry_id)
+                    for entry_id in ids
+                }
+                if "entry_ids" in args or mirror.is_mirror_enabled(hass)
+                else {}
             )
-            result = await derived_sensor_manager.delete_derived_sensor(hass, entry_id)
-        except DerivedSensorNotFoundError as exc:
+            results = [
+                await derived_sensor_manager.delete_derived_sensor(hass, entry_id)
+                for entry_id in ids
+            ]
+        except (DerivedSensorNotFoundError, ValueError) as exc:
             return _tool_error(exc)
-        response: JsonObjectType = dict(result)
-        if mirror.is_mirror_enabled(hass) and before is not None:
-            mirror_result = await mirror.mirror_write(
-                hass,
-                path=_derived_sensor_mirror_path(before["domain"], entry_id),
-                content_before=json.dumps(before),
-                content_after=json.dumps({"deleted": True, "entry_id": entry_id}),
-                content_type="json",
+        response: JsonObjectType = (
+            dict(results[0])
+            if "entry_id" in args
+            else {"deleted": cast(JsonValueType, ids)}
+        )
+        if mirror.is_mirror_enabled(hass) and befores:
+            mirrored = []
+            for entry_id, before in befores.items():
+                mirror_result = await mirror.mirror_write(
+                    hass,
+                    path=_derived_sensor_mirror_path(before["domain"], entry_id),
+                    content_before=json.dumps(before),
+                    content_after=json.dumps({"deleted": True, "entry_id": entry_id}),
+                    content_type="json",
+                )
+                mirrored.append(_mirror_result_payload(mirror_result))
+            response["mirror"] = (
+                mirrored[0] if "entry_id" in args else cast(JsonValueType, mirrored)
             )
-            response["mirror"] = _mirror_result_payload(mirror_result)
         return response
 
 
@@ -2130,9 +2190,13 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         "after itself - removes the platform key if that empties it, and "
         "the whole template: block if that empties it too. Same "
         "read-only-configuration.yaml restriction as "
-        "update_template_entity."
+        "update_template_entity. To delete several at once, pass "
+        "unique_ids (a list) instead of unique_id: one confirmation, and "
+        "every id is resolved before any is deleted."
     ) + _CONFIRM_TOKEN_NOTE
-    parameters = _write_schema({vol.Required("unique_id"): str})
+    parameters = _write_schema(
+        {vol.Optional("unique_id"): str, vol.Optional("unique_ids"): [str]}
+    )
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
         """Init with the TemplateYamlManager backing this tool."""
@@ -2145,25 +2209,64 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Delete the template entity."""
+        """Delete the template entity (or entities)."""
+        args = tool_input.tool_args
         try:
-            result = await self._manager.delete_entity(
-                tool_input.tool_args["unique_id"]
-            )
-        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
+            ids = _one_or_many(args, "unique_id", "unique_ids")
+            # Resolve every id before deleting any: an unknown or duplicated
+            # unique_id refuses the whole batch. Each delete then re-resolves
+            # its own location, since earlier deletes shift indices.
+            for unique_id in ids:
+                await self._manager.find_entity(unique_id)
+            results = [
+                await self._manager.delete_entity(unique_id) for unique_id in ids
+            ]
+        except (
+            TemplateEntityNotFoundError,
+            DuplicateTemplateUniqueIdError,
+            ValueError,
+        ) as exc:
             return _tool_error(exc)
-        response: JsonObjectType = {
-            "file_path": result.location.file_path,
-            "platform": result.location.platform,
-            "reloaded": result.reloaded,
+        if "unique_id" in args:
+            (result,) = results
+            response: JsonObjectType = {
+                "file_path": result.location.file_path,
+                "platform": result.location.platform,
+                "reloaded": result.reloaded,
+            }
+            return await _mirror_file_write(
+                hass,
+                response,
+                file_path=result.location.file_path,
+                content_before=result.content_before,
+                content_after=result.content_after,
+            )
+        # One before/after pair per file: the first delete's "before" and
+        # the last delete's "after" in that file.
+        per_file: dict[str, list[str]] = {}
+        for result in results:
+            path = result.location.file_path
+            if path in per_file:
+                per_file[path][1] = result.content_after
+            else:
+                per_file[path] = [result.content_before, result.content_after]
+        response = {
+            "deleted": cast(JsonValueType, ids),
+            "files": cast(JsonValueType, sorted(per_file)),
+            "reloaded": all(result.reloaded for result in results),
         }
-        return await _mirror_file_write(
-            hass,
-            response,
-            file_path=result.location.file_path,
-            content_before=result.content_before,
-            content_after=result.content_after,
-        )
+        if mirror.is_mirror_enabled(hass):
+            mirrored = []
+            for path, (content_before, content_after) in per_file.items():
+                mirror_result = await mirror.mirror_write(
+                    hass,
+                    path=path,
+                    content_before=content_before,
+                    content_after=content_after,
+                )
+                mirrored.append(_mirror_result_payload(mirror_result))
+            response["mirror"] = cast(JsonValueType, mirrored)
+        return response
 
     @override
     async def _dry_run_mirror(
@@ -2173,7 +2276,9 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         llm_context: llm.LLMContext,
     ) -> mirror.MirrorResult | None:
         """See WriteAutomationTool's identical override - issue #35."""
-        unique_id = tool_input.tool_args["unique_id"]
+        unique_id = tool_input.tool_args.get("unique_id")
+        if unique_id is None:
+            return _NO_BATCH_DRY_RUN_MIRROR
         try:
             result = await self._manager.delete_entity(unique_id, dry_run=True)
         except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
