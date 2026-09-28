@@ -234,3 +234,53 @@ async def test_load_document_returns_none_for_missing_package_file(
     document = await rest_command_manager._load_document("packages/gone.yaml")
 
     assert document is None
+
+
+# --- shell_command: same layout, via key= (issue #100) -----------------------
+
+
+@pytest.mark.asyncio
+async def test_shell_command_get_and_list_return_command_strings(
+    rest_command_manager, tmp_path
+):
+    _write(
+        tmp_path,
+        "configuration.yaml",
+        "rest_command:\n  not_this:\n    url: http://x\n"
+        "shell_command:\n  cache_prices: 'curl -s http://x > /config/prices.json'\n",
+    )
+    _write(
+        tmp_path,
+        "packages/emhass.yaml",
+        'shell_command:\n  emhass_optim: "curl -X POST http://emhass/optim"\n',
+    )
+
+    location, command = await rest_command_manager.get_rest_command(
+        "emhass_optim", "shell_command"
+    )
+    listed = await rest_command_manager.all_rest_commands("shell_command")
+
+    assert location.file_path == "packages/emhass.yaml"
+    assert command == "curl -X POST http://emhass/optim"
+    assert {(loc.file_path, cid, cfg) for loc, cid, cfg in listed} == {
+        (
+            "configuration.yaml",
+            "cache_prices",
+            "curl -s http://x > /config/prices.json",
+        ),
+        ("packages/emhass.yaml", "emhass_optim", "curl -X POST http://emhass/optim"),
+    }
+    # The default key is still rest_command, and the two never mix.
+    assert [cid for _, cid, _ in await rest_command_manager.all_rest_commands()] == [
+        "not_this"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shell_command_missing_id_and_unknown_key(rest_command_manager, tmp_path):
+    _write(tmp_path, "configuration.yaml", "shell_command:\n  a: 'echo a'\n")
+
+    with pytest.raises(RestCommandNotFoundError, match="No shell_command with id"):
+        await rest_command_manager.get_rest_command("missing", "shell_command")
+    with pytest.raises(ValueError, match="Unsupported domain"):
+        await rest_command_manager.all_rest_commands("switch")

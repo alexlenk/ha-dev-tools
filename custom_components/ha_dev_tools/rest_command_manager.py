@@ -21,6 +21,13 @@ was needed for this).
 Read-only by design (see the issue) - no write/splice logic, no
 ruamel round-trip dumper, no confirm-token write path. A write tool would
 need its own safety review and is explicitly out of scope here.
+
+`shell_command:` (issue #100) has the same layout - an id -> value
+mapping under a top-level key, in configuration.yaml or a package - so
+every method takes the key (`COMMAND_KEYS`) rather than a second manager
+and a second pair of tools. One difference: a shell_command's value is the
+command string itself, not a mapping, so config values are returned as-is.
+Read-only there too, deliberately: it's a raw shell-execution primitive.
 """
 
 from __future__ import annotations
@@ -35,6 +42,8 @@ from ruamel.yaml import YAML
 from .file_manager import FileManager
 
 REST_COMMAND_KEY = "rest_command"
+SHELL_COMMAND_KEY = "shell_command"
+COMMAND_KEYS = (REST_COMMAND_KEY, SHELL_COMMAND_KEY)
 DEFAULT_CONFIG_FILE = "configuration.yaml"
 PACKAGES_DIR = "packages"
 
@@ -137,7 +146,9 @@ class RestCommandManager:
             return None
         return await self.hass.async_add_executor_job(_load_yaml, content)
 
-    def _rest_command_map(self, file_path: str, document: Any) -> dict | None:
+    def _rest_command_map(
+        self, file_path: str, document: Any, key: str = REST_COMMAND_KEY
+    ) -> dict | None:
         """Return the rest_command id -> config mapping within a loaded
         document, or None if it has none.
 
@@ -146,23 +157,23 @@ class RestCommandManager:
         DEFAULT_SCRIPTS_FILE case, rest_command has no "root of the file
         is the mapping" convention to special-case.
         """
-        if document is None or REST_COMMAND_KEY not in document:
+        if key not in COMMAND_KEYS:
+            raise ValueError(f"Unsupported domain '{key}' - use one of {COMMAND_KEYS}")
+        if document is None or key not in document:
             return None
-        commands = document[REST_COMMAND_KEY]
+        commands = document[key]
         if not isinstance(commands, dict):
-            raise ValueError(
-                f"{file_path}'s '{REST_COMMAND_KEY}:' key is not a mapping"
-            )
+            raise ValueError(f"{file_path}'s '{key}:' key is not a mapping")
         return commands
 
     async def find_all_locations(
-        self, rest_command_id: str
+        self, rest_command_id: str, key: str = REST_COMMAND_KEY
     ) -> list[RestCommandLocation]:
         """Find every file that defines the given rest_command id."""
         locations: list[RestCommandLocation] = []
         for file_path in await self.candidate_files():
             document = await self._load_document(file_path)
-            commands = self._rest_command_map(file_path, document)
+            commands = self._rest_command_map(file_path, document, key)
             if commands and rest_command_id in commands:
                 locations.append(
                     RestCommandLocation(
@@ -172,35 +183,37 @@ class RestCommandManager:
                 )
         return locations
 
-    async def find_rest_command(self, rest_command_id: str) -> RestCommandLocation:
+    async def find_rest_command(
+        self, rest_command_id: str, key: str = REST_COMMAND_KEY
+    ) -> RestCommandLocation:
         """Resolve exactly one location for a rest_command id.
 
         Raises RestCommandNotFoundError if it's defined nowhere, and
         DuplicateRestCommandIdError if it's defined in more than one file
         (rather than silently picking one).
         """
-        locations = await self.find_all_locations(rest_command_id)
+        locations = await self.find_all_locations(rest_command_id, key)
         if not locations:
             raise RestCommandNotFoundError(
-                f"No rest_command with id '{rest_command_id}' found"
+                f"No {key} with id '{rest_command_id}' found"
             )
         if len(locations) > 1:
             raise DuplicateRestCommandIdError(rest_command_id, locations)
         return locations[0]
 
     async def all_rest_commands(
-        self,
-    ) -> list[tuple[RestCommandLocation, str, dict[str, Any]]]:
+        self, key: str = REST_COMMAND_KEY
+    ) -> list[tuple[RestCommandLocation, str, Any]]:
         """Return every rest_command across every candidate file, for listing.
 
         Unlike get_rest_command, this doesn't resolve/refuse on duplicate
         ids - a listing needs to see every definition, duplicates
         included.
         """
-        results: list[tuple[RestCommandLocation, str, dict[str, Any]]] = []
+        results: list[tuple[RestCommandLocation, str, Any]] = []
         for file_path in await self.candidate_files():
             document = await self._load_document(file_path)
-            commands = self._rest_command_map(file_path, document)
+            commands = self._rest_command_map(file_path, document, key)
             if not commands:
                 continue
             location = RestCommandLocation(
@@ -209,18 +222,21 @@ class RestCommandManager:
             for rest_command_id, config in commands.items():
                 if isinstance(config, dict):
                     results.append((location, str(rest_command_id), dict(config)))
+                elif key == SHELL_COMMAND_KEY and isinstance(config, str):
+                    results.append((location, str(rest_command_id), config))
         return results
 
     async def get_rest_command(
-        self, rest_command_id: str
-    ) -> tuple[RestCommandLocation, dict[str, Any]]:
-        """Return the location and config dict for a rest_command id."""
-        location = await self.find_rest_command(rest_command_id)
+        self, rest_command_id: str, key: str = REST_COMMAND_KEY
+    ) -> tuple[RestCommandLocation, Any]:
+        """Return the location and config for a rest_command (or, with
+        key="shell_command", a shell_command - its value is the command
+        string itself)."""
+        location = await self.find_rest_command(rest_command_id, key)
         document = await self._load_document(location.file_path)
-        commands = self._rest_command_map(location.file_path, document) or {}
+        commands = self._rest_command_map(location.file_path, document, key) or {}
         if rest_command_id in commands:
-            return location, dict(commands[rest_command_id])
+            config = commands[rest_command_id]
+            return location, dict(config) if isinstance(config, dict) else config
         # Shouldn't happen - find_rest_command already confirmed presence.
-        raise RestCommandNotFoundError(
-            f"No rest_command with id '{rest_command_id}' found"
-        )
+        raise RestCommandNotFoundError(f"No {key} with id '{rest_command_id}' found")
