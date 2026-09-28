@@ -272,3 +272,50 @@ async def test_cleanup_tick_removes_expired_file(hass: HomeAssistant):
         assert not path.exists()
     finally:
         unsub()
+
+
+# --- arm_status (issue #63) ------------------------------------------------
+
+
+async def test_arm_status_not_armed_gives_the_arm_command(hass: HomeAssistant):
+    path = _arm_path(hass)
+    path.unlink(missing_ok=True)
+
+    status = await access_control.arm_status(hass)
+
+    assert status == {"armed": False, "arm_command": f"date +%s > {path}"}
+
+
+async def test_arm_status_reports_idle_window_when_it_ends_first(
+    hass: HomeAssistant,
+):
+    now = time.time()
+    _write_arm_file(hass, armed_at=now - 60, mtime=now - 10 * 60)
+
+    status = access_control._arm_status(access_control._arm_file_path(hass), now=now)
+
+    assert status["armed"] is True
+    assert status["minutes_left"] == 20  # 30-minute idle window, 10 used
+    assert status["expires_at"] == status["idle_expires_at"]
+    assert status["expires_at"] < status["hard_cap_expires_at"]
+
+
+async def test_arm_status_reports_hard_cap_when_it_ends_first(hass: HomeAssistant):
+    now = time.time()
+    # Armed 3h55m ago, used just now: the idle window would run 30 more
+    # minutes, but the 4-hour cap ends in 5.
+    _write_arm_file(hass, armed_at=now - (3 * 3600 + 55 * 60), mtime=now)
+
+    status = access_control._arm_status(access_control._arm_file_path(hass), now=now)
+
+    assert status["minutes_left"] == 5
+    assert status["expires_at"] == status["hard_cap_expires_at"]
+
+
+async def test_arm_status_treats_unparseable_file_as_not_armed(hass: HomeAssistant):
+    path = _arm_path(hass)
+    path.write_text("not a timestamp")
+
+    status = await access_control.arm_status(hass)
+
+    assert status["armed"] is False

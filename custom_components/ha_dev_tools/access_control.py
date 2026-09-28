@@ -54,9 +54,9 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, cast
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import llm
@@ -128,6 +128,47 @@ def _armed_error_message(path: Path) -> str | None:
         "That enables it for up to 4 hours (extended by 30 minutes on "
         "each use, idle windows beyond 30 minutes expire it)."
     )
+
+
+def _iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
+
+
+def _arm_status(path: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Synchronous arm-window status, run only via the executor - see arm_status()."""
+    now = time.time() if now is None else now
+    if _is_expired(path, now=now):
+        return {"armed": False, "arm_command": f"date +%s > {path}"}
+    idle_expires = path.stat().st_mtime + IDLE_TIMEOUT.total_seconds()
+    # _is_expired() already failed closed on an unparseable file, so a
+    # still-armed file always has a readable arm timestamp here.
+    hard_cap_expires = cast(float, _read_armed_at(path)) + MAX_SESSION.total_seconds()
+    expires = min(idle_expires, hard_cap_expires)
+    return {
+        "armed": True,
+        "expires_at": _iso(expires),
+        "minutes_left": int((expires - now) // 60),
+        "idle_expires_at": _iso(idle_expires),
+        "hard_cap_expires_at": _iso(hard_cap_expires),
+        "note": (
+            "Each successful call extends the idle window by 30 minutes, "
+            "up to the hard cap. Re-arm on the Home Assistant host before "
+            "a long batch that would outlast it."
+        ),
+    }
+
+
+async def arm_status(hass: HomeAssistant) -> dict[str, Any]:
+    """Whether dev_tools is armed, and when that expires (issue #63).
+
+    Read-only, from the same file and rules check_armed() uses, so a caller
+    can see expiry coming instead of finding out from a failed write
+    mid-batch. Exposes nothing a caller couldn't already learn: a
+    NotArmedError (returned to anyone who calls a gated tool, before the
+    admin check) already carries the arm command.
+    """
+    path = _arm_file_path(hass)
+    return await hass.async_add_executor_job(_arm_status, path)
 
 
 async def check_armed(hass: HomeAssistant) -> None:

@@ -352,7 +352,25 @@ class WriteGatedTool(GatedTool):
 
     Neither step is a simulation: propose doesn't verify the write would
     succeed (e.g. path/schema checks), only that it hasn't happened yet.
+
+    Every response also carries `arm`: how long dev_tools stays armed
+    after this call extended the idle window (issue #63), so a long batch
+    of writes sees expiry coming instead of failing partway through.
     """
+
+    @override
+    async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Run the gated call, then report the arm window it just extended."""
+        result = await super().async_call(hass, tool_input, llm_context)
+        return {
+            **result,
+            "arm": cast(JsonValueType, await access_control.arm_status(hass)),
+        }
 
     @override
     async def _run(
@@ -460,8 +478,12 @@ class DevToolsPingTool(llm.Tool):
 
     name = "dev_tools_ping"
     description = (
-        "Check that the ha_dev_tools API is registered and reachable. "
-        "Returns a static status payload; has no side effects."
+        "Check that the ha_dev_tools API is registered and reachable, and "
+        "whether dev_tools is currently armed ('arm': armed, expires_at, "
+        "minutes_left, or the command to arm it on the Home Assistant "
+        "host). The only tool that works while not armed - call it before "
+        "a long batch of writes. No side effects; doesn't extend the arm "
+        "window."
     )
     parameters = vol.Schema({})
 
@@ -472,8 +494,12 @@ class DevToolsPingTool(llm.Tool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Return a static status payload."""
-        return {"status": "ok", "domain": DOMAIN}
+        """Return a status payload, including the arm window (issue #63)."""
+        return {
+            "status": "ok",
+            "domain": DOMAIN,
+            "arm": cast(JsonValueType, await access_control.arm_status(hass)),
+        }
 
 
 class FindEntitiesTool(GatedTool):

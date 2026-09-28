@@ -121,6 +121,12 @@ from custom_components.ha_dev_tools.template_yaml_manager import TemplateYamlMan
 from custom_components.ha_dev_tools.ws_call import WebSocketCommandError
 
 
+def _without_arm(result: dict) -> dict:
+    """A tool result minus the `arm` status every write tool (and the ping)
+    now adds (issue #63) - for exact-payload asserts that predate it."""
+    return {k: v for k, v in result.items() if k != "arm"}
+
+
 def _llm_context(user_id: str | None = None) -> llm.LLMContext:
     """Build an LLMContext for calling the API, tolerant of field changes across HA versions."""
     fields = {
@@ -184,7 +190,10 @@ async def test_dev_tools_ping_tool_reachable(
     result = await DevToolsPingTool().async_call(
         hass, llm.ToolInput(tool_name="dev_tools_ping", tool_args={}), _llm_context()
     )
-    assert result == {"status": "ok", "domain": DOMAIN}
+    assert _without_arm(result) == {"status": "ok", "domain": DOMAIN}
+    # Works while not armed, and says how to arm (issue #63).
+    assert result["arm"]["armed"] is False
+    assert "arm_command" in result["arm"]
 
 
 @pytest.mark.asyncio
@@ -360,7 +369,10 @@ async def test_delete_entity_tool_confirm_flow_removes_from_registry(
         _llm_context(admin_user.id),
     )
 
-    assert result == {"deleted": True, "entity_id": "light.kitchen_light"}
+    assert _without_arm(result) == {"deleted": True, "entity_id": "light.kitchen_light"}
+    # Write tools report the arm window this call just extended (issue #63).
+    assert result["arm"]["armed"] is True
+    assert 29 <= result["arm"]["minutes_left"] <= 30
     assert entity_reg.async_get("light.kitchen_light") is None
 
 
@@ -488,7 +500,7 @@ async def test_delete_entities_tool_confirm_flow_removes_all_from_registry(
         _llm_context(admin_user.id),
     )
 
-    assert result == {
+    assert _without_arm(result) == {
         "deleted": True,
         "entity_ids": ["light.kitchen_light", "light.bedroom_light"],
     }
@@ -1398,7 +1410,7 @@ async def test_write_gated_tool_performs_write_when_dry_run_disabled(
     result = await _confirm(hass, tool, admin_user, {"foo": "bar"})
 
     assert tool.write_called is True
-    assert result == {"wrote": True}
+    assert _without_arm(result) == {"wrote": True}
 
 
 @pytest.mark.asyncio
@@ -1534,7 +1546,7 @@ async def test_write_gated_tool_token_is_single_use(
         llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
         _llm_context(admin_user.id),
     )
-    assert first == {"wrote": True}
+    assert _without_arm(first) == {"wrote": True}
     assert tool.write_called is True
 
     tool.write_called = False
@@ -2981,7 +2993,10 @@ async def test_trigger_automation_tool_confirm_flow_calls_manager(
             _llm_context(admin_user.id),
         )
 
-    assert result == {"triggered": True, "entity_id": "automation.kitchen_lights"}
+    assert _without_arm(result) == {
+        "triggered": True,
+        "entity_id": "automation.kitchen_lights",
+    }
     mock_trigger.assert_called_once_with(hass, "kitchen_id", skip_condition=True)
 
 
@@ -3024,7 +3039,10 @@ async def test_set_number_value_tool_confirm_flow_calls_manager(
             _llm_context(admin_user.id),
         )
 
-    assert result == {"entity_id": "number.battery_charge_slot", "value": 42.5}
+    assert _without_arm(result) == {
+        "entity_id": "number.battery_charge_slot",
+        "value": 42.5,
+    }
     mock_set.assert_called_once_with(hass, "number.battery_charge_slot", 42.5)
 
 
@@ -3070,7 +3088,10 @@ async def test_set_boolean_value_tool_confirm_flow_calls_manager(
             _llm_context(admin_user.id),
         )
 
-    assert result == {"entity_id": "input_boolean.vacation_mode", "state": True}
+    assert _without_arm(result) == {
+        "entity_id": "input_boolean.vacation_mode",
+        "state": True,
+    }
     mock_set.assert_called_once_with(hass, "input_boolean.vacation_mode", True)
 
 
