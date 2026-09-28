@@ -440,3 +440,31 @@ async def test_write_script_into_package_missing_script_key(
     parsed = pyyaml.safe_load((tmp_path / "packages/other_domain.yaml").read_text())
     assert parsed["script"]["brand_new"]["alias"] == "Brand new"
     assert parsed["input_boolean"]["foo"] == {}
+
+
+@pytest.mark.asyncio
+async def test_write_script_rewrites_only_the_edited_script(
+    script_manager, tmp_path, mock_reload_service
+):
+    """Issue #53: untouched scripts stay byte-identical; a new script is
+    appended after the last one."""
+    original = (
+        "wrapped:\n"
+        "  sequence:\n"
+        "    - action: notify.x\n"
+        "      data:\n"
+        "        message: A long plain message an editor wrapped\n"
+        "          onto a second line\n"
+        "target:   # keep me\n"
+        "  alias: Old\n"
+        "  sequence: []\n"
+    )
+    _write(tmp_path, "scripts.yaml", original)
+
+    edited = await script_manager.write_script(
+        "target", {"alias": "New", "sequence": []}
+    )
+    assert edited.content_after == original.replace("alias: Old", "alias: New")
+
+    added = await script_manager.write_script("added", {"sequence": []})
+    assert added.content_after == edited.content_after + "added:\n  sequence: []\n"

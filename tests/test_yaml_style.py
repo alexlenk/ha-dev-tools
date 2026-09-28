@@ -8,12 +8,19 @@ directly.
 from io import StringIO
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from custom_components.ha_dev_tools.yaml_style import (
+    append_point,
     find_misread_scalars,
+    item_span,
     merge_preserving_style,
     pyyaml_misreads,
     quote_ambiguous_scalars,
+    render_item,
+    splice,
+    spliced_or_full,
+    surgical_edit,
 )
 
 
@@ -105,3 +112,71 @@ def test_find_misread_scalars_without_line_info_and_odd_readings():
         {"path": "a[2]", "line": None, "written": "~", "ha_reads_as": None},
         {"path": "a[3]", "line": None, "written": "=", "ha_reads_as": "<load error>"},
     ]
+
+
+# --- Surgical splice helpers: every "can't splice cleanly" path (issue #53) --
+
+
+def _yaml():
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.width = 4096
+    return yaml
+
+
+def test_item_span_declines_what_it_cannot_locate_cleanly():
+    lines = ["a:\n", "  b: 1\n"]
+    doc = _load("a:\n  b: 1\n")
+    assert item_span(lines, {"plain": "dict"}, "plain") is None  # not ruamel-loaded
+    assert item_span(lines, "not a container", 0) is None
+    assert item_span(lines, doc, "missing") is None
+    # Position data that doesn't match the text (edited since it was read).
+    assert item_span(["x: 1\n"], _load("[1, 2]\n"), 1) is None  # no dash there
+    assert item_span(["    a:\n"], doc, "a") is None  # key column mismatch
+
+
+def test_append_point_needs_an_existing_item():
+    assert append_point([], CommentedSeq()) is None
+    assert append_point([], {"plain": "dict"}) is None
+    flow = _load("[a, b]\n")  # flow style: no block dash to anchor on
+    assert append_point(["[a, b]\n"], flow) is None
+
+
+def test_surgical_edit_declines_without_original_or_span_but_still_applies():
+    seq = CommentedSeq([1])
+    applied = []
+    assert (
+        surgical_edit(None, seq, 0, "replace", _yaml(), lambda: applied.append(1))
+        is None
+    )
+    assert (
+        surgical_edit("", seq, None, "append", _yaml(), lambda: applied.append(2))
+        is None
+    )
+    assert applied == [1, 2]
+
+
+def test_render_item_odd_indent_falls_back_to_shifting():
+    node = CommentedMap({"a": 1})
+    assert render_item(_yaml(), CommentedSeq([node]), 0, node, 3) == "   - a: 1\n"
+
+
+def test_splice_delete_between_blank_lines_drops_one_and_fixes_missing_newline():
+    assert splice("a\n\nb\n\nc", 2, 3, "") == "a\n\nc\n"
+    assert splice("a\nb", 1, 2, "B\n") == "a\nB\n"
+
+
+def test_spliced_or_full_keeps_the_full_dump_unless_data_is_identical():
+    load = _yaml().load
+    full = "a: 1\n"
+    assert spliced_or_full(None, full, load) == full
+    assert spliced_or_full("a: 2\n", full, load) == full  # different data
+    assert spliced_or_full("a: [\n", full, load) == full  # not even YAML
+    assert spliced_or_full("a:   1\n", full, load) == "a:   1\n"  # same data
+
+
+def test_render_item_drops_trailing_blank_lines_ruamel_attaches():
+    """The blank line after an item belongs to the item in ruamel's model -
+    re-rendering it would duplicate the blank line the splice keeps."""
+    seq = _load("- a: 1\n\n- b: 2\n")
+    assert render_item(_yaml(), seq, 0, seq[0], 0) == "- a: 1\n"

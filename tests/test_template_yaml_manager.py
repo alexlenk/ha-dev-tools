@@ -768,3 +768,88 @@ async def test_entity_in_configuration_yaml_readable_but_not_writable(
         await default_template_manager.update_entity("inline", {"name": "Changed"})
     with pytest.raises(PermissionError):
         await default_template_manager.delete_entity("inline")
+
+
+_TEMPLATE_PACKAGE = (
+    "template:\n"
+    "  - sensor:\n"
+    "      - name: Keep\n"
+    "        unique_id: keep\n"
+    "        state: >\n"
+    "          {{ 1 }}\n"
+    "      - name: Target\n"
+    "        unique_id: target\n"
+    "        state: '{{ 1 }}'   # note\n"
+    "    binary_sensor:\n"
+    "      - name: Lonely\n"
+    "        unique_id: lonely\n"
+    "        state: '{{ true }}'\n"
+    "  - sensor:\n"
+    "      - name: Solo\n"
+    "        unique_id: solo\n"
+    "        state: '{{ 2 }}'\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_template_update_and_create_touch_only_their_own_lines(
+    template_manager, tmp_path, mock_reload_service
+):
+    """Issue #53: the rest of the file stays byte-identical - including
+    this file's own 4-space list indentation, which a full re-dump
+    normalizes."""
+    _write(tmp_path, "packages/emhas.yaml", _TEMPLATE_PACKAGE)
+
+    updated = await template_manager.update_entity(
+        "target", {"name": "Target", "state": "{{ 9 }}"}
+    )
+    assert updated.content_after == _TEMPLATE_PACKAGE.replace(
+        "state: '{{ 1 }}'   # note", "state: '{{ 9 }}'   # note"
+    )
+
+    created = await template_manager.create_entity(
+        "sensor",
+        {"name": "Added", "unique_id": "added", "state": "{{ 3 }}"},
+        package="emhas.yaml",
+    )
+    assert created.content_after.startswith(updated.content_after)
+    assert created.content_after[len(updated.content_after) :] == (
+        "  - sensor:\n"
+        "    - name: Added\n"
+        "      unique_id: added\n"
+        "      state: '{{ 3 }}'\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_template_delete_removes_only_entity_platform_or_block_lines(
+    template_manager, tmp_path, mock_reload_service
+):
+    _write(tmp_path, "packages/emhas.yaml", _TEMPLATE_PACKAGE)
+
+    # One of two entities: just its lines.
+    after_entity = (await template_manager.delete_entity("target")).content_after
+    assert after_entity == _TEMPLATE_PACKAGE.replace(
+        "      - name: Target\n"
+        "        unique_id: target\n"
+        "        state: '{{ 1 }}'   # note\n",
+        "",
+    )
+    # Last entity of a platform that shares its block: the platform key.
+    after_platform = (await template_manager.delete_entity("lonely")).content_after
+    assert after_platform == after_entity.replace(
+        "    binary_sensor:\n"
+        "      - name: Lonely\n"
+        "        unique_id: lonely\n"
+        "        state: '{{ true }}'\n",
+        "",
+    )
+    # Last entity of the only platform in its block: the whole block.
+    after_block = (await template_manager.delete_entity("solo")).content_after
+    assert after_block == after_platform.replace(
+        "  - sensor:\n"
+        "      - name: Solo\n"
+        "        unique_id: solo\n"
+        "        state: '{{ 2 }}'\n",
+        "",
+    )

@@ -19,7 +19,8 @@ form, for the audit tools (issue #96).
 from __future__ import annotations
 
 import math
-from typing import Any
+from io import StringIO
+from typing import Any, cast
 
 import yaml
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
@@ -214,3 +215,181 @@ def merge_preserving_style(old: Any, new: Any) -> Any:
             return new
         return old
     return new
+
+
+# --- Surgical splicing (issue #53) ------------------------------------------
+#
+# Every write used to re-dump the whole document, and ruamel's round-trip
+# dump isn't byte-lossless: it normalizes list indentation, collapses extra
+# spaces (`mode:   single`) and re-joins plain scalars an editor wrapped
+# across lines - in items the write never touched. That made mirrored
+# proposed-branch diffs unreviewable (a one-automation edit touched 269
+# lines). These helpers instead replace only the edited item's own lines in
+# the original text; every other byte stays as it was. The caller still
+# computes the full re-dump and passes both to `spliced_or_full`, which
+# keeps the splice only if it parses to exactly the same data - anything the
+# span logic can't handle cleanly falls back to the full dump, never to
+# different data.
+
+
+def _is_skippable(line: str) -> bool:
+    """Blank or comment-only - never ends an item, never starts one."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _span_end(lines: list[str], start: int, indent: int) -> int:
+    """Line index just past an item that starts at `start` with `indent`:
+    the last content line before the next line at or left of `indent`.
+    Trailing blank/comment lines are left outside the span - ruamel
+    attaches them to the item, so they'd otherwise be re-rendered too."""
+    end = start + 1
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if _is_skippable(line):
+            continue
+        if _indent(line) <= indent:
+            break
+        end = index + 1
+    return end
+
+
+def item_span(
+    lines: list[str], container: Any, key: Any
+) -> tuple[int, int, int] | None:
+    """(start, end, indent) of one existing item's lines in the original
+    text, from ruamel's position data - or None if it can't be located
+    cleanly (then the caller's full dump is used)."""
+    if not isinstance(container, (CommentedSeq, CommentedMap)):
+        return None
+    lc = container.lc
+    try:
+        if isinstance(container, CommentedSeq):
+            line = lc.item(key)[0]
+            if not lines[line].lstrip().startswith("-"):
+                return None
+        else:
+            line = lc.key(key)[0]
+    except (KeyError, IndexError, TypeError):
+        return None
+    indent = _indent(lines[line])
+    if isinstance(container, CommentedMap) and indent != lc.key(key)[1]:
+        return None
+    return line, _span_end(lines, line, indent), indent
+
+
+def append_point(lines: list[str], container: Any) -> tuple[int, int] | None:
+    """(insert-at line, indent) just after a container's last item."""
+    if not isinstance(container, (CommentedSeq, CommentedMap)) or not container:
+        return None
+    last = (
+        len(container) - 1
+        if isinstance(container, CommentedSeq)
+        else list(container)[-1]
+    )
+    span = item_span(lines, container, last)
+    if span is None:
+        return None
+    return span[1], span[2]
+
+
+_WRAP_KEY = "__ha_dev_tools_splice__"
+
+
+def render_item(yaml: Any, container: Any, key: Any, node: Any, indent: int) -> str:
+    """One item rendered on its own at column `indent`, without the
+    trailing blank/comment lines ruamel attaches to its last value.
+
+    Rendered at its real depth - inside placeholder mappings deep enough to
+    put it at column `indent`, whose own lines are then dropped - rather than dumped at column 0 and
+    shifted right: ruamel re-aligns an inline comment to the column it was
+    read at, so a shifted dump would move every `# comment` right too.
+    Falls back to shifting for an odd indent, which the placeholders can't
+    reach with ruamel's 2-space indent.
+    """
+    item: Any = (
+        CommentedSeq([node])
+        if isinstance(container, CommentedSeq)
+        else CommentedMap({key: node})
+    )
+    depth, odd = divmod(indent, 2)
+    if isinstance(container, CommentedSeq) and indent:
+        # ruamel starts a block sequence at its parent key's own column, so
+        # a dash at column N needs the innermost placeholder key there too.
+        depth += 1
+    wrapper = item
+    if not odd:
+        for _ in range(depth):
+            wrapper = CommentedMap({_WRAP_KEY: wrapper})
+    buffer = StringIO()
+    yaml.dump(wrapper, buffer)
+    rendered = buffer.getvalue().splitlines(keepends=True)
+    if odd:
+        pad = " " * indent
+        rendered = [pad + line if line.strip() else line for line in rendered]
+    else:
+        rendered = rendered[depth:]
+    while rendered and _is_skippable(rendered[-1]):
+        rendered.pop()
+    return "".join(rendered)
+
+
+def splice(original: str, start: int, end: int, replacement: str) -> str:
+    """Replace lines [start, end) of `original` with `replacement`.
+    Deleting (empty replacement) between two blank lines drops one."""
+    lines = original.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    if not replacement and 0 < start and end < len(lines):
+        if not lines[start - 1].strip() and not lines[end].strip():
+            end += 1
+    return "".join(lines[:start]) + replacement + "".join(lines[end:])
+
+
+def spliced_or_full(spliced: str | None, full: str, load: Any) -> str:
+    """The surgical splice if it's valid YAML with exactly the same data as
+    the full re-dump, otherwise the full re-dump."""
+    if spliced is None:
+        return full
+    try:
+        same = to_json_safe(load(spliced)) == to_json_safe(load(full))
+    except Exception:  # noqa: BLE001 - any parse failure means "use full"
+        return full
+    return spliced if same else full
+
+
+def surgical_edit(
+    original: str | None,
+    container: Any,
+    key: Any,
+    op: str,
+    yaml: Any,
+    apply: Any,
+) -> str | None:
+    """Run `apply()` (the in-memory edit, always - the caller's full dump
+    needs it) and return `original` with only that item's lines changed,
+    or None when a splice isn't possible. `op` is "replace" or "delete"
+    (of `container[key]`) or "append" (`key` is the new map key; ignored
+    for a sequence). Pass the result to spliced_or_full."""
+    lines = original.splitlines(keepends=True) if original else []
+    if op == "append":
+        point = append_point(lines, container) if lines else None
+        apply()
+        if point is None:
+            return None
+        new_key = len(container) - 1 if isinstance(container, CommentedSeq) else key
+        rendered = render_item(yaml, container, new_key, container[new_key], point[1])
+        return splice(cast(str, original), point[0], point[0], rendered)
+    span = item_span(lines, container, key) if lines else None
+    apply()
+    if span is None:
+        return None
+    start, end, indent = span
+    if op == "delete":
+        return splice(cast(str, original), start, end, "")
+    rendered = render_item(yaml, container, key, container[key], indent)
+    return splice(cast(str, original), start, end, rendered)

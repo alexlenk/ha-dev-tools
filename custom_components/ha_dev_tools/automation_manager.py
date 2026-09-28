@@ -34,7 +34,12 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from .file_manager import FileManager
-from .yaml_style import merge_preserving_style, quote_ambiguous_scalars
+from .yaml_style import (
+    merge_preserving_style,
+    quote_ambiguous_scalars,
+    spliced_or_full,
+    surgical_edit,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -287,8 +292,13 @@ class AutomationManager:
         resolved would-be content is real and correct, it just never
         touches disk.
         """
-        config = dict(config)
-        config["id"] = str(automation_id)
+        # id first, the way HA's own editor writes it - a new automation is
+        # appended with its keys in this order (an existing one keeps its
+        # own order through merge_preserving_style).
+        config = {
+            "id": str(automation_id),
+            **{key: value for key, value in config.items() if key != "id"},
+        }
         config = quote_ambiguous_scalars(config)
 
         locations = await self.find_all_locations(automation_id)
@@ -322,7 +332,12 @@ class AutomationManager:
             else None
         )
         content_after = await self.hass.async_add_executor_job(
-            self._build_content, location, document, automation_id, config
+            self._build_content,
+            location,
+            document,
+            automation_id,
+            config,
+            content_before,
         )
 
         if dry_run:
@@ -375,7 +390,11 @@ class AutomationManager:
         content_before = await self.file_manager.read_file(location.file_path)
         document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after = await self.hass.async_add_executor_job(
-            self._build_delete_content, location, document, automation_id
+            self._build_delete_content,
+            location,
+            document,
+            automation_id,
+            content_before,
         )
 
         if dry_run:
@@ -409,8 +428,12 @@ class AutomationManager:
         location: AutomationLocation,
         document: Any,
         automation_id: str,
+        original: str | None = None,
     ) -> str:
         """Synchronous: remove the automation from its document, return the new file content.
+
+        Only the automation's own lines are removed from `original` where
+        possible - see yaml_style.surgical_edit (issue #53).
 
         Unlike _build_content, this never needs to handle a missing/empty
         document or automation list - find_automation() (called by every
@@ -422,6 +445,7 @@ class AutomationManager:
         """
         yaml = _new_yaml()
 
+        spliceable = True
         if location.file_path == DEFAULT_AUTOMATIONS_FILE:
             automations = document
         else:
@@ -429,17 +453,26 @@ class AutomationManager:
             if isinstance(automations, dict):
                 automations = CommentedSeq([automations])
                 document["automation"] = automations
+                spliceable = False
 
+        spliced = None
         for i, entry in enumerate(automations):
             if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
-                del automations[i]
+                spliced = surgical_edit(
+                    original if spliceable else None,
+                    automations,
+                    i,
+                    "delete",
+                    yaml,
+                    lambda i=i: automations.__delitem__(i),
+                )
                 break
 
         from io import StringIO
 
         buffer = StringIO()
         yaml.dump(document, buffer)
-        return buffer.getvalue()
+        return spliced_or_full(spliced, buffer.getvalue(), _load_yaml)
 
     def _build_content(
         self,
@@ -447,6 +480,7 @@ class AutomationManager:
         document: Any,
         automation_id: str,
         config: dict[str, Any],
+        original: str | None = None,
     ) -> str:
         """Synchronous: splice the automation into its document, return the new file content.
 
@@ -456,33 +490,54 @@ class AutomationManager:
         appended. An existing automation is patched rather than swapped
         for the caller's plain dict, so its unchanged fields keep their
         original formatting too - see yaml_style.merge_preserving_style.
+        And only that automation's own lines of `original` are rewritten
+        where possible, not the whole file - see yaml_style.surgical_edit
+        (issue #53).
         """
         yaml = _new_yaml()
 
+        spliceable = True
         if location.file_path == DEFAULT_AUTOMATIONS_FILE:
-            automations = document if isinstance(document, list) else CommentedSeq()
-            document = automations
+            if not isinstance(document, list):
+                document, spliceable = CommentedSeq(), False
+            automations = document
         else:
             if document is None:
                 document = CommentedMap()
             automations = document.get("automation")
-            if isinstance(automations, dict):
-                automations = CommentedSeq([automations])
-            elif not isinstance(automations, list):
-                automations = CommentedSeq()
+            if not isinstance(automations, list):
+                automations = (
+                    CommentedSeq([automations])
+                    if isinstance(automations, dict)
+                    else CommentedSeq()
+                )
+                spliceable = False
             document["automation"] = automations
+        source = original if spliceable else None
 
-        replaced = False
+        spliced = None
         for i, entry in enumerate(automations):
             if isinstance(entry, dict) and str(entry.get("id")) == str(automation_id):
-                automations[i] = merge_preserving_style(entry, config)
-                replaced = True
+
+                def _replace(i: int = i, entry: Any = entry) -> None:
+                    automations[i] = merge_preserving_style(entry, config)
+
+                spliced = surgical_edit(
+                    source, automations, i, "replace", yaml, _replace
+                )
                 break
-        if not replaced:
-            automations.append(config)
+        else:
+            spliced = surgical_edit(
+                source,
+                automations,
+                None,
+                "append",
+                yaml,
+                lambda: automations.append(config),
+            )
 
         from io import StringIO
 
         buffer = StringIO()
         yaml.dump(document, buffer)
-        return buffer.getvalue()
+        return spliced_or_full(spliced, buffer.getvalue(), _load_yaml)
