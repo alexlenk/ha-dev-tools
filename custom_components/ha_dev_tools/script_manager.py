@@ -34,7 +34,12 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from .file_manager import FileManager
-from .yaml_style import merge_preserving_style, quote_ambiguous_scalars
+from .yaml_style import (
+    merge_preserving_style,
+    quote_ambiguous_scalars,
+    spliced_or_full,
+    surgical_edit,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -291,7 +296,12 @@ class ScriptManager:
             else None
         )
         content_after = await self.hass.async_add_executor_job(
-            self._build_content, location, document, script_id, config
+            self._build_content,
+            location,
+            document,
+            script_id,
+            config,
+            content_before,
         )
 
         if dry_run:
@@ -329,6 +339,7 @@ class ScriptManager:
         document: Any,
         script_id: str,
         config: dict[str, Any],
+        original: str | None = None,
     ) -> str:
         """Synchronous: splice the script into its document, return the new file content.
 
@@ -336,32 +347,46 @@ class ScriptManager:
         (other scripts, comments, other domains in a package file) is
         preserved as-is - only the target script's key is set or patched. Unlike
         automation_manager's list splice, this is a plain dict-key
-        assignment, since `script:` is a mapping keyed by id.
+        assignment, since `script:` is a mapping keyed by id. Only that
+        script's own lines of `original` are rewritten where possible - see
+        yaml_style.surgical_edit (issue #53).
         """
         yaml = _new_yaml()
 
+        spliceable = True
         if location.file_path == DEFAULT_SCRIPTS_FILE:
-            scripts = document if isinstance(document, dict) else CommentedMap()
-            document = scripts
+            if not isinstance(document, dict):
+                document, spliceable = CommentedMap(), False
+            scripts = document
         else:
             if document is None:
                 document = CommentedMap()
             scripts = document.get("script")
             if not isinstance(scripts, dict):
-                scripts = CommentedMap()
+                scripts, spliceable = CommentedMap(), False
             document["script"] = scripts
+        source = original if spliceable else None
 
         # Patch an existing script in place rather than swapping it for the
         # caller's plain dict, so its unchanged fields keep their original
         # formatting - see yaml_style.merge_preserving_style (issue #92).
-        scripts[script_id] = (
-            merge_preserving_style(scripts[script_id], config)
-            if script_id in scripts
-            else config
-        )
+        if script_id in scripts:
+
+            def _replace() -> None:
+                scripts[script_id] = merge_preserving_style(scripts[script_id], config)
+
+            spliced = surgical_edit(
+                source, scripts, script_id, "replace", yaml, _replace
+            )
+        else:
+
+            def _append() -> None:
+                scripts[script_id] = config
+
+            spliced = surgical_edit(source, scripts, script_id, "append", yaml, _append)
 
         from io import StringIO
 
         buffer = StringIO()
         yaml.dump(document, buffer)
-        return buffer.getvalue()
+        return spliced_or_full(spliced, buffer.getvalue(), _load_yaml)

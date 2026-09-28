@@ -29,7 +29,7 @@ jobs:
       - name: Install newest HA test harness
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-test-common.txt --upgrade pytest-homeassistant-custom-component
+          pip install --retries 10 --timeout 60 -r requirements-test-common.txt --upgrade pytest-homeassistant-custom-component
 
       - name: Install HA component requirements from that HA's own manifests
         # The per-version files pin these by hand (read from each HA
@@ -48,7 +48,7 @@ jobs:
               print("\n".join(manifest.get("requirements", [])))
           PY
           cat component-requirements.txt
-          pip install -r component-requirements.txt
+          pip install --retries 10 --timeout 60 -r component-requirements.txt
           python -c "import homeassistant.const as c; print('Testing against HA', c.__version__)"
 
       - name: Run tests

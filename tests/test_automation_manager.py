@@ -799,3 +799,91 @@ async def test_write_automation_into_package_missing_automation_key(
     parsed = pyyaml.safe_load((tmp_path / "packages/other_domain.yaml").read_text())
     assert parsed["automation"][0]["id"] == "brand_new"
     assert parsed["input_boolean"]["foo"] == {}
+
+
+# --- Surgical splice: untouched automations stay byte-identical (issue #53) --
+
+_HAND_FORMATTED = (
+    "# hand-maintained\n"
+    "- id: wrapped\n"
+    "  alias: Wrapped\n"
+    "  actions:\n"
+    "    - action: notify.x\n"
+    "      data:\n"
+    "        message: A long plain message an editor wrapped\n"
+    "          onto a second line\n"
+    "  mode:   single\n"
+    "- id: target   # keep me\n"
+    "  alias: Old\n"
+    "  triggers: []\n"
+    "  actions: []\n"
+    "\n"
+    "# last one\n"
+    "- id: last\n"
+    "  alias: Last\n"
+    "  actions: []\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_write_automation_rewrites_only_the_edited_automation(
+    automation_manager, tmp_path, mock_reload_service
+):
+    """Issue #53: every write re-dumped the whole file, and ruamel's dump
+    re-indents lists, re-joins wrapped lines and collapses spacing in
+    automations nobody touched - a one-automation edit produced a
+    269-line diff. Now only the edited automation's lines change."""
+    _write(tmp_path, "automations.yaml", _HAND_FORMATTED)
+
+    result = await automation_manager.write_automation(
+        "target", {"alias": "New", "triggers": [], "actions": []}
+    )
+
+    assert result.content_after == _HAND_FORMATTED.replace(
+        "  alias: Old\n", "  alias: New\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_automation_appends_and_deletes_without_touching_others(
+    automation_manager, tmp_path, mock_reload_service
+):
+    _write(tmp_path, "automations.yaml", _HAND_FORMATTED)
+
+    added = await automation_manager.write_automation(
+        "brand_new", {"alias": "Brand new", "triggers": [], "actions": []}
+    )
+    assert added.content_after == _HAND_FORMATTED + (
+        "- id: brand_new\n  alias: Brand new\n  triggers: []\n  actions: []\n"
+    )
+
+    deleted = await automation_manager.delete_automation("target")
+    assert deleted.content_after == _HAND_FORMATTED.replace(
+        "- id: target   # keep me\n  alias: Old\n  triggers: []\n  actions: []\n", ""
+    ) + ("- id: brand_new\n  alias: Brand new\n  triggers: []\n  actions: []\n")
+
+
+@pytest.mark.asyncio
+async def test_write_automation_splices_inside_a_package_file(
+    automation_manager, tmp_path, mock_reload_service
+):
+    package = (
+        "homeassistant:\n"
+        "    customize: {}\n"
+        "automation:\n"
+        "  - id: target\n"
+        "    alias: Old   # note\n"
+        "    triggers: []\n"
+        "  - id: other\n"
+        "    actions:\n"
+        "        - action: light.turn_on\n"
+        "script:\n"
+        "    s: {sequence: []}\n"
+    )
+    _write(tmp_path, "packages/p.yaml", package)
+
+    result = await automation_manager.write_automation(
+        "target", {"alias": "New", "triggers": []}
+    )
+
+    assert result.content_after == package.replace("alias: Old", "alias: New")

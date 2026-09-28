@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.9] - 2026-09-28
+
+### Fixed
+- Writes no longer rewrite the whole YAML file (issue #53). Every write used to re-dump the entire document, and ruamel's dump isn't byte-for-byte faithful. It re-indents lists, re-joins long lines an editor wrapped, and collapses extra spaces (`mode:   single`), all in items the write never touched. A one-automation edit could produce a 269-line mirrored diff. Now only the edited item's own lines change. This covers `write_automation`, `delete_automation`, `write_script`, and creating, updating or deleting template entities, where a delete removes the entity, or its platform key or block when it empties them. Every other byte of the file stays as it was. As a safety net, the spliced result is only used if it parses to exactly the same data as a full re-dump; otherwise the full re-dump is written as before.
+- A new automation is now written with `id` as its first key, the way HA's own editor writes it, instead of last.
+
+### Changed
+- CI's `pip install` steps retry for longer (`--retries 10 --timeout 60`). A PyPI read timeout during install failed a CI run before any test ran.
+
 ## [2.20.8] - 2026-09-28
 
 ### Added

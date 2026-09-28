@@ -57,6 +57,8 @@ from .file_manager import FileManager
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
+    spliced_or_full,
+    surgical_edit,
     to_json_safe,
 )
 
@@ -394,7 +396,12 @@ class TemplateYamlManager:
         content_before = await self.file_manager.read_file(file_path)
         document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after, block_index = await self.hass.async_add_executor_job(
-            self._build_create_content, document, platform, config, triggers
+            self._build_create_content,
+            document,
+            platform,
+            config,
+            triggers,
+            content_before,
         )
 
         if dry_run:
@@ -450,31 +457,46 @@ class TemplateYamlManager:
         platform: str,
         config: dict[str, Any],
         triggers: list[dict[str, Any]] | None,
+        original: str | None = None,
     ) -> tuple[str, int]:
-        """Synchronous: append a new template: block, return (new file content, its index)."""
+        """Synchronous: append a new template: block, return (new file content, its index).
+
+        The block is inserted after the last existing one without
+        re-dumping the rest of the file where possible - see
+        yaml_style.surgical_edit (issue #53).
+        """
         yaml = _new_yaml()
 
+        spliceable = document is not None
         if document is None:
             document = CommentedMap()
         blocks = document.get(TEMPLATE_KEY)
-        if isinstance(blocks, dict):
-            blocks = CommentedSeq([blocks])
-        elif not isinstance(blocks, list):
-            blocks = CommentedSeq()
+        if not isinstance(blocks, list):
+            blocks = (
+                CommentedSeq([blocks]) if isinstance(blocks, dict) else CommentedSeq()
+            )
+            spliceable = False
         document[TEMPLATE_KEY] = blocks
 
         new_block: dict[str, Any] = {}
         if triggers:
             new_block["triggers"] = triggers
         new_block[platform] = [config]
-        blocks.append(new_block)
+        spliced = surgical_edit(
+            original if spliceable else None,
+            blocks,
+            None,
+            "append",
+            yaml,
+            lambda: blocks.append(new_block),
+        )
         block_index = len(blocks) - 1
 
         from io import StringIO
 
         buffer = StringIO()
         yaml.dump(document, buffer)
-        return buffer.getvalue(), block_index
+        return spliced_or_full(spliced, buffer.getvalue(), _load_yaml), block_index
 
     async def update_entity(
         self,
@@ -512,7 +534,7 @@ class TemplateYamlManager:
         content_before = await self.file_manager.read_file(location.file_path)
         document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after = await self.hass.async_add_executor_job(
-            self._build_update_content, document, location, config
+            self._build_update_content, document, location, config, content_before
         )
 
         if dry_run:
@@ -544,26 +566,35 @@ class TemplateYamlManager:
         )
 
     def _build_update_content(
-        self, document: Any, location: TemplateEntityLocation, config: dict[str, Any]
+        self,
+        document: Any,
+        location: TemplateEntityLocation,
+        config: dict[str, Any],
+        original: str | None = None,
     ) -> str:
         """Synchronous: patch one entity's config in place, return the new file content.
 
         The loaded entity is patched rather than swapped for the caller's
         plain dict, so its unchanged fields keep their original formatting -
-        see yaml_style.merge_preserving_style (issue #92).
+        see yaml_style.merge_preserving_style (issue #92). Only the entity's
+        own lines of `original` are rewritten where possible - see
+        yaml_style.surgical_edit (issue #53).
         """
         yaml = _new_yaml()
         blocks = self._template_blocks(document)
         entities = blocks[location.block_index][location.platform]
-        entities[location.entity_index] = merge_preserving_style(
-            entities[location.entity_index], config
-        )
+        index = location.entity_index
+
+        def _replace() -> None:
+            entities[index] = merge_preserving_style(entities[index], config)
+
+        spliced = surgical_edit(original, entities, index, "replace", yaml, _replace)
 
         from io import StringIO
 
         buffer = StringIO()
         yaml.dump(document, buffer)
-        return buffer.getvalue()
+        return spliced_or_full(spliced, buffer.getvalue(), _load_yaml)
 
     async def delete_entity(
         self,
@@ -588,7 +619,7 @@ class TemplateYamlManager:
         content_before = await self.file_manager.read_file(location.file_path)
         document = await self.hass.async_add_executor_job(_load_yaml, content_before)
         content_after = await self.hass.async_add_executor_job(
-            self._build_delete_content, document, location
+            self._build_delete_content, document, location, content_before
         )
 
         if dry_run:
@@ -620,23 +651,44 @@ class TemplateYamlManager:
         )
 
     def _build_delete_content(
-        self, document: Any, location: TemplateEntityLocation
+        self,
+        document: Any,
+        location: TemplateEntityLocation,
+        original: str | None = None,
     ) -> str:
-        """Synchronous: remove one entity (and empty platform/block), return new file content."""
+        """Synchronous: remove one entity (and empty platform/block), return new file content.
+
+        Only the removed lines leave `original` where possible - the
+        entity's own, or its whole platform key or block when this empties
+        it (see yaml_style.surgical_edit, issue #53).
+        """
         yaml = _new_yaml()
         blocks = self._template_blocks(document)
         block = blocks[location.block_index]
         entities = block[location.platform]
-        del entities[location.entity_index]
 
-        if not entities:
-            del block[location.platform]
+        def _delete() -> None:
+            del entities[location.entity_index]
+            if not entities:
+                del block[location.platform]
+            if not any(platform in block for platform in TEMPLATE_PLATFORMS):
+                del blocks[location.block_index]
 
-        if not any(platform in block for platform in TEMPLATE_PLATFORMS):
-            del blocks[location.block_index]
+        other_platforms = [
+            p for p in TEMPLATE_PLATFORMS if p != location.platform and p in block
+        ]
+        container: Any
+        key: Any
+        if len(entities) > 1:
+            container, key = entities, location.entity_index
+        elif other_platforms:
+            container, key = block, location.platform
+        else:
+            container, key = blocks, location.block_index
+        spliced = surgical_edit(original, container, key, "delete", yaml, _delete)
 
         from io import StringIO
 
         buffer = StringIO()
         yaml.dump(document, buffer)
-        return buffer.getvalue()
+        return spliced_or_full(spliced, buffer.getvalue(), _load_yaml)
