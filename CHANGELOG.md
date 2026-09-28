@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.5] - 2026-09-28
+
+### Added
+- `check_config` now returns `repairs`: every active Repairs issue, with the title and description the Repairs page shows (issues #88, #102). Until now the only way to see why HA rejected something was to open the Repairs page by hand. No new tool.
+- `write_automation` and `write_script` return `setup_error`: HA's own error if it refused to set up the item just written, read right after the reload (issue #102). E.g. `invalid time_pattern value at 'minutes'` for issue #101's comma list, which previously reported plain success.
+
+### Fixed
+- `check_config` reported `valid: true` for automations and scripts that HA parsed but refused to set up, e.g. `Invalid time specified: 61200` (issue #89). HA's config check doesn't fail on these; it loads them as unavailable entities and raises a Repairs issue instead. They're now listed in `setup_failures` (domain, id, entity_id, HA's error) and make `valid` false.
+
 ## [2.20.4] - 2026-09-28
 
 ### Fixed

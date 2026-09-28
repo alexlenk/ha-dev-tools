@@ -992,8 +992,14 @@ class CheckConfigTool(GatedTool):
     name = "check_config"
     description = (
         "Validate the current Home Assistant configuration (same check as "
-        "the UI's 'Check configuration' button). Always run this after "
-        "writing an automation, before assuming it's correct."
+        "the UI's 'Check configuration' button), plus what that check "
+        "misses: 'setup_failures' lists automations/scripts HA parsed but "
+        "refused to set up (e.g. an invalid trigger value), with HA's own "
+        "error - these make 'valid' false. 'repairs' lists every active "
+        "Repairs issue with the title/description the Repairs page shows. "
+        "Setup failures reflect the last reload: write_automation/"
+        "write_script reload automatically and already return their own "
+        "item's 'setup_error'."
     )
     parameters = vol.Schema({})
 
@@ -1134,6 +1140,11 @@ class WriteAutomationTool(WriteGatedTool):
         response: JsonObjectType = {
             "file_path": result.location.file_path,
             "is_package": result.location.is_package,
+            # HA's own error if it refused to set the item up after the
+            # reload - otherwise invisible until someone opens Repairs.
+            "setup_error": config_tools.setup_error(
+                hass, "automation", args["automation_id"]
+            ),
         }
         return await _mirror_file_write(
             hass,
@@ -2547,6 +2558,9 @@ class WriteScriptTool(WriteGatedTool):
         response: JsonObjectType = {
             "file_path": result.location.file_path,
             "is_package": result.location.is_package,
+            # HA's own error if it refused to set the item up after the
+            # reload - otherwise invisible until someone opens Repairs.
+            "setup_error": config_tools.setup_error(hass, "script", args["script_id"]),
         }
         return await _mirror_file_write(
             hass,

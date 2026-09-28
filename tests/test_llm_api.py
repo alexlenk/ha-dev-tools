@@ -1095,8 +1095,68 @@ async def test_write_script_tool_confirm_flow_writes_and_reloads(
     )
 
     assert result["file_path"] == "scripts.yaml"
+    assert result["setup_error"] is None
     reload_mock.assert_called_once()
     assert "new_script" in (tmp_path / "scripts.yaml").read_text()
+
+
+def _reload_raising_setup_repair(hass: HomeAssistant, domain: str, item_id: str):
+    """A stand-in `<domain>.reload` that does what HA's does for an item it
+    can't set up: create the validation_failed repair while reloading."""
+    from homeassistant.helpers import issue_registry as ir
+
+    async def _reload(call):
+        ir.async_create_issue(
+            hass,
+            domain,
+            f"{domain}.{item_id}_validation_failed_triggers",
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="validation_failed_triggers",
+            translation_placeholders={
+                "edit": f"/config/{domain}/edit/{item_id}",
+                "entity_id": f"{domain}.{item_id}",
+                "error": "invalid time_pattern value at 'minutes'. Got None",
+                "name": item_id,
+            },
+        )
+
+    hass.services.async_register(domain, "reload", _reload)
+
+
+@pytest.mark.asyncio
+async def test_write_tools_return_setup_error_from_reload(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """Issue #102: HA's refusal to set up a just-written item used to be
+    visible only on the Repairs page - the write reported plain success."""
+    automation_manager = _write_automation_manager(hass, tmp_path)
+    script_manager = _write_script_manager(hass, tmp_path)
+    _arm(hass)
+    _reload_raising_setup_repair(hass, "automation", "fault_detection")
+    _reload_raising_setup_repair(hass, "script", "broken_script")
+
+    automation = await _confirm(
+        hass,
+        WriteAutomationTool(automation_manager),
+        admin_user,
+        {
+            "automation_id": "fault_detection",
+            "config": {
+                "triggers": [{"trigger": "time_pattern", "minutes": "2,17,32,47"}],
+                "actions": [],
+            },
+        },
+    )
+    script = await _confirm(
+        hass,
+        WriteScriptTool(script_manager),
+        admin_user,
+        {"script_id": "broken_script", "config": {"sequence": []}},
+    )
+
+    assert "invalid time_pattern value" in automation["setup_error"]
+    assert "invalid time_pattern value" in script["setup_error"]
 
 
 # --- GetRestCommandTool / ListRestCommandsTool (issue #73) -------------------
