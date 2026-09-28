@@ -393,3 +393,19 @@ def surgical_edit(
         return splice(cast(str, original), start, end, "")
     rendered = render_item(yaml, container, key, container[key], indent)
     return splice(cast(str, original), start, end, rendered)
+
+
+def remove_items(original: str | None, container: Any, keys: list[Any]) -> str | None:
+    """Delete several items of one container (always, in memory) and return
+    `original` with just their lines removed, or None when any of them
+    can't be located cleanly. Pass the result to spliced_or_full."""
+    lines = original.splitlines(keepends=True) if original else []
+    spans = [item_span(lines, container, key) if lines else None for key in keys]
+    for key in sorted(keys, reverse=True):
+        del container[key]
+    if not keys or any(span is None for span in spans):
+        return None
+    text = cast(str, original)
+    for start, end, _indent in sorted(cast(list, spans), reverse=True):
+        text = splice(text, start, end, "")
+    return text
