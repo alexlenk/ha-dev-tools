@@ -655,3 +655,77 @@ async def test_read_mirrored_returns_content_or_none(hass: HomeAssistant, mirror
     with _patched(fake_session):
         assert await mirror.read_mirrored(hass, "a.yaml") == "a: 1\n"
         assert await mirror.read_mirrored(hass, "b.yaml") is None
+
+
+# --- string-level credentials in write mirroring (issue #119) ---------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "finding"),
+    [
+        (
+            'rest_command:\n  door:\n    payload: \'{"password": "hunter2"}\'\n',
+            "line 3: password",
+        ),
+        ("rest_command:\n  door:\n    url: https://u:hunter2@host/x\n", "URL"),
+        (
+            "rest_command:\n  door:\n    headers:\n"
+            "      Authorization: Bearer abcdefghijkl\n",
+            "bearer token",
+        ),
+        ("- id: a  # old password: hunter2\n  alias: A\n", "line 1: password"),
+    ],
+)
+async def test_mirror_write_skips_literals_inside_strings(
+    hass: HomeAssistant, mirror_entry, content, finding
+):
+    """The structured check only saw credential-shaped keys; these four
+    forms were pushed as-is before #119."""
+    fake_session = FakeSession([])
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass, path="packages/door.yaml", content_before=None, content_after=content
+        )
+    assert result.mirrored is False
+    assert finding in result.reason
+    assert "hunter2" not in result.reason
+    assert fake_session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_mirror_write_json_checks_strings_too(hass: HomeAssistant, mirror_entry):
+    content = '{"data": {"config": {"url": "https://u:hunter2@cam/stream"}}}'
+    with _patched(FakeSession([])):
+        result = await mirror.mirror_write(
+            hass,
+            path=".storage/lovelace",
+            content_before=None,
+            content_after=content,
+            content_type="json",
+        )
+    assert result.mirrored is False
+    assert "password in a URL" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_mirror_write_still_pushes_flags_named_like_credentials(
+    hass: HomeAssistant, mirror_entry
+):
+    """`show_token: true` is a switch, not a credential."""
+    fake_session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "main"}),
+            _FakeResponse(404),
+            _FakeResponse(201, {"content": {"sha": "s"}}),
+        ]
+    )
+    with _patched(fake_session):
+        result = await mirror.mirror_write(
+            hass,
+            path=".storage/lovelace",
+            content_before=None,
+            content_after='{"data": {"config": {"show_token": true}}}',
+            content_type="json",
+        )
+    assert result.mirrored is True
