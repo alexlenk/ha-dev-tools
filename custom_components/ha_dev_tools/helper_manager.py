@@ -6,6 +6,12 @@ no in-process access point, only WS commands. Built on `ws_call.py`'s
 verified loopback mechanism - see tests/test_ws_call.py's real
 `input_boolean` CRUD round-trip proving this actually works before this
 module was written on top of it.
+
+`person` and `area` aren't helpers, but have the same list/create/update/
+delete shape over WS, so the helper tools cover them too rather than
+adding tools (issue #117): `person` is a storage collection like the
+helpers (`person/*`, keyed `person_id`), and rooms are HA's area registry
+(`config/area_registry/*`, keyed `area_id`).
 """
 
 from __future__ import annotations
@@ -38,11 +44,20 @@ HELPER_DOMAINS = (
     "counter",
     "timer",
     "schedule",
+    "person",
+    "area",
 )
+
+# Domains whose WS commands live under another prefix than `<domain>/`.
+_COMMAND_PREFIX = {"area": "config/area_registry"}
 
 
 class InvalidHelperDomainError(Exception):
-    """Raised for a domain that isn't one of the nine known helper domains."""
+    """Raised for a domain that isn't one of HELPER_DOMAINS."""
+
+
+def _command(domain: str, action: str) -> str:
+    return f"{_COMMAND_PREFIX.get(domain, domain)}/{action}"
 
 
 def _check_domain(domain: str) -> None:
@@ -57,7 +72,17 @@ async def list_helpers(
 ) -> list[dict[str, Any]]:
     """List every storage-defined item in a helper domain."""
     _check_domain(domain)
-    return await call_ws_command(hass, user, f"{domain}/list")
+    items = await call_ws_command(hass, user, _command(domain, "list"))
+    if domain == "person":
+        # person/list returns {"storage": [...], "config": [...]}; only the
+        # storage (UI-made) persons are editable, like any helper.
+        return list(items["storage"])
+    return [_with_id(domain, item) for item in items]
+
+
+def _with_id(domain: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Areas are keyed `area_id`; give them `id` too, like every other item."""
+    return {"id": item["area_id"], **item} if domain == "area" else item
 
 
 async def create_helper(
@@ -65,7 +90,9 @@ async def create_helper(
 ) -> dict[str, Any]:
     """Create a new helper item."""
     _check_domain(domain)
-    return await call_ws_command(hass, user, f"{domain}/create", **config)
+    return _with_id(
+        domain, await call_ws_command(hass, user, _command(domain, "create"), **config)
+    )
 
 
 async def update_helper(
@@ -78,9 +105,14 @@ async def update_helper(
     # no key here is literally "timeout". It never is in practice (domain
     # names never end in "_id" = "timeout"); genuinely false positive.
     id_kwarg = {f"{domain}_id": item_id}
-    return await call_ws_command(
-        hass, user, f"{domain}/update", **id_kwarg, **config  # type: ignore[arg-type]
+    updated = await call_ws_command(
+        hass,
+        user,
+        _command(domain, "update"),
+        **id_kwarg,  # type: ignore[arg-type]
+        **config,
     )
+    return _with_id(domain, updated)
 
 
 async def delete_helper(
@@ -90,4 +122,6 @@ async def delete_helper(
     _check_domain(domain)
     # Same false positive as update_helper above.
     id_kwarg = {f"{domain}_id": item_id}
-    await call_ws_command(hass, user, f"{domain}/delete", **id_kwarg)  # type: ignore[arg-type]
+    await call_ws_command(
+        hass, user, _command(domain, "delete"), **id_kwarg  # type: ignore[arg-type]
+    )

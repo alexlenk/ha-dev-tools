@@ -79,6 +79,53 @@ async def test_helper_crud_round_trip_counter(hass: HomeAssistant, admin_user):
 
 
 @pytest.mark.asyncio
+async def test_area_crud_round_trip(hass: HomeAssistant, admin_user):
+    """Issue #117: rooms through the helper functions, via HA's own
+    config/area_registry commands; items carry `id` like every helper."""
+    assert await async_setup_component(hass, "config", {})
+
+    created = await create_helper(hass, admin_user, "area", {"name": "Garage"})
+    assert created["id"] == created["area_id"]
+
+    items = await list_helpers(hass, admin_user, "area")
+    assert {"id": created["id"], "name": "Garage"}.items() <= next(
+        item for item in items if item["id"] == created["id"]
+    ).items()
+
+    updated = await update_helper(
+        hass, admin_user, "area", created["id"], {"name": "Workshop"}
+    )
+    assert (updated["id"], updated["name"]) == (created["id"], "Workshop")
+
+    await delete_helper(hass, admin_user, "area", created["id"])
+    items_after = await list_helpers(hass, admin_user, "area")
+    assert not any(item["id"] == created["id"] for item in items_after)
+
+
+@pytest.mark.asyncio
+async def test_person_crud_round_trip_links_trackers(hass: HomeAssistant, admin_user):
+    """Issue #117: link device trackers to a UI-made person."""
+    assert await async_setup_component(hass, "person", {})
+
+    created = await create_helper(hass, admin_user, "person", {"name": "Alex"})
+    updated = await update_helper(
+        hass,
+        admin_user,
+        "person",
+        created["id"],
+        {"device_trackers": ["device_tracker.alex_iphone_wifi"]},
+    )
+    assert updated["name"] == "Alex"  # only the given fields change
+    assert updated["device_trackers"] == ["device_tracker.alex_iphone_wifi"]
+
+    items = await list_helpers(hass, admin_user, "person")
+    assert [item["id"] for item in items] == [created["id"]]
+
+    await delete_helper(hass, admin_user, "person", created["id"])
+    assert await list_helpers(hass, admin_user, "person") == []
+
+
+@pytest.mark.asyncio
 async def test_invalid_domain_rejected(hass: HomeAssistant, admin_user):
     with pytest.raises(InvalidHelperDomainError):
         await list_helpers(hass, admin_user, "not_a_helper_domain")

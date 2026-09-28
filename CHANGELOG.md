@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.22.0] - 2026-09-28
+
+### Added
+- `update_entities`: change entities and devices the way their settings dialogs in the UI do, several in one call (issue #117). The only new tool.
+  - For entities: rename the entity_id, set name, room (area), `device_class` (e.g. show a binary_sensor as a door or window), icon, disabled and hidden, and "Show as" a switch as a cover/fan/light/lock/siren/valve. "Show as" runs HA's own `switch_as_x` flow, which also hides the switch.
+  - For devices: name, room and disabled.
+  - Changes go through HA's own entity and device registry commands, so HA's own rules apply. For example, enabling an entity of a disabled device is refused, and enabling one reloads its integration after a short delay, as in the UI.
+  - Every item is checked before anything changes. An unknown entity, device or room, a taken entity_id, or a field that doesn't apply refuses the whole batch and lists every problem.
+  - Rooms are matched exactly, by name or id. A room that doesn't exist yet is created first (below).
+  - A rename doesn't change the old id where it's used, and HA itself only follows renames for a few single-source helpers. So the preview lists every reference: YAML config, storage dashboards, persons' device trackers, and helper config entries.
+  - With `update_references: true`, the writable references are rewritten: `automations.yaml`, `scripts.yaml`, `packages/`, storage dashboards and persons. Only the id token changes, so formatting and comments stay. Changed YAML is then reloaded, and anything still naming the old id is reported.
+  - Mirrored as a before/after snapshot of the changed registry entries, plus each rewritten file.
+- The helper tools now cover rooms and persons, with no new tools (issue #117):
+  - `domain: area` lists, creates, renames and deletes rooms through HA's area registry.
+  - `domain: person` does the same for UI-made persons, e.g. `update_helper` with `device_trackers` to link trackers to a person.
+  - Areas are mirrored as the area list (`areas.json`). Persons aren't mirrored: that's personal data, which is why `.storage/person` is denylisted.
+
 ## [2.21.0] - 2026-09-28
 
 ### Added
