@@ -1,0 +1,14 @@
+# Test dependencies against the MINIMUM Home Assistant version this
+# integration supports - keep in sync with hacs.json's "homeassistant".
+# The code has version-dependent branches (e.g. derived_sensor_manager's
+# serializer, which changed with HA 2026.9's move to probatio), so the
+# minimum needs its own CI run, not just the current release (issue #84).
+-r requirements-test-common.txt
+
+# conversation/manifest.json's requirements at homeassistant==2026.8.2 -
+# see requirements-test.txt for why these are needed at all.
+hassil==3.11.0
+home-assistant-intents==2026.7.30
+
+# Pins homeassistant==2026.8.2 transitively.
+pytest-homeassistant-custom-component==0.13.356

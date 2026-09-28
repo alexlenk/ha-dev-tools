@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CI now tests the current Home Assistant release (2026.9.4) as well as the minimum from `hacs.json` (2026.8.2). A nightly workflow also tests the newest HA release (issue #84). Until now only 2026.8.2 was tested, so HA 2026.9's probatio change reached users before CI noticed. The test requirements are split into `requirements-test.txt` (current HA, the default), `requirements-test-ha-min.txt` and a shared `requirements-test-common.txt`. On 2026.9 the test env also needs `voluptuous-serialize` and `gazetteer-matcher`, which HA itself no longer pulls in. No runtime changes.
+
 ## [2.20.5] - 2026-09-28
 
 ### Added

@@ -1,0 +1,60 @@
+name: Test Latest HA
+
+# Early warning for HA releases newer than the one requirements-test.txt
+# pins (issue #84). The HA 2026.9 probatio break reached users because CI
+# only ever ran against the pinned version. This runs the suite against
+# whatever pytest-homeassistant-custom-component was released most
+# recently (it pins the matching homeassistant), nightly and on demand.
+# Never runs on pushes or PRs, so it can't block merging - a red run means
+# "bump requirements-test.txt and fix what broke".
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install newest HA test harness
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test-common.txt --upgrade pytest-homeassistant-custom-component
+
+      - name: Install HA component requirements from that HA's own manifests
+        # The per-version files pin these by hand (read from each HA
+        # release's manifest.json); here there's no hand-maintained pin to
+        # go stale, so read them straight from the installed HA instead.
+        run: |
+          python - <<'PY' > component-requirements.txt
+          import json
+          from pathlib import Path
+
+          import homeassistant
+
+          components = Path(homeassistant.__file__).parent / "components"
+          for name in ("conversation", "mcp_server", "mqtt"):
+              manifest = json.loads((components / name / "manifest.json").read_text())
+              print("\n".join(manifest.get("requirements", [])))
+          PY
+          cat component-requirements.txt
+          pip install -r component-requirements.txt
+          python -c "import homeassistant.const as c; print('Testing against HA', c.__version__)"
+
+      - name: Run tests
+        run: |
+          PYTHONPATH=. pytest tests/ -v --ignore=tests/property/
+
+      - name: Run property-based tests
+        run: |
+          PYTHONPATH=. pytest tests/property/ -v --tb=short
