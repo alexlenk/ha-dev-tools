@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.22.2] - 2026-09-28
+
+### Added
+- `get_config_file` takes an optional `key`: it returns just that top-level block, e.g. `irrigation_unlimited:`, with its file and line range (issue #15). This is how an installed integration's own YAML config gets read without knowing which file holds it. With no `path`, every covered file is searched; with a `path`, only that file is. The block is found by scanning the text, so it also works in a file that no longer parses. Each block is checked for credentials on its own, so a password elsewhere in the same package no longer hides the block you asked for. A block holding a literal credential is withheld and reported with the line and key. Editing such blocks is deliberately not supported.
+
 ## [2.22.1] - 2026-09-28
 
 ### Security

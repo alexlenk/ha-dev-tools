@@ -1272,11 +1272,17 @@ class GetConfigFileTool(GatedTool):
         "check_config - to recover a broken block. A file is withheld if "
         "any line looks like a literal credential (move it to secrets.yaml "
         "with !secret); secrets.yaml itself is never returned. Without "
-        "'path', lists the files covered. Read-only."
+        "'path', lists the files covered. With 'key' (e.g. "
+        "'irrigation_unlimited'), returns just that top-level block from "
+        "every covered file that has one - or from 'path' - with its file "
+        "and lines: an integration's own YAML config, found wherever it "
+        "lives, and checked for credentials on its own rather than with "
+        "the rest of its file. Read-only."
     )
     parameters = vol.Schema(
         {
             vol.Optional("path"): str,
+            vol.Optional("key"): str,
             vol.Optional("source", default="live"): vol.In(["live", "mirror"]),
         }
     )
@@ -1294,7 +1300,7 @@ class GetConfigFileTool(GatedTool):
             return cast(
                 JsonObjectType,
                 await config_snapshot.get_config_file(
-                    hass, args.get("path"), args.get("source", "live")
+                    hass, args.get("path"), args.get("source", "live"), args.get("key")
                 ),
             )
         except config_snapshot.ConfigFileError as exc:

@@ -136,26 +136,37 @@ def _normalize(path: str) -> str:
     return path[len("config/") :] if path.startswith("config/") else path
 
 
-async def get_config_file(
-    hass: HomeAssistant, path: str | None = None, source: str = "live"
-) -> dict[str, Any]:
-    """A hand-edited config file's raw text (`source` "live" or "mirror"),
-    or with no `path`, the list of files this covers. Raises
-    ConfigFileError when the file isn't covered, missing, or holds what
-    looks like a literal credential."""
-    config_dir = hass.config.config_dir
-    files = await hass.async_add_executor_job(
-        discover_files, config_dir, _security(hass)
-    )
-    if path is None:
-        return {"files": [{"path": rel, "via": via} for rel, via in files.items()]}
-    rel_path = _normalize(path)
-    if rel_path not in files:
-        raise ConfigFileError(
-            f"'{rel_path}' isn't a hand-edited config file this tool covers "
-            "(configuration.yaml, what it !includes, packages/, "
-            "custom_templates/ - call without a path to list them)."
-        )
+def top_level_blocks(text: str, key: str) -> list[tuple[int, int, str]]:
+    """Every `key:` block at column 0 of `text`, as (first line, last line,
+    text) - found by scanning lines, not parsing, so it works on a file
+    that no longer parses. A block runs until the next line at column 0
+    other than a comment or a `- ` list item (HA's `key:` / `- item`
+    style); trailing blank and comment lines aren't part of it."""
+    lines = text.splitlines(keepends=True)
+    start_pattern = re.compile(rf"{re.escape(key)}:(?:\s|$)")
+    blocks = []
+    index = 0
+    while index < len(lines):
+        if not start_pattern.match(lines[index]):
+            index += 1
+            continue
+        end = index + 1
+        following = index + 1
+        while following < len(lines):
+            line = lines[following]
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                if not line[0].isspace() and not line.startswith("-"):
+                    break
+                end = following + 1
+            following += 1
+        blocks.append((index + 1, end, "".join(lines[index:end])))
+        index = end
+    return blocks
+
+
+async def _content(hass: HomeAssistant, rel_path: str, source: str) -> str:
+    """A covered file's text, live or from the mirror."""
     if source == "mirror":
         if not mirror.is_mirror_enabled(hass):
             raise ConfigFileError("Mirroring isn't set up - no mirrored copies.")
@@ -165,24 +176,101 @@ async def get_config_file(
             raise ConfigFileError(f"Reading the mirror failed: {exc}") from exc
         if content is None:
             raise ConfigFileError(f"The mirror has no copy of '{rel_path}' yet.")
-    else:
-        try:
-            content = await hass.async_add_executor_job(_read, config_dir, rel_path)
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ConfigFileError(f"Reading '{rel_path}' failed: {exc}") from exc
+        return content
+    try:
+        return await hass.async_add_executor_job(
+            _read, hass.config.config_dir, rel_path
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigFileError(f"Reading '{rel_path}' failed: {exc}") from exc
+
+
+def _withheld(what: str, findings: list[str]) -> str:
+    return (
+        f"{what} is withheld: it looks like it holds a literal credential "
+        f"({', '.join(findings)}). Move it to secrets.yaml (`!secret`) and "
+        "it can be read."
+    )
+
+
+async def get_config_file(
+    hass: HomeAssistant,
+    path: str | None = None,
+    source: str = "live",
+    key: str | None = None,
+) -> dict[str, Any]:
+    """A hand-edited config file's raw text (`source` "live" or "mirror"),
+    or with no `path`, the list of files this covers. With `key`, only the
+    top-level `key:` block(s) - found in `path`, or in every covered YAML
+    file - each checked for credentials on its own (issue #15). Raises
+    ConfigFileError when the file isn't covered, missing, or holds what
+    looks like a literal credential."""
+    files = await hass.async_add_executor_job(
+        discover_files, hass.config.config_dir, _security(hass)
+    )
+    rel_path = _normalize(path) if path is not None else None
+    if rel_path is not None and rel_path not in files:
+        raise ConfigFileError(
+            f"'{rel_path}' isn't a hand-edited config file this tool covers "
+            "(configuration.yaml, what it !includes, packages/, "
+            "custom_templates/ - call without a path to list them)."
+        )
+    if key is not None:
+        return await _get_blocks(hass, files, rel_path, source, key)
+    if rel_path is None:
+        return {"files": [{"path": rel, "via": via} for rel, via in files.items()]}
+    content = await _content(hass, rel_path, source)
     findings = mirror_secrets.find_file_credentials(rel_path, content)
     if findings:
-        raise ConfigFileError(
-            f"'{rel_path}' is withheld: it looks like it holds a literal "
-            f"credential ({', '.join(findings)}). Move it to secrets.yaml "
-            "(`!secret`) and the file can be read."
-        )
+        raise ConfigFileError(_withheld(f"'{rel_path}'", findings))
     return {
         "path": rel_path,
         "source": source,
         "via": files[rel_path],
         "content": content,
     }
+
+
+async def _get_blocks(
+    hass: HomeAssistant,
+    files: dict[str, str],
+    rel_path: str | None,
+    source: str,
+    key: str,
+) -> dict[str, Any]:
+    if rel_path is None and source == "mirror":
+        raise ConfigFileError(
+            "Reading a key from the mirror needs a path - pass the file "
+            "(a live read without one lists where the key is)."
+        )
+    candidates = (
+        [rel_path]
+        if rel_path is not None
+        else [path for path in files if path.endswith(_YAML_SUFFIXES)]
+    )
+    blocks: list[dict[str, Any]] = []
+    for candidate in candidates:
+        try:
+            content = await _content(hass, candidate, source)
+        except ConfigFileError:
+            if rel_path is not None:
+                raise
+            continue  # an unreadable file can't hold the block we can show
+        for first, last, text in top_level_blocks(content, key):
+            block: dict[str, Any] = {
+                "path": candidate,
+                "via": files[candidate],
+                "lines": [first, last],
+            }
+            if findings := mirror_secrets.find_file_credentials(candidate, text):
+                block["withheld"] = _withheld("This block", findings)
+            else:
+                block["content"] = text
+            blocks.append(block)
+    if not blocks:
+        where = f"'{rel_path}'" if rel_path else "any covered YAML file"
+        raise ConfigFileError(f"No top-level '{key}:' in {where}.")
+    return {"key": key, "source": source, "blocks": blocks}
 
 
 def _lock(hass: HomeAssistant) -> asyncio.Lock:

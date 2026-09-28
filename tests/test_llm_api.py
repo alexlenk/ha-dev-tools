@@ -877,7 +877,7 @@ async def test_get_config_file_tool_returns_file_or_error(hass: HomeAssistant):
             _llm_context(),
         )
     assert result == {"path": "a.yaml"}
-    mock_get.assert_called_once_with(hass, "a.yaml", "mirror")
+    mock_get.assert_called_once_with(hass, "a.yaml", "mirror", None)
 
     error = config_snapshot.ConfigFileError("withheld")
     with patch(target, AsyncMock(side_effect=error)):
