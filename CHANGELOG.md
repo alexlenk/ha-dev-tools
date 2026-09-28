@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.8] - 2026-09-28
+
+### Added
+- `shell_command:` config can now be read (issue #100). `get_rest_command` and `list_rest_commands` take an optional `domain` (`rest_command`, the default, or `shell_command`), with the same package-safe lookup across `configuration.yaml` and `packages/*.yaml`. A shell_command's config is returned as its command string. Read-only, deliberately: shell_command runs raw shell commands. The issue asked for two new tools, but `shell_command:` uses the same layout, so the existing pair covers it with no new tools.
+
 ## [2.20.7] - 2026-09-28
 
 ### Added

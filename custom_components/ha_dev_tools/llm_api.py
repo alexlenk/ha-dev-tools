@@ -62,6 +62,8 @@ from .helper_manager import (
 from .history_manager import RecorderNotAvailableError
 from .log_manager import LogFilters, LogManager
 from .rest_command_manager import (
+    COMMAND_KEYS,
+    REST_COMMAND_KEY,
     DuplicateRestCommandIdError,
     RestCommandManager,
     RestCommandNotFoundError,
@@ -2657,6 +2659,11 @@ class WriteScriptTool(WriteGatedTool):
         )
 
 
+# rest_command and shell_command share one layout, so one pair of tools
+# covers both via an optional `domain` (issue #100) - no extra tools.
+_COMMAND_DOMAIN_SCHEMA = vol.In(COMMAND_KEYS)
+
+
 class ListRestCommandsTool(GatedTool):
     """List every rest_command across configuration.yaml and packages."""
 
@@ -2666,9 +2673,11 @@ class ListRestCommandsTool(GatedTool):
         "packages/*.yaml file), each with its id, source file, and full "
         "config. Same layout-aware, package-safe file resolution as "
         "get_automation/get_script - a plain file read can silently miss "
-        "package-defined rest_commands. Read-only."
+        "package-defined rest_commands. Read-only. Pass "
+        "domain='shell_command' to list shell_command entries instead "
+        "(their config is the command string itself)."
     )
-    parameters = vol.Schema({})
+    parameters = vol.Schema({vol.Optional("domain"): _COMMAND_DOMAIN_SCHEMA})
 
     def __init__(self, rest_command_manager: RestCommandManager) -> None:
         """Init with the RestCommandManager backing this tool."""
@@ -2689,7 +2698,9 @@ class ListRestCommandsTool(GatedTool):
                 "is_package": location.is_package,
                 "config": to_json_safe(config),
             }
-            for location, rest_command_id, config in await self._manager.all_rest_commands()
+            for location, rest_command_id, config in await self._manager.all_rest_commands(
+                tool_input.tool_args.get("domain", REST_COMMAND_KEY)
+            )
         ]
         return cast(JsonObjectType, {"items": items})
 
@@ -2705,9 +2716,16 @@ class GetRestCommandTool(GatedTool):
         "read can silently miss package-defined rest_commands. Fails "
         "clearly if the id isn't found or is defined in more than one "
         "file, rather than guessing. Read-only - no write_rest_command "
-        "yet."
+        "yet. Pass domain='shell_command' to read a shell_command entry "
+        "by id instead (its config is the command string itself) - also "
+        "read-only, deliberately: shell_command runs raw shell commands."
     )
-    parameters = vol.Schema({vol.Required("rest_command_id"): str})
+    parameters = vol.Schema(
+        {
+            vol.Required("rest_command_id"): str,
+            vol.Optional("domain"): _COMMAND_DOMAIN_SCHEMA,
+        }
+    )
 
     def __init__(self, rest_command_manager: RestCommandManager) -> None:
         """Init with the RestCommandManager backing this tool."""
@@ -2723,7 +2741,8 @@ class GetRestCommandTool(GatedTool):
         """Resolve and return a rest_command's config and source file."""
         try:
             location, config = await self._manager.get_rest_command(
-                tool_input.tool_args["rest_command_id"]
+                tool_input.tool_args["rest_command_id"],
+                tool_input.tool_args.get("domain", REST_COMMAND_KEY),
             )
         except (RestCommandNotFoundError, DuplicateRestCommandIdError) as exc:
             return _tool_error(exc)

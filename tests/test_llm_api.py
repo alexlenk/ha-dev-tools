@@ -1256,6 +1256,43 @@ async def test_list_rest_commands_returns_every_command(
 
 
 @pytest.mark.asyncio
+async def test_rest_command_tools_read_shell_commands_via_domain(
+    hass: HomeAssistant, admin_user, tmp_path
+):
+    """Issue #100: shell_command is read through the existing rest_command
+    tools' optional `domain`, not a second pair of tools."""
+    manager = _rest_command_manager(hass, tmp_path)
+    _arm(hass)
+    (tmp_path / "configuration.yaml").write_text(
+        "shell_command:\n  cache_prices: 'curl -s http://x'\n"
+        "rest_command:\n  my_cmd:\n    url: http://example.com\n"
+    )
+
+    got = await GetRestCommandTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="get_rest_command",
+            tool_args={"rest_command_id": "cache_prices", "domain": "shell_command"},
+        ),
+        _llm_context(admin_user.id),
+    )
+    listed = await ListRestCommandsTool(manager).async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="list_rest_commands", tool_args={"domain": "shell_command"}
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert got["config"] == "curl -s http://x"
+    assert [item["rest_command_id"] for item in listed["items"]] == ["cache_prices"]
+    with pytest.raises(vol.Invalid):
+        GetRestCommandTool(manager).parameters(
+            {"rest_command_id": "x", "domain": "switch"}
+        )
+
+
+@pytest.mark.asyncio
 async def test_rest_command_reads_with_secret_tag_are_json_safe(
     hass: HomeAssistant, admin_user, tmp_path
 ):
