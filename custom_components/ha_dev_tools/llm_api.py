@@ -83,6 +83,7 @@ from .template_yaml_manager import (
     DuplicateTemplateUniqueIdError,
     TemplateEntityNotFoundError,
     TemplateYamlManager,
+    validate_triggers,
 )
 from .ws_call import WebSocketCommandError
 from .yaml_style import find_misread_scalars, to_json_safe
@@ -2403,6 +2404,35 @@ class GetTemplateEntityTool(GatedTool):
         }
 
 
+async def _template_entity_status(
+    hass: HomeAssistant,
+    manager: TemplateYamlManager,
+    result: Any,
+    unique_id: str,
+) -> JsonObjectType:
+    """The entity_id a written template entity came up as - or, when the
+    reload ran but it didn't come up, a warning instead of a bare
+    reloaded: true (issue #125)."""
+    block_unique_id = await hass.async_add_executor_job(
+        manager.block_unique_id, result.content_after, result.location.block_index
+    )
+    entity_id = manager.loaded_entity_id(
+        result.location.platform, unique_id, block_unique_id
+    )
+    if entity_id is not None:
+        return {"entity_id": entity_id}
+    if result.reloaded:  # not reloaded: "reloaded": false already says so
+        return {
+            "warning": (
+                "Written and reloaded, but the entity didn't come up - HA "
+                "rejected its config on reload. Check get_logs for the "
+                "template error, then fix it with update_template_entity or "
+                "remove it with delete_template_entity."
+            )
+        }
+    return {}
+
+
 class CreateTemplateEntityTool(WriteGatedTool):
     """Create a new YAML template: entity in its own new template: block."""
 
@@ -2420,14 +2450,20 @@ class CreateTemplateEntityTool(WriteGatedTool):
         "default-file fallback: configuration.yaml itself is read-only "
         "under this integration's default security policy, so new "
         "entities can only be created in a package. 'triggers' is "
-        "optional (a list of trigger dicts) for the new block."
+        "optional: a list of trigger objects (e.g. {'trigger': 'state', "
+        "'entity_id': 'sensor.x'}), not strings, making the new block "
+        "trigger-based; they're checked with HA's own trigger validation "
+        "before anything is written. If the entity doesn't come up after "
+        "the reload, the result says so in 'warning'."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("platform"): str,
             vol.Required("config"): dict,
             vol.Required("package"): str,
-            vol.Optional("triggers"): list,
+            # [dict], not a bare list: a bare list is advertised to MCP
+            # clients as an array of strings (issue #125).
+            vol.Optional("triggers"): [dict],
         }
     )
 
@@ -2462,6 +2498,11 @@ class CreateTemplateEntityTool(WriteGatedTool):
             "platform": result.location.platform,
             "reloaded": result.reloaded,
         }
+        response.update(
+            await _template_entity_status(
+                hass, self._manager, result, str(args["config"]["unique_id"])
+            )
+        )
         return await _mirror_file_write(
             hass,
             response,
@@ -2469,6 +2510,20 @@ class CreateTemplateEntityTool(WriteGatedTool):
             content_before=result.content_before,
             content_after=result.content_after,
         )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Flag triggers HA would reject before the user confirms them."""
+        try:
+            await validate_triggers(hass, tool_input.tool_args.get("triggers"))
+        except ValueError as exc:
+            return {"problems": str(exc)}
+        return {}
 
     @override
     async def _dry_run_mirror(
@@ -2551,6 +2606,12 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             "platform": result.location.platform,
             "reloaded": result.reloaded,
         }
+        # An edit HA rejects on reload drops the entity just as silently.
+        response.update(
+            await _template_entity_status(
+                hass, self._manager, result, args["unique_id"]
+            )
+        )
         return await _mirror_file_write(
             hass,
             response,
@@ -2862,9 +2923,9 @@ class WriteEnergyConfigTool(WriteGatedTool):
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
-            vol.Optional("energy_sources"): list,
-            vol.Optional("device_consumption"): list,
-            vol.Optional("device_consumption_water"): list,
+            vol.Optional("energy_sources"): [dict],
+            vol.Optional("device_consumption"): [dict],
+            vol.Optional("device_consumption_water"): [dict],
         }
     )
 

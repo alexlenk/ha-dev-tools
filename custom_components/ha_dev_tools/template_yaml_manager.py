@@ -49,7 +49,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.trigger import async_validate_trigger_config
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
@@ -128,6 +133,23 @@ class TemplateEntityLocation:
     entity_index: int
 
 
+async def validate_triggers(hass: HomeAssistant, triggers: Any) -> None:
+    """Refuse triggers HA wouldn't load, before anything is written (issue
+    #125) - checked with HA's own trigger validation, the way it checks a
+    template block's triggers when loading it. The triggers are written as
+    given; the validated form (e.g. `trigger:` normalized to `platform:`)
+    is only used for the check."""
+    if not triggers:
+        return
+    try:
+        await async_validate_trigger_config(hass, cv.TRIGGER_SCHEMA(triggers))
+    except (vol.Invalid, HomeAssistantError) as exc:
+        raise ValueError(
+            f"Invalid triggers - nothing was written: {exc}. Each trigger is "
+            "a mapping, e.g. {'trigger': 'state', 'entity_id': 'sensor.x'}."
+        ) from exc
+
+
 @dataclass(frozen=True)
 class TemplateWriteResult:
     """What a template entity write actually did - location, reload status,
@@ -174,6 +196,36 @@ class TemplateYamlManager:
         self.hass = hass
         self.file_manager = file_manager
         self._config_dir = Path(hass.config.config_dir)
+
+    def loaded_entity_id(
+        self, platform: str, unique_id: str, block_unique_id: str | None = None
+    ) -> str | None:
+        """The entity_id a template entity came up as, or None if it didn't
+        (not registered, or registered but not set up, e.g. after a
+        trigger block HA rejected on reload - issue #125). An entity in a
+        block with its own unique_id is registered as "<block>-<entity>",
+        the way HA's template integration composes it."""
+        registry_id = f"{block_unique_id}-{unique_id}" if block_unique_id else unique_id
+        entity_id = er.async_get(self.hass).async_get_entity_id(
+            platform, "template", registry_id
+        )
+        if entity_id is None or self.hass.states.get(entity_id) is None:
+            return None
+        return entity_id
+
+    @staticmethod
+    def block_unique_id(content: str, block_index: int) -> str | None:
+        """Synchronous: the unique_id of template block `block_index` in
+        `content`, if it has one."""
+        document = _load_yaml(content)
+        blocks = document.get(TEMPLATE_KEY) if isinstance(document, dict) else None
+        if isinstance(blocks, dict):
+            blocks = [blocks]
+        if not isinstance(blocks, list) or not 0 <= block_index < len(blocks):
+            return None
+        block = blocks[block_index]
+        unique_id = block.get("unique_id") if isinstance(block, dict) else None
+        return str(unique_id) if unique_id is not None else None
 
     async def _reload_template(self) -> bool:
         """Call template.reload if it's registered; report whether it ran.
@@ -382,6 +434,7 @@ class TemplateYamlManager:
         existing = await self.find_all_locations(unique_id)
         if existing:
             raise DuplicateTemplateUniqueIdError(unique_id, existing)
+        await validate_triggers(self.hass, triggers)
 
         config = quote_ambiguous_scalars(config)
         triggers = quote_ambiguous_scalars(triggers) if triggers else triggers

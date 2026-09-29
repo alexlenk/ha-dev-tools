@@ -38,6 +38,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import voluptuous as vol
+import yaml
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
@@ -4999,3 +5000,227 @@ async def test_helper_tools_never_mirror_persons(
     assert created["mirror"]["mirrored"] is False
     assert "personal data" in updated["mirror"]["reason"]
     mirror_write.assert_not_called()
+
+
+# --- create_template_entity triggers (issue #125) ---------------------------
+
+
+def test_no_tool_parameter_is_an_untyped_list():
+    """The root cause of #125: a bare `list` parameter reaches MCP clients
+    as an array of strings, so structured items arrive JSON-encoded. Every
+    list parameter of every tool must say what its items are."""
+    try:  # HA 2026.9+ converts with probatio; older HA with voluptuous_openapi
+        from probatio import to_openapi as convert
+    except ImportError:
+        from voluptuous_openapi import convert
+
+    from custom_components.ha_dev_tools import llm_api as module
+
+    def untyped(validator, path):
+        if validator is list:
+            yield path
+        elif isinstance(validator, dict):
+            for key, sub in validator.items():
+                yield from untyped(sub, f"{path}.{getattr(key, 'schema', key)}")
+        elif isinstance(validator, list) and validator:
+            yield from untyped(validator[0], f"{path}[]")
+        elif isinstance(validator, vol.Schema):
+            yield from untyped(validator.schema, path)
+        elif isinstance(validator, vol.All):
+            for sub in validator.validators:
+                yield from untyped(sub, path)
+
+    tools = [
+        cls
+        for cls in vars(module).values()
+        if isinstance(cls, type)
+        and issubclass(cls, llm.Tool)
+        and cls.__module__ == module.__name__
+        and isinstance(getattr(cls, "name", None), str)
+        and isinstance(getattr(cls, "parameters", None), vol.Schema)
+    ]
+    assert len(tools) > 40
+    assert [path for cls in tools for path in untyped(cls.parameters, cls.name)] == []
+    # ... and the ones #125 fixed are advertised as arrays of objects.
+    for cls, keys in (
+        (CreateTemplateEntityTool, ["triggers"]),
+        (
+            module.WriteEnergyConfigTool,
+            ["energy_sources", "device_consumption", "device_consumption_water"],
+        ),
+    ):
+        properties = convert(cls.parameters)["properties"]
+        for key in keys:
+            assert properties[key]["items"]["type"] == "object", key
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_refuses_invalid_triggers_before_writing(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+
+    for triggers, expected in (
+        # "expected a dictionary" / "expected a mapping", by HA version
+        (['{"trigger": "state", "entity_id": "sensor.x"}'], "expected a "),
+        ([{"trigger": "nope"}], "Invalid trigger 'nope'"),
+        ([{"entity_id": "sensor.x"}], "required key not provided"),
+    ):
+        args = {
+            "platform": "sensor",
+            "config": {"name": "PV", "unique_id": "pv", "state": "{{ 1 }}"},
+            "package": "energy.yaml",
+            "triggers": triggers,
+        }
+        preview = await tool._preview_context(
+            hass,
+            llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+            _llm_context(),
+        )
+        assert expected in preview["problems"]
+        result = await tool._write(
+            hass,
+            llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+            _llm_context(),
+        )
+        assert result["error_type"] == "ValueError"
+        assert "nothing was written" in result["error"]
+        assert (tmp_path / "packages/energy.yaml").read_text() == "template: []\n"
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_writes_trigger_objects_as_given(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+    args = {
+        "platform": "sensor",
+        "config": {"name": "PV", "unique_id": "pv", "state": "{{ 1 }}"},
+        "package": "energy.yaml",
+        "triggers": [
+            {"trigger": "state", "entity_id": "sensor.deye_total_pv"},
+            {"trigger": "homeassistant", "event": "start"},
+        ],
+    }
+    assert (
+        await tool._preview_context(
+            hass,
+            llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+            _llm_context(),
+        )
+        == {}
+    )
+    result = await tool._write(
+        hass,
+        llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+        _llm_context(),
+    )
+
+    written = yaml.safe_load((tmp_path / "packages/energy.yaml").read_text())
+    assert written["template"][0]["triggers"] == args["triggers"]
+    # The reload is mocked here, so the entity never comes up: flagged.
+    assert "didn't come up" in result["warning"]
+    assert "entity_id" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_reports_the_entity_that_came_up(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy.yaml", "template: []\n")
+    er.async_get(hass).async_get_or_create(
+        "sensor", "template", "pv", suggested_object_id="pv"
+    )
+    hass.states.async_set("sensor.pv", "1")
+    result = await CreateTemplateEntityTool(template_yaml_manager)._write(
+        hass,
+        llm.ToolInput(
+            tool_name="create_template_entity",
+            tool_args={
+                "platform": "sensor",
+                "config": {"name": "PV", "unique_id": "pv", "state": "{{ 1 }}"},
+                "package": "energy.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+    assert result["entity_id"] == "sensor.pv"
+    assert "warning" not in result
+
+
+@pytest.mark.asyncio
+async def test_update_template_entity_reports_whether_the_entity_came_back(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    """An edit HA rejects on reload drops the entity as silently as a bad
+    create did (#125). In a block with its own unique_id, the registry id is
+    "<block>-<entity>" - the check must not warn falsely there."""
+    _write_package(
+        tmp_path,
+        "packages/energy.yaml",
+        "template:\n"
+        "  - unique_id: energy\n"
+        "    triggers:\n"
+        "      - trigger: homeassistant\n"
+        "        event: start\n"
+        "    sensor:\n"
+        "      - name: PV\n"
+        "        unique_id: pv\n"
+        '        state: "{{ 1 }}"\n',
+    )
+    tool = UpdateTemplateEntityTool(template_yaml_manager)
+    args = {"unique_id": "pv", "config": {"name": "PV", "state": "{{ 2 }}"}}
+
+    missing = await tool._write(
+        hass,
+        llm.ToolInput(tool_name="update_template_entity", tool_args=args),
+        _llm_context(),
+    )
+    assert "didn't come up" in missing["warning"]
+
+    er.async_get(hass).async_get_or_create(
+        "sensor", "template", "energy-pv", suggested_object_id="pv"
+    )
+    hass.states.async_set("sensor.pv", "2")
+    loaded = await tool._write(
+        hass,
+        llm.ToolInput(tool_name="update_template_entity", tool_args=args),
+        _llm_context(),
+    )
+    assert loaded["entity_id"] == "sensor.pv"
+    assert "warning" not in loaded
+
+
+def test_block_unique_id_reads_the_written_block():
+    from custom_components.ha_dev_tools.template_yaml_manager import (
+        TemplateYamlManager,
+    )
+
+    read = TemplateYamlManager.block_unique_id
+    assert read("template:\n  - unique_id: a\n    sensor: []\n", 0) == "a"
+    assert read("template:\n  unique_id: 7\n  sensor: []\n", 0) == "7"
+    assert read("template:\n  - sensor: []\n", 0) is None
+    assert read("template:\n  - sensor: []\n", 3) is None
+    assert read("template:\n  - just a string\n", 0) is None
+    assert read("sensor: []\n", 0) is None
+    assert read("", 0) is None
+
+
+@pytest.mark.asyncio
+async def test_template_entity_status_without_a_reload(
+    hass: HomeAssistant, template_yaml_manager
+):
+    """No reload ran (e.g. the template integration isn't loaded): no
+    warning - the result's reloaded: false already says it."""
+    from types import SimpleNamespace
+
+    from custom_components.ha_dev_tools.llm_api import _template_entity_status
+
+    result = SimpleNamespace(
+        content_after="template:\n  - sensor: []\n",
+        location=SimpleNamespace(block_index=0, platform="sensor"),
+        reloaded=False,
+    )
+    assert await _template_entity_status(hass, template_yaml_manager, result, "x") == {}
