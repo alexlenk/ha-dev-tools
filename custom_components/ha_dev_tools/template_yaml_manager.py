@@ -197,16 +197,35 @@ class TemplateYamlManager:
         self.file_manager = file_manager
         self._config_dir = Path(hass.config.config_dir)
 
-    def loaded_entity_id(self, platform: str, unique_id: str) -> str | None:
+    def loaded_entity_id(
+        self, platform: str, unique_id: str, block_unique_id: str | None = None
+    ) -> str | None:
         """The entity_id a template entity came up as, or None if it didn't
         (not registered, or registered but not set up, e.g. after a
-        trigger block HA rejected on reload - issue #125)."""
+        trigger block HA rejected on reload - issue #125). An entity in a
+        block with its own unique_id is registered as "<block>-<entity>",
+        the way HA's template integration composes it."""
+        registry_id = f"{block_unique_id}-{unique_id}" if block_unique_id else unique_id
         entity_id = er.async_get(self.hass).async_get_entity_id(
-            platform, "template", unique_id
+            platform, "template", registry_id
         )
         if entity_id is None or self.hass.states.get(entity_id) is None:
             return None
         return entity_id
+
+    @staticmethod
+    def block_unique_id(content: str, block_index: int) -> str | None:
+        """Synchronous: the unique_id of template block `block_index` in
+        `content`, if it has one."""
+        document = _load_yaml(content)
+        blocks = document.get(TEMPLATE_KEY) if isinstance(document, dict) else None
+        if isinstance(blocks, dict):
+            blocks = [blocks]
+        if not isinstance(blocks, list) or not 0 <= block_index < len(blocks):
+            return None
+        block = blocks[block_index]
+        unique_id = block.get("unique_id") if isinstance(block, dict) else None
+        return str(unique_id) if unique_id is not None else None
 
     async def _reload_template(self) -> bool:
         """Call template.reload if it's registered; report whether it ran.

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Triggers are checked with HA's own trigger validation before anything is written, in the preview, the dry-run and the write. A string, an unknown trigger type or a missing `trigger` key refuses the call and leaves the file unchanged.
   - Valid triggers are written exactly as given.
   - After the reload, the result reports the new `entity_id`, or a `warning` if the entity didn't come up.
+- `update_template_entity` gets the same check: an edit HA rejects on reload used to drop the entity just as silently. The check also handles an entity in a block with its own `unique_id`, which HA registers as `<block>-<entity>`, so it doesn't warn falsely there.
 - `write_energy_config`'s `energy_sources`, `device_consumption` and `device_consumption_water` had the same untyped-list declaration and were shown to clients as lists of strings. They're now lists of objects as well.
 
 ## [2.23.0] - 2026-09-29

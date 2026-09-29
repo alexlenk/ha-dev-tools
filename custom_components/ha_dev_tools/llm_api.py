@@ -2404,6 +2404,35 @@ class GetTemplateEntityTool(GatedTool):
         }
 
 
+async def _template_entity_status(
+    hass: HomeAssistant,
+    manager: TemplateYamlManager,
+    result: Any,
+    unique_id: str,
+) -> JsonObjectType:
+    """The entity_id a written template entity came up as - or, when the
+    reload ran but it didn't come up, a warning instead of a bare
+    reloaded: true (issue #125)."""
+    block_unique_id = await hass.async_add_executor_job(
+        manager.block_unique_id, result.content_after, result.location.block_index
+    )
+    entity_id = manager.loaded_entity_id(
+        result.location.platform, unique_id, block_unique_id
+    )
+    if entity_id is not None:
+        return {"entity_id": entity_id}
+    if result.reloaded:  # not reloaded: "reloaded": false already says so
+        return {
+            "warning": (
+                "Written and reloaded, but the entity didn't come up - HA "
+                "rejected its config on reload. Check get_logs for the "
+                "template error, then fix it with update_template_entity or "
+                "remove it with delete_template_entity."
+            )
+        }
+    return {}
+
+
 class CreateTemplateEntityTool(WriteGatedTool):
     """Create a new YAML template: entity in its own new template: block."""
 
@@ -2469,18 +2498,11 @@ class CreateTemplateEntityTool(WriteGatedTool):
             "platform": result.location.platform,
             "reloaded": result.reloaded,
         }
-        entity_id = self._manager.loaded_entity_id(
-            args["platform"], str(args["config"]["unique_id"])
-        )
-        if entity_id is not None:
-            response["entity_id"] = entity_id
-        elif result.reloaded:
-            response["warning"] = (
-                "Written and reloaded, but the entity didn't come up - HA "
-                "rejected its config on reload. Check get_logs for the "
-                "template error, then fix it with update_template_entity or "
-                "remove it with delete_template_entity."
+        response.update(
+            await _template_entity_status(
+                hass, self._manager, result, str(args["config"]["unique_id"])
             )
+        )
         return await _mirror_file_write(
             hass,
             response,
@@ -2584,6 +2606,12 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             "platform": result.location.platform,
             "reloaded": result.reloaded,
         }
+        # An edit HA rejects on reload drops the entity just as silently.
+        response.update(
+            await _template_entity_status(
+                hass, self._manager, result, args["unique_id"]
+            )
+        )
         return await _mirror_file_write(
             hass,
             response,
