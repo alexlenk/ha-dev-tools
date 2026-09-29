@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.1] - 2026-09-29
+
+### Fixed
+- `create_template_entity` wrote `triggers` into the YAML as quoted strings, producing a trigger block HA silently rejected (issue #125). The parameter was declared as an untyped list, which MCP clients are shown as a list of strings, so trigger objects arrived JSON-encoded. The entity then never came up, while the tool still reported `reloaded: true`.
+  - `triggers` is now declared as a list of objects.
+  - Triggers are checked with HA's own trigger validation before anything is written, in the preview, the dry-run and the write. A string, an unknown trigger type or a missing `trigger` key refuses the call and leaves the file unchanged.
+  - Valid triggers are written exactly as given.
+  - After the reload, the result reports the new `entity_id`, or a `warning` if the entity didn't come up.
+- `write_energy_config`'s `energy_sources`, `device_consumption` and `device_consumption_water` had the same untyped-list declaration and were shown to clients as lists of strings. They're now lists of objects as well.
+
 ## [2.23.0] - 2026-09-29
 
 ### Added

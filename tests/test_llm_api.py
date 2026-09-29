@@ -38,6 +38,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import voluptuous as vol
+import yaml
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
@@ -4999,3 +5000,124 @@ async def test_helper_tools_never_mirror_persons(
     assert created["mirror"]["mirrored"] is False
     assert "personal data" in updated["mirror"]["reason"]
     mirror_write.assert_not_called()
+
+
+# --- create_template_entity triggers (issue #125) ---------------------------
+
+
+def test_list_parameters_are_advertised_as_objects():
+    """The root cause of #125: a bare `list` parameter reaches MCP clients
+    as an array of strings, so trigger objects arrived JSON-encoded."""
+    try:  # HA 2026.9+ converts with probatio; older HA with voluptuous_openapi
+        from probatio import to_openapi as convert
+    except ImportError:
+        from voluptuous_openapi import convert
+
+    from custom_components.ha_dev_tools.llm_api import WriteEnergyConfigTool
+
+    for schema, keys in (
+        (CreateTemplateEntityTool(None).parameters, ["triggers"]),
+        (
+            WriteEnergyConfigTool().parameters,
+            ["energy_sources", "device_consumption", "device_consumption_water"],
+        ),
+    ):
+        properties = convert(schema)["properties"]
+        for key in keys:
+            assert properties[key]["items"]["type"] == "object", key
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_refuses_invalid_triggers_before_writing(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+
+    for triggers, expected in (
+        # "expected a dictionary" / "expected a mapping", by HA version
+        (['{"trigger": "state", "entity_id": "sensor.x"}'], "expected a "),
+        ([{"trigger": "nope"}], "Invalid trigger 'nope'"),
+        ([{"entity_id": "sensor.x"}], "required key not provided"),
+    ):
+        args = {
+            "platform": "sensor",
+            "config": {"name": "PV", "unique_id": "pv", "state": "{{ 1 }}"},
+            "package": "energy.yaml",
+            "triggers": triggers,
+        }
+        preview = await tool._preview_context(
+            hass,
+            llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+            _llm_context(),
+        )
+        assert expected in preview["problems"]
+        result = await tool._write(
+            hass,
+            llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+            _llm_context(),
+        )
+        assert result["error_type"] == "ValueError"
+        assert "nothing was written" in result["error"]
+        assert (tmp_path / "packages/energy.yaml").read_text() == "template: []\n"
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_writes_trigger_objects_as_given(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy.yaml", "template: []\n")
+    tool = CreateTemplateEntityTool(template_yaml_manager)
+    args = {
+        "platform": "sensor",
+        "config": {"name": "PV", "unique_id": "pv", "state": "{{ 1 }}"},
+        "package": "energy.yaml",
+        "triggers": [
+            {"trigger": "state", "entity_id": "sensor.deye_total_pv"},
+            {"trigger": "homeassistant", "event": "start"},
+        ],
+    }
+    assert (
+        await tool._preview_context(
+            hass,
+            llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+            _llm_context(),
+        )
+        == {}
+    )
+    result = await tool._write(
+        hass,
+        llm.ToolInput(tool_name="create_template_entity", tool_args=args),
+        _llm_context(),
+    )
+
+    written = yaml.safe_load((tmp_path / "packages/energy.yaml").read_text())
+    assert written["template"][0]["triggers"] == args["triggers"]
+    # The reload is mocked here, so the entity never comes up: flagged.
+    assert "didn't come up" in result["warning"]
+    assert "entity_id" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_template_entity_reports_the_entity_that_came_up(
+    hass: HomeAssistant, setup_integration_with_entry, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy.yaml", "template: []\n")
+    er.async_get(hass).async_get_or_create(
+        "sensor", "template", "pv", suggested_object_id="pv"
+    )
+    hass.states.async_set("sensor.pv", "1")
+    result = await CreateTemplateEntityTool(template_yaml_manager)._write(
+        hass,
+        llm.ToolInput(
+            tool_name="create_template_entity",
+            tool_args={
+                "platform": "sensor",
+                "config": {"name": "PV", "unique_id": "pv", "state": "{{ 1 }}"},
+                "package": "energy.yaml",
+            },
+        ),
+        _llm_context(),
+    )
+    assert result["entity_id"] == "sensor.pv"
+    assert "warning" not in result
