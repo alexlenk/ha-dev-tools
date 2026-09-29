@@ -39,6 +39,7 @@ from . import (
     references,
     registry_manager,
     service_call_manager,
+    statistics_manager,
     supervisor_manager,
     template_manager,
     write_confirmation,
@@ -1091,6 +1092,118 @@ class GetEntityHistoryTool(GatedTool):
                 end_time=end_time,
                 significant_changes_only=args.get("significant_changes_only", True),
                 limit=args.get("limit", 200),
+            )
+        except (RecorderNotAvailableError, ValueError) as exc:
+            return _tool_error(exc)
+
+
+class ListStatisticsTool(GatedTool):
+    """The recorder's long-term statistics - see statistics_manager.py."""
+
+    name = "list_statistics"
+    description = (
+        "List the recorder's long-term statistics - what the Energy dashboard "
+        "and long-term graphs run on, kept indefinitely, also for entities "
+        "deleted long ago and for external statistics that were never "
+        "entities (e.g. 'tibber:energy_consumption_<home_id>'). Each has its "
+        "source, unit, has_sum/has_mean, has_entity (false: the entity is "
+        "gone - an orphan; null: an external statistic), first_period/"
+        "last_period (last_period shows whether it's still fed) and the "
+        "issues HA's own validation reports for it (Developer Tools > "
+        "Statistics' 'Fix issue' list). Filter by search (id or name), "
+        "statistic_type (sum/mean), source, unit, orphaned_only, "
+        "issues_only. Read-only."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("search"): str,
+            vol.Optional("statistic_type"): vol.In(["sum", "mean"]),
+            vol.Optional("source"): str,
+            vol.Optional("unit"): str,
+            vol.Optional("orphaned_only", default=False): bool,
+            vol.Optional("issues_only", default=False): bool,
+            vol.Optional(
+                "limit", default=statistics_manager.DEFAULT_LIST_LIMIT
+            ): vol.All(int, vol.Range(min=1, max=2000)),
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List statistics."""
+        try:
+            return cast(
+                JsonObjectType,
+                await statistics_manager.list_statistics(hass, **tool_input.tool_args),
+            )
+        except RecorderNotAvailableError as exc:
+            return _tool_error(exc)
+
+
+class GetStatisticsTool(GatedTool):
+    """Rows of one or more long-term statistics - see statistics_manager.py."""
+
+    name = "get_statistics"
+    description = (
+        "Read long-term statistics rows (list_statistics finds the ids) "
+        "between start_time and end_time (ISO 8601; end defaults to now), "
+        "per period (5minute, hour, day, week, month - 5minute only covers "
+        "the recorder's short retention). types picks the columns (sum, "
+        "state, change, mean, min, max, last_reset; all by default); units "
+        "converts, e.g. {'energy': 'kWh'}. Rows come oldest first, at most "
+        "'limit' per id: a cut series has next_start_time to continue from. "
+        "Use it to check a history migration (continuous sum, no spikes) or "
+        "whether a source still gets data. Every requested id is in the "
+        "result; known=false means the recorder has no such statistic. "
+        "Read-only."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("statistic_ids"): vol.All([str], vol.Length(min=1)),
+            vol.Required("start_time"): str,
+            vol.Optional("end_time"): str,
+            vol.Optional("period", default="hour"): vol.In(statistics_manager.PERIODS),
+            vol.Optional("types"): [vol.In(statistics_manager.TYPES)],
+            vol.Optional("units"): {str: str},
+            vol.Optional(
+                "limit", default=statistics_manager.DEFAULT_ROW_LIMIT
+            ): vol.All(int, vol.Range(min=1, max=10000)),
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Fetch statistics rows."""
+        args = tool_input.tool_args
+        try:
+            return cast(
+                JsonObjectType,
+                await statistics_manager.get_statistics(
+                    hass,
+                    _require(args, "statistic_ids"),
+                    start_time=_parse_datetime(
+                        _require(args, "start_time"), field="start_time"
+                    ),
+                    end_time=(
+                        _parse_datetime(args["end_time"], field="end_time")
+                        if args.get("end_time")
+                        else None
+                    ),
+                    period=args.get("period", "hour"),
+                    types=args.get("types"),
+                    units=args.get("units"),
+                    limit=args.get("limit", statistics_manager.DEFAULT_ROW_LIMIT),
+                ),
             )
         except (RecorderNotAvailableError, ValueError) as exc:
             return _tool_error(exc)
@@ -3242,6 +3355,8 @@ class DevToolsAPI(llm.API):
                 GetLogsTool(self.log_manager),
                 GetEntityHistoryTool(),
                 GetLogbookTool(),
+                ListStatisticsTool(),
+                GetStatisticsTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),
                 CheckConfigTool(),

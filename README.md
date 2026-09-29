@@ -228,6 +228,7 @@ matters for setup, covered below.
 | `get_logs` | Tail/filter/search the core Home Assistant log |
 | `get_entity_history` | Recorder-backed state history for one or more entities over a time range |
 | `get_logbook` | Recorder-backed, humanized logbook entries (automations/scripts triggering, notable state changes) over a time range |
+| `list_statistics` / `get_statistics` | The recorder's long-term statistics - what the Energy dashboard runs on, kept even for long-deleted entities and for external sources (e.g. Tibber). `list_statistics` shows each one's source, unit, whether its entity still exists (orphans), its first/last period (is it still fed?) and HA's own validation issues; `get_statistics` reads the rows, oldest first and paged. Read-only |
 | `list_addons` / `get_addon_logs` | Supervisor add-on info and logs (Home Assistant OS/Supervised only) |
 | `list_mqtt_topics` | Read-only, time-bounded snapshot of a topic filter - the only way to discover a retained MQTT message's existence, since MQTT itself has no "list retained" query. Useful for tracing a "ghost" entity (live state, no registry entry - `delete_entity` can't touch these) back to the topic keeping it alive. Never publishes anything; requires the `mqtt` integration to be configured |
 
