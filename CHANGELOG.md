@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-09-29
+
+### Added
+- `list_statistics` and `get_statistics`: read-only access to the recorder's long-term statistics (issue #123). The Energy dashboard and long-term graphs run on these, and HA keeps them indefinitely, also for entities deleted long ago and for external statistics that were never entities (e.g. `tibber:energy_consumption_<home_id>`). Previously they could only be looked up by hand in Developer Tools → Statistics.
+  - `list_statistics` gives each statistic's source, unit and sum/mean, plus:
+    - `has_entity`: `false` means an orphan whose entity is gone; `null` means an external statistic.
+    - `first_period` / `last_period`: shows whether a source is still fed, before calling two Energy sources duplicates.
+    - `issues`: the problems HA's own validation reports for it (the "Fix issue" list, e.g. no longer recorded, units changed). This is folded in rather than added as a separate tool.
+    - Filters: `search`, `statistic_type`, `source`, `unit`, `orphaned_only`, `issues_only`.
+  - `get_statistics` reads rows for one or more ids by period (5minute to month), with a choice of columns and unit conversion. Rows come oldest first, up to a limit per id. A cut series returns `next_start_time` to continue from, so a year of hourly data can be read in pages, e.g. to check a history migration for a continuous `sum`. An unknown id is reported as `known: false` rather than silently empty.
+  - Both use the recorder's own query functions. Importing, adjusting or clearing statistics is deliberately not offered.
+
 ## [2.22.2] - 2026-09-28
 
 ### Added
