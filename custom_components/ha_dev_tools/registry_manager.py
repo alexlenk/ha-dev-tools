@@ -23,17 +23,20 @@ room; a room that doesn't exist yet is created first with create_helper
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.auth.models import User
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant, split_entity_id, valid_entity_id
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import category_registry as cr
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import label_registry as lr
 
 from . import entity_manager
 from .derived_sensor_manager import _drive_flow
+from .helper_manager import CATEGORY_SCOPES
 from .ws_call import call_ws_command
 
 # The types the UI's "Show as" offers for a switch (switch_as_x).
@@ -47,8 +50,13 @@ ENTITY_FIELDS = (
     "disabled",
     "hidden",
     "show_as",
+    "labels",
+    "add_labels",
+    "remove_labels",
+    "categories",
 )
-DEVICE_FIELDS = ("name", "area", "disabled")
+DEVICE_FIELDS = ("name", "area", "disabled", "labels", "add_labels", "remove_labels")
+_LABEL_KEYS = ("labels", "add_labels", "remove_labels")
 
 
 class RegistryUpdateError(Exception):
@@ -89,6 +97,144 @@ def _is_wrapped(hass: HomeAssistant, entity_id: str) -> bool:
     )
 
 
+def _resolve_label(label_reg: lr.LabelRegistry, label: str) -> str | None:
+    """A label id for a label id or an exact (case-insensitive) name."""
+    if label_reg.async_get_label(label) is not None:
+        return label
+    wanted = label.casefold()
+    for entry in label_reg.async_list_labels():
+        if entry.name.casefold() == wanted:
+            return entry.label_id
+    return None
+
+
+def _label_names(label_reg: lr.LabelRegistry, label_ids: Any) -> list[str]:
+    return sorted(
+        entry.name if (entry := label_reg.async_get_label(label_id)) else label_id
+        for label_id in label_ids
+    )
+
+
+def _resolve_category(
+    category_reg: cr.CategoryRegistry, scope: str, category: str
+) -> str | None:
+    """A category id in `scope` for its id or exact (case-insensitive) name."""
+    if category_reg.async_get_category(scope=scope, category_id=category):
+        return category
+    wanted = category.casefold()
+    for entry in category_reg.async_list_categories(scope=scope):
+        if entry.name.casefold() == wanted:
+            return entry.category_id
+    return None
+
+
+def _category_name(
+    category_reg: cr.CategoryRegistry, scope: str, category_id: str | None
+) -> str | None:
+    if category_id is None:
+        return None
+    entry = category_reg.async_get_category(scope=scope, category_id=category_id)
+    return entry.name if entry else category_id
+
+
+def _plan_labels(
+    label_reg: lr.LabelRegistry,
+    fields: dict[str, Any],
+    current_ids: Any,
+    plan: PlannedUpdate,
+    where: str,
+    problems: list[str],
+) -> None:
+    """`labels` sets the whole set; `add_labels`/`remove_labels` change it."""
+    given = [key for key in _LABEL_KEYS if key in fields]
+    if not given:
+        return
+    if "labels" in given and len(given) > 1:
+        problems.append(
+            f"{where}: 'labels' replaces the whole set - use it alone, or "
+            "add_labels/remove_labels"
+        )
+        return
+    resolved: dict[str, set[str]] = {}
+    for key in given:
+        values = fields[key]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            problems.append(f"{where}: {key} must be a list of label names or ids")
+            return
+        unknown = [v for v in values if _resolve_label(label_reg, v) is None]
+        if unknown:
+            names = sorted(entry.name for entry in label_reg.async_list_labels())
+            problems.append(
+                f"{where}: no label {', '.join(repr(v) for v in unknown)} "
+                f"(labels: {', '.join(names) or 'none yet'}) - create it with "
+                "create_helper, domain 'label'"
+            )
+            return
+        resolved[key] = {cast(str, _resolve_label(label_reg, v)) for v in values}
+    current = set(current_ids)
+    new = resolved.get("labels", current)
+    new = (new | resolved.get("add_labels", set())) - resolved.get(
+        "remove_labels", set()
+    )
+    plan.ws_changes["labels"] = sorted(new)
+    if new != current:
+        plan.changes["labels"] = {
+            "from": _label_names(label_reg, current),
+            "to": _label_names(label_reg, new),
+        }
+
+
+def _plan_categories(
+    category_reg: cr.CategoryRegistry,
+    value: Any,
+    current: dict[str, str],
+    plan: PlannedUpdate,
+    where: str,
+    problems: list[str],
+) -> None:
+    """{scope: category name or id, or null to clear} - only those scopes change."""
+    if not isinstance(value, dict) or not value:
+        problems.append(
+            f"{where}: categories is {{scope: category}}, scope one of "
+            f"{', '.join(CATEGORY_SCOPES)}"
+        )
+        return
+    wanted: dict[str, str | None] = {}
+    for scope, category in value.items():
+        if scope not in CATEGORY_SCOPES:
+            problems.append(
+                f"{where}: no category scope '{scope}' (one of "
+                f"{', '.join(CATEGORY_SCOPES)})"
+            )
+            return
+        if category is None:
+            wanted[scope] = None
+            continue
+        category_id = _resolve_category(category_reg, scope, str(category))
+        if category_id is None:
+            names = sorted(
+                entry.name for entry in category_reg.async_list_categories(scope=scope)
+            )
+            problems.append(
+                f"{where}: no {scope} category '{category}' (categories: "
+                f"{', '.join(names) or 'none yet'}) - create it with "
+                "create_helper, domain 'category'"
+            )
+            return
+        wanted[scope] = category_id
+    plan.ws_changes["categories"] = wanted
+    changed = {
+        scope: {
+            "from": _category_name(category_reg, scope, current.get(scope)),
+            "to": _category_name(category_reg, scope, category_id),
+        }
+        for scope, category_id in wanted.items()
+        if current.get(scope) != category_id
+    }
+    if changed:
+        plan.changes["categories"] = changed
+
+
 def plan_updates(
     hass: HomeAssistant, items: list[dict[str, Any]]
 ) -> list[PlannedUpdate]:
@@ -97,6 +243,8 @@ def plan_updates(
     entity_reg = er.async_get(hass)
     device_reg = dr.async_get(hass)
     area_reg = ar.async_get(hass)
+    label_reg = lr.async_get(hass)
+    category_reg = cr.async_get(hass)
     problems: list[str] = []
     plans: list[PlannedUpdate] = []
     seen: set[str] = set()
@@ -146,6 +294,8 @@ def plan_updates(
                 "hidden": entry.hidden_by is not None,
                 "show_as": None,
             }
+            current_labels: Any = entry.labels
+            current_categories: dict[str, str] = dict(entry.categories)
         else:
             device = device_reg.async_get(target)
             if device is None:
@@ -156,8 +306,26 @@ def plan_updates(
                 "area": _room_name(area_reg, device.area_id),
                 "disabled": device.disabled_by is not None,
             }
+            current_labels = device.labels
+            current_categories = {}
+
+        before = len(problems)
+        _plan_labels(label_reg, fields, current_labels, plan, where, problems)
+        if "categories" in fields:
+            _plan_categories(
+                category_reg,
+                fields["categories"],
+                current_categories,
+                plan,
+                where,
+                problems,
+            )
+        if len(problems) > before:
+            continue
 
         for key, value in fields.items():
+            if key in _LABEL_KEYS or key == "categories":
+                continue
             if key == "area":
                 area_id = (
                     None if value in (None, "") else _resolve_room(area_reg, value)

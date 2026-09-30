@@ -7,11 +7,12 @@ verified loopback mechanism - see tests/test_ws_call.py's real
 `input_boolean` CRUD round-trip proving this actually works before this
 module was written on top of it.
 
-`person` and `area` aren't helpers, but have the same list/create/update/
-delete shape over WS, so the helper tools cover them too rather than
-adding tools (issue #117): `person` is a storage collection like the
-helpers (`person/*`, keyed `person_id`), and rooms are HA's area registry
-(`config/area_registry/*`, keyed `area_id`).
+`person`, `area`, `label` and `category` aren't helpers, but have the
+same list/create/update/delete shape over WS, so the helper tools cover
+them too rather than adding tools (issues #117, #128): `person` is a
+storage collection like the helpers (`person/*`, keyed `person_id`);
+rooms, labels and categories are HA's area, label and category registries
+(`config/<x>_registry/*`, keyed `<x>_id`; categories also by scope).
 """
 
 from __future__ import annotations
@@ -46,10 +47,22 @@ HELPER_DOMAINS = (
     "schedule",
     "person",
     "area",
+    "label",
+    "category",
 )
 
 # Domains whose WS commands live under another prefix than `<domain>/`.
-_COMMAND_PREFIX = {"area": "config/area_registry"}
+_COMMAND_PREFIX = {
+    "area": "config/area_registry",
+    "label": "config/label_registry",
+    "category": "config/category_registry",
+}
+# Registries keyed `<domain>_id` rather than `id` (issues #117, #128).
+_ID_KEY = {"area": "area_id", "label": "label_id", "category": "category_id"}
+# The scopes HA's own UI files categories under (the Automations, Scripts,
+# Scenes and Helpers pages). A category belongs to exactly one scope, so
+# its id here is "<scope>/<category_id>" - everything update and delete need.
+CATEGORY_SCOPES = ("automation", "script", "scene", "helpers")
 
 
 class InvalidHelperDomainError(Exception):
@@ -67,11 +80,46 @@ def _check_domain(domain: str) -> None:
         )
 
 
+def _item_kwargs(domain: str, item_id: str) -> dict[str, Any]:
+    """The WS arguments naming one item: `<domain>_id`, and for a category
+    its scope, split from the "<scope>/<category_id>" id."""
+    if domain != "category":
+        return {f"{domain}_id": item_id}
+    scope, _, category_id = item_id.partition("/")
+    if not category_id or scope not in CATEGORY_SCOPES:
+        raise ValueError(
+            f"A category id is '<scope>/<category_id>' with scope one of "
+            f"{CATEGORY_SCOPES} (as list_helpers returns it), not '{item_id}'"
+        )
+    return {"scope": scope, "category_id": category_id}
+
+
+def _with_id(
+    domain: str, item: dict[str, Any], scope: str | None = None
+) -> dict[str, Any]:
+    """Registry items get `id` too, like every other item here - for a
+    category "<scope>/<category_id>", with its scope."""
+    key = _ID_KEY.get(domain)
+    if key is None:
+        return item
+    if domain == "category":
+        return {"id": f"{scope}/{item[key]}", "scope": scope, **item}
+    return {"id": item[key], **item}
+
+
 async def list_helpers(
     hass: HomeAssistant, user: User, domain: str
 ) -> list[dict[str, Any]]:
     """List every storage-defined item in a helper domain."""
     _check_domain(domain)
+    if domain == "category":
+        return [
+            _with_id(domain, item, scope)
+            for scope in CATEGORY_SCOPES
+            for item in await call_ws_command(
+                hass, user, _command(domain, "list"), scope=scope
+            )
+        ]
     items = await call_ws_command(hass, user, _command(domain, "list"))
     if domain == "person":
         # person/list returns {"storage": [...], "config": [...]}; only the
@@ -80,19 +128,17 @@ async def list_helpers(
     return [_with_id(domain, item) for item in items]
 
 
-def _with_id(domain: str, item: dict[str, Any]) -> dict[str, Any]:
-    """Areas are keyed `area_id`; give them `id` too, like every other item."""
-    return {"id": item["area_id"], **item} if domain == "area" else item
-
-
 async def create_helper(
     hass: HomeAssistant, user: User, domain: str, config: dict[str, Any]
 ) -> dict[str, Any]:
     """Create a new helper item."""
     _check_domain(domain)
-    return _with_id(
-        domain, await call_ws_command(hass, user, _command(domain, "create"), **config)
-    )
+    if domain == "category" and config.get("scope") not in CATEGORY_SCOPES:
+        raise ValueError(
+            f"A category needs 'scope' in config, one of {CATEGORY_SCOPES}"
+        )
+    created = await call_ws_command(hass, user, _command(domain, "create"), **config)
+    return _with_id(domain, created, config.get("scope"))
 
 
 async def update_helper(
@@ -100,19 +146,10 @@ async def update_helper(
 ) -> dict[str, Any]:
     """Update an existing helper item by id."""
     _check_domain(domain)
-    # mypy flags **{...: item_id} (a dict[str, str]) as possibly colliding
-    # with call_ws_command's keyword-only `timeout: float` - it can't prove
-    # no key here is literally "timeout". It never is in practice (domain
-    # names never end in "_id" = "timeout"); genuinely false positive.
-    id_kwarg = {f"{domain}_id": item_id}
-    updated = await call_ws_command(
-        hass,
-        user,
-        _command(domain, "update"),
-        **id_kwarg,  # type: ignore[arg-type]
-        **config,
-    )
-    return _with_id(domain, updated)
+    command = _item_kwargs(domain, item_id)
+    command.update(config)
+    updated = await call_ws_command(hass, user, _command(domain, "update"), **command)
+    return _with_id(domain, updated, command.get("scope"))
 
 
 async def delete_helper(
@@ -120,8 +157,6 @@ async def delete_helper(
 ) -> None:
     """Delete a helper item by id."""
     _check_domain(domain)
-    # Same false positive as update_helper above.
-    id_kwarg = {f"{domain}_id": item_id}
     await call_ws_command(
-        hass, user, _command(domain, "delete"), **id_kwarg  # type: ignore[arg-type]
+        hass, user, _command(domain, "delete"), **_item_kwargs(domain, item_id)
     )
