@@ -4960,6 +4960,85 @@ async def test_helper_tools_mirror_areas_as_the_area_list(
 
 
 @pytest.mark.asyncio
+async def test_helper_tools_mirror_labels_and_categories(
+    hass: HomeAssistant,
+    setup_integration_with_entry,
+    admin_user,
+    _setup_websocket_api_for_helpers,
+):
+    """Issue #128: labels and categories mirror like areas, to labels.json /
+    categories.json; a category's id is '<scope>/<category_id>'."""
+    assert await async_setup_component(hass, "config", {})
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+
+    async def run(tool, args):
+        with (
+            patch(
+                "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+                return_value=True,
+            ),
+            patch(
+                "custom_components.ha_dev_tools.llm_api.mirror.mirror_write",
+                mirror_write,
+            ),
+        ):
+            return await tool._write(
+                hass,
+                llm.ToolInput(tool_name=tool.name, tool_args=args),
+                _llm_context(admin_user.id),
+            )
+
+    def names(content: str | None) -> list[str]:
+        return sorted(item["name"] for item in json.loads(content or "[]"))
+
+    label = await run(
+        CreateHelperTool(),
+        {"domain": "label", "config": {"name": "Presence", "color": "red"}},
+    )
+    call = mirror_write.await_args.kwargs
+    assert call["path"] == "labels.json"
+    assert (names(call["content_before"]), names(call["content_after"])) == (
+        [],
+        ["Presence"],
+    )
+    await run(DeleteHelperTool(), {"domain": "label", "item_ids": [label["id"]]})
+    assert names(mirror_write.await_args.kwargs["content_after"]) == []
+
+    category = await run(
+        CreateHelperTool(),
+        {"domain": "category", "config": {"scope": "script", "name": "Heating"}},
+    )
+    assert category["id"].startswith("script/")
+    call = mirror_write.await_args.kwargs
+    assert (call["path"], names(call["content_after"])) == (
+        "categories.json",
+        ["Heating"],
+    )
+    await run(
+        UpdateHelperTool(),
+        {
+            "domain": "category",
+            "item_id": category["id"],
+            "config": {"name": "Climate"},
+        },
+    )
+    assert names(mirror_write.await_args.kwargs["content_after"]) == ["Climate"]
+
+    no_scope = await run(
+        CreateHelperTool(), {"domain": "category", "config": {"name": "Lights"}}
+    )
+    assert no_scope["error_type"] == "ValueError"
+    assert "scope" in no_scope["error"]
+    bad_id = await run(
+        UpdateHelperTool(),
+        {"domain": "category", "item_id": "heating", "config": {"name": "x"}},
+    )
+    assert bad_id["error_type"] == "ValueError"
+
+
+@pytest.mark.asyncio
 async def test_helper_tools_never_mirror_persons(
     hass: HomeAssistant,
     setup_integration_with_entry,

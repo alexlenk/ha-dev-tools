@@ -1,6 +1,8 @@
 """Tests for registry_manager.py (update_entities, issue #117), against HA's
 real entity/device/area registries and WS commands."""
 
+import re
+
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
@@ -276,3 +278,146 @@ async def test_apply_stops_at_a_refused_item_and_marks_the_rest(
         "not_applied": "an earlier item failed",
     }
     assert entity_reg.async_get(setup["phone_2"]).name is None
+
+
+# --- labels and categories (issue #128) --------------------------------------
+
+
+@pytest.fixture
+def tags(hass: HomeAssistant, setup):
+    from homeassistant.helpers import category_registry as cr
+    from homeassistant.helpers import label_registry as lr
+
+    labels = lr.async_get(hass)
+    energy = labels.async_create("Energy")
+    deye = labels.async_create("Deye")
+    categories = cr.async_get(hass)
+    modbus = categories.async_create(scope="helpers", name="Deye 12K Modbus")
+    doors = categories.async_create(scope="automation", name="Doors")
+    return {
+        "energy": energy.label_id,
+        "deye": deye.label_id,
+        "modbus": modbus.category_id,
+        "doors": doors.category_id,
+    }
+
+
+def test_plan_labels_and_categories_by_name(hass: HomeAssistant, setup, tags):
+    er.async_get(hass).async_update_entity(setup["phone"], labels={tags["deye"]})
+    plans = plan_updates(
+        hass,
+        [
+            {
+                "entity_id": setup["phone"],
+                "add_labels": ["energy"],  # a name, any case
+                "categories": {"helpers": "deye 12k modbus", "automation": None},
+            },
+            {"entity_id": setup["phone_2"], "labels": [tags["energy"], "Deye"]},
+            {"device_id": setup["device"].id, "labels": ["Energy"]},
+        ],
+    )
+    assert plans[0].ws_changes == {
+        "labels": sorted({tags["deye"], tags["energy"]}),
+        "categories": {"helpers": tags["modbus"], "automation": None},
+    }
+    assert plans[0].changes == {
+        "labels": {"from": ["Deye"], "to": ["Deye", "Energy"]},
+        "categories": {"helpers": {"from": None, "to": "Deye 12K Modbus"}},
+    }
+    assert plans[1].ws_changes["labels"] == sorted({tags["energy"], tags["deye"]})
+    assert plans[2].ws_changes == {"labels": [tags["energy"]]}
+
+
+def test_plan_remove_labels_and_unchanged_sets(hass: HomeAssistant, setup, tags):
+    er.async_get(hass).async_update_entity(
+        setup["phone"], labels={tags["deye"], tags["energy"]}
+    )
+    plans = plan_updates(
+        hass,
+        [
+            {"entity_id": setup["phone"], "remove_labels": ["Deye"]},
+            {"entity_id": setup["phone_2"], "labels": []},  # already none
+        ],
+    )
+    assert plans[0].ws_changes == {"labels": [tags["energy"]]}
+    assert plans[0].changes == {
+        "labels": {"from": ["Deye", "Energy"], "to": ["Energy"]}
+    }
+    assert plans[1].changes == {}
+
+
+def test_plan_category_by_id(hass: HomeAssistant, setup, tags):
+    plans = plan_updates(
+        hass,
+        [{"entity_id": setup["phone"], "categories": {"automation": tags["doors"]}}],
+    )
+    assert plans[0].ws_changes == {"categories": {"automation": tags["doors"]}}
+    assert plans[0].changes == {
+        "categories": {"automation": {"from": None, "to": "Doors"}}
+    }
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"labels": ["Solar"]}, "no label 'Solar' (labels: Deye, Energy)"),
+        ({"labels": ["Deye"], "add_labels": ["Energy"]}, "use it alone"),
+        ({"labels": "Deye"}, "must be a list of label names or ids"),
+        ({"categories": {"helpers": "Nope"}}, "no helpers category 'Nope'"),
+        ({"categories": {"garage": "x"}}, "no category scope 'garage'"),
+        ({"categories": ["x"]}, "categories is {scope: category}"),
+        ({"categories": {}}, "categories is {scope: category}"),
+    ],
+)
+def test_plan_refuses_unknown_labels_and_categories(
+    hass: HomeAssistant, setup, tags, item, expected
+):
+    with pytest.raises(RegistryUpdateError, match=re.escape(expected)):
+        plan_updates(hass, [{"entity_id": setup["phone"], **item}])
+
+
+def test_device_items_have_no_categories(hass: HomeAssistant, setup, tags):
+    with pytest.raises(
+        RegistryUpdateError, match="categories can't be set on a device"
+    ):
+        plan_updates(
+            hass, [{"device_id": setup["device"].id, "categories": {"helpers": "x"}}]
+        )
+
+
+@pytest.mark.asyncio
+async def test_apply_labels_and_categories(
+    hass: HomeAssistant, setup, tags, admin_user
+):
+    plans = plan_updates(
+        hass,
+        [
+            {
+                "entity_id": setup["phone"],
+                "labels": ["Energy"],
+                "categories": {"helpers": "Deye 12K Modbus"},
+            },
+            {"device_id": setup["device"].id, "add_labels": ["Deye"]},
+        ],
+    )
+    await apply_updates(hass, admin_user, plans)
+    entry = er.async_get(hass).async_get(setup["phone"])
+    assert entry.labels == {tags["energy"]}
+    assert entry.categories == {"helpers": tags["modbus"]}
+    assert dr.async_get(hass).async_get(setup["device"].id).labels == {tags["deye"]}
+
+    # Clearing one scope leaves the others.
+    er.async_get(hass).async_update_entity(
+        setup["phone"],
+        categories={"helpers": tags["modbus"], "automation": tags["doors"]},
+    )
+    await apply_updates(
+        hass,
+        admin_user,
+        plan_updates(
+            hass, [{"entity_id": setup["phone"], "categories": {"helpers": None}}]
+        ),
+    )
+    assert er.async_get(hass).async_get(setup["phone"]).categories == {
+        "automation": tags["doors"]
+    }

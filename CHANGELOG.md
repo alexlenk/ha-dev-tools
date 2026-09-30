@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.24.0] - 2026-09-30
+
+### Added
+- Labels and categories, without new tools (issue #128):
+  - `list_helpers` / `create_helper` / `update_helper` / `delete_helper` take `domain: label` and `domain: category`. A category needs a `scope` (`automation`, `script`, `scene` or `helpers`), and its id is `<scope>/<category_id>`.
+  - Writes to either are mirrored as `labels.json` / `categories.json`, like `areas.json` for rooms.
+  - `update_entities` sets them: `labels` (the whole set), `add_labels` / `remove_labels`, and `categories` (`{scope: category}`, `null` clears a scope), all resolved by exact name or id. Devices take labels too.
+  - An unknown label or category refuses the whole batch and lists what exists.
+
 ## [2.23.2] - 2026-09-30
 
 ### Fixed

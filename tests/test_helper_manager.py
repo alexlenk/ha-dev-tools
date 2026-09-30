@@ -126,6 +126,59 @@ async def test_person_crud_round_trip_links_trackers(hass: HomeAssistant, admin_
 
 
 @pytest.mark.asyncio
+async def test_label_crud_round_trip(hass: HomeAssistant, admin_user):
+    """Issue #128: labels through the helper functions (label registry)."""
+    assert await async_setup_component(hass, "config", {})
+    created = await create_helper(
+        hass, admin_user, "label", {"name": "Energy", "color": "green"}
+    )
+    assert created["id"] == created["label_id"]
+    updated = await update_helper(
+        hass, admin_user, "label", created["id"], {"name": "Energy model"}
+    )
+    assert updated["name"] == "Energy model"
+    assert [item["id"] for item in await list_helpers(hass, admin_user, "label")] == [
+        created["id"]
+    ]
+    await delete_helper(hass, admin_user, "label", created["id"])
+    assert await list_helpers(hass, admin_user, "label") == []
+
+
+@pytest.mark.asyncio
+async def test_category_crud_round_trip_across_scopes(hass: HomeAssistant, admin_user):
+    """Issue #128: a category belongs to one scope; its id carries it."""
+    assert await async_setup_component(hass, "config", {})
+    deye = await create_helper(
+        hass, admin_user, "category", {"scope": "helpers", "name": "Deye 12K"}
+    )
+    doors = await create_helper(
+        hass, admin_user, "category", {"scope": "automation", "name": "Doors"}
+    )
+    assert deye["id"] == f"helpers/{deye['category_id']}"
+    assert deye["scope"] == "helpers"
+    listed = {
+        item["id"]: item["name"]
+        for item in await list_helpers(hass, admin_user, "category")
+    }
+    assert listed == {deye["id"]: "Deye 12K", doors["id"]: "Doors"}
+
+    renamed = await update_helper(
+        hass, admin_user, "category", deye["id"], {"name": "Deye 12K Modbus"}
+    )
+    assert (renamed["id"], renamed["name"]) == (deye["id"], "Deye 12K Modbus")
+    await delete_helper(hass, admin_user, "category", doors["id"])
+    assert [
+        item["id"] for item in await list_helpers(hass, admin_user, "category")
+    ] == [deye["id"]]
+
+    with pytest.raises(ValueError, match="needs 'scope'"):
+        await create_helper(hass, admin_user, "category", {"name": "No scope"})
+    for bad in ("abc", "garage/abc", "helpers/"):
+        with pytest.raises(ValueError, match="<scope>/<category_id>"):
+            await delete_helper(hass, admin_user, "category", bad)
+
+
+@pytest.mark.asyncio
 async def test_invalid_domain_rejected(hass: HomeAssistant, admin_user):
     with pytest.raises(InvalidHelperDomainError):
         await list_helpers(hass, admin_user, "not_a_helper_domain")

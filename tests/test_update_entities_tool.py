@@ -250,3 +250,34 @@ async def test_a_failing_reference_lookup_never_hides_the_rename(
     assert result["references"][OLD] == {
         "error": "references not checked: unknown_command: get_panels"
     }
+
+
+@pytest.mark.asyncio
+async def test_labels_and_categories_through_the_tool(hass: HomeAssistant, admin):
+    """Issue #128: the schema takes labels/categories, applied by name."""
+    from homeassistant.helpers import category_registry as cr
+    from homeassistant.helpers import label_registry as lr
+
+    lr.async_get(hass).async_create("Presence")
+    cr.async_get(hass).async_create(scope="automation", name="Heating")
+    er.async_get(hass).async_get_or_create(
+        "automation", "automation", "morning", suggested_object_id="morning"
+    )
+    tool = UpdateEntitiesTool()
+    items = [
+        {"entity_id": OLD, "add_labels": ["presence"]},
+        {"entity_id": "automation.morning", "categories": {"automation": "Heating"}},
+    ]
+    tool.parameters({"items": items})
+
+    result = await tool._write(hass, _input(items=items), _llm_context(admin.id))
+
+    assert [item["changed"] for item in result["results"]] == [
+        {"labels": {"from": [], "to": ["Presence"]}},
+        {"categories": {"automation": {"from": None, "to": "Heating"}}},
+    ]
+    assert er.async_get(hass).async_get(OLD).labels == {"presence"}
+    category = next(iter(cr.async_get(hass).async_list_categories(scope="automation")))
+    assert er.async_get(hass).async_get("automation.morning").categories == {
+        "automation": category.category_id
+    }

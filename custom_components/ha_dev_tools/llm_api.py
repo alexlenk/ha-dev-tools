@@ -741,6 +741,10 @@ _UPDATE_ITEM = vol.Schema(
         vol.Optional("disabled"): bool,
         vol.Optional("hidden"): bool,
         vol.Optional("show_as"): vol.In(registry_manager.SHOW_AS_DOMAINS),
+        vol.Optional("labels"): [str],
+        vol.Optional("add_labels"): [str],
+        vol.Optional("remove_labels"): [str],
+        vol.Optional("categories"): {str: vol.Any(str, None)},
     }
 )
 
@@ -764,12 +768,16 @@ class UpdateEntitiesTool(WriteGatedTool):
         "name, area (room, by name or id), device_class (e.g. show a "
         "binary_sensor as a door or window), icon, disabled, hidden, and "
         "show_as for a switch (cover/fan/light/lock/siren/valve - the UI's "
-        "'Show as', which also hides the switch). Device: name, area, "
-        "disabled. null clears name/area/device_class/icon back to the "
+        "'Show as', which also hides the switch), labels, and categories "
+        "({scope: category} for the automation/script/scene/helpers pages' "
+        "categories, null clears a scope). Device: name, area, disabled, "
+        "labels. 'labels' sets the whole set; add_labels/remove_labels "
+        "change it. null clears name/area/device_class/icon back to the "
         "default. Every item is checked before anything changes; an unknown "
         "entity, device or room refuses the whole batch (rooms are matched "
         "exactly - list them with list_helpers domain='area', create one "
-        "with create_helper domain='area'). A rename doesn't rename the id "
+        "with create_helper domain='area'; labels and categories the same "
+        "way, by name or id, with domain='label' / 'category'). A rename doesn't rename the id "
         "where it's used: the preview lists every reference (YAML config, "
         "dashboards, persons' trackers, helper config entries); with "
         "update_references=true, the ones that can be written are rewritten "
@@ -1770,7 +1778,13 @@ def _helper_domain_schema() -> vol.In:
 # is denylisted, so those two can't be mirrored the way helpers are (issue
 # #117): areas are mirrored as the area list itself, persons not at all -
 # their data is personal, which is why .storage/person is denylisted.
-_AREAS_MIRROR_PATH = "areas.json"
+# Registries mirrored as their item list (their .storage/core.* files are
+# denylisted) - areas (#117), labels and categories (#128).
+_REGISTRY_MIRROR_PATHS = {
+    "area": "areas.json",
+    "label": "labels.json",
+    "category": "categories.json",
+}
 _PERSON_NOT_MIRRORED: JsonObjectType = {
     "mirrored": False,
     "reason": "person data isn't mirrored - it's personal data "
@@ -1780,12 +1794,12 @@ _PERSON_NOT_MIRRORED: JsonObjectType = {
 
 async def _helper_state(hass: HomeAssistant, user: User, domain: str) -> str | None:
     """What a helper write's mirror records as "before": the domain's
-    storage file, or for areas the area list."""
+    storage file, or for a registry (areas, labels, categories) its list."""
     if domain == "person":
         return None
-    if domain == "area":
-        areas = await helper_manager.list_helpers(hass, user, domain)
-        return json.dumps(areas, indent=2, sort_keys=True)
+    if domain in _REGISTRY_MIRROR_PATHS:
+        items = await helper_manager.list_helpers(hass, user, domain)
+        return json.dumps(items, indent=2, sort_keys=True)
     return await _read_storage_file(hass, f".storage/{domain}")
 
 
@@ -1801,8 +1815,8 @@ async def _mirror_helper_write(
     """Mirror one helper write (see _helper_state) and return its payload."""
     if domain == "person":
         return _PERSON_NOT_MIRRORED
-    if domain == "area":
-        path = _AREAS_MIRROR_PATH
+    if domain in _REGISTRY_MIRROR_PATHS:
+        path = _REGISTRY_MIRROR_PATHS[domain]
         content_after = cast(str, await _helper_state(hass, user, domain))
     else:
         path = f".storage/{domain}"
@@ -1833,8 +1847,10 @@ class ListHelpersTool(GatedTool):
         "domain - those aren't reachable this way (see get_automation's "
         "'layout-aware' approach for the analogous YAML case). Also "
         "domain='area' for the rooms (areas) - the ids update_entities "
-        "assigns - and domain='person' for UI-made persons, with their "
-        "device_trackers."
+        "assigns - domain='person' for UI-made persons, with their "
+        "device_trackers, domain='label' for labels and domain='category' "
+        "for the categories of the Automations/Scripts/Scenes/Helpers "
+        "pages (each with its scope; its id is '<scope>/<category_id>')."
     )
     parameters = vol.Schema({vol.Required("domain"): _helper_domain_schema()})
 
@@ -1872,7 +1888,9 @@ class CreateHelperTool(WriteGatedTool):
         "input_select needs 'options' (a list). domain='area' creates a "
         "room ('name', optional 'icon', 'floor_id', 'aliases'); "
         "domain='person' a person ('name', optional 'device_trackers', "
-        "'user_id')."
+        "'user_id'); domain='label' a label ('name', optional 'icon', "
+        "'color', 'description'); domain='category' a category ('scope' - "
+        "automation, script, scene or helpers - 'name', optional 'icon')."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("domain"): _helper_domain_schema(), vol.Required("config"): dict}
@@ -1901,6 +1919,7 @@ class CreateHelperTool(WriteGatedTool):
             UnresolvedUserError,
             InvalidHelperDomainError,
             WebSocketCommandError,
+            ValueError,
         ) as exc:
             return _tool_error(exc)
         response: JsonObjectType = dict(created)
@@ -1921,7 +1940,9 @@ class UpdateHelperTool(WriteGatedTool):
         "list_helpers' results only include the former for exactly this "
         "reason. Only the fields in 'config' change. domain='area' renames "
         "a room or sets its icon/floor; domain='person' e.g. sets "
-        "'device_trackers' (the full list) to link trackers to a person."
+        "'device_trackers' (the full list) to link trackers to a person; "
+        "domain='label'/'category' renames one or changes its icon (color "
+        "for a label)."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -1954,6 +1975,7 @@ class UpdateHelperTool(WriteGatedTool):
             UnresolvedUserError,
             InvalidHelperDomainError,
             WebSocketCommandError,
+            ValueError,
         ) as exc:
             return _tool_error(exc)
         response: JsonObjectType = dict(updated)
