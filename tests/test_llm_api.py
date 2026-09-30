@@ -30,6 +30,7 @@ installed version actually has, and treats the unsub-callable behavior as
 best-effort rather than asserting it unconditionally.
 """
 
+import asyncio
 import base64
 import inspect
 import json
@@ -117,6 +118,7 @@ from custom_components.ha_dev_tools.llm_api import (
     WriteEnergyConfigTool,
     WriteGatedTool,
     WriteScriptTool,
+    _mirror_result_payload,
     _one_or_many,
 )
 from custom_components.ha_dev_tools.log_manager import LogManager
@@ -5224,3 +5226,250 @@ async def test_template_entity_status_without_a_reload(
         reloaded=False,
     )
     assert await _template_entity_status(hass, template_yaml_manager, result, "x") == {}
+
+
+# --- atomic batch template delete (issue #127) ------------------------------
+
+_ENERGY_MODEL = (
+    "# energy model\n"
+    "template:\n"
+    "  - triggers:\n"
+    "      - trigger: homeassistant\n"
+    "        event: start\n"
+    "    sensor:\n"
+    + "".join(
+        f"      - name: E{i}\n        unique_id: e{i}\n        state: '{{{{ {i} }}}}'\n"
+        for i in range(7)
+    )
+    + "  - sensor:\n"
+    "      - name: Keep\n"
+    "        unique_id: keep\n"
+    "        state: '{{ 1 }}'\n"
+    "    binary_sensor:\n"
+    "      - name: Gone\n"
+    "        unique_id: gone\n"
+    "        state: '{{ true }}'\n"
+    "  - sensor:\n"
+    "      - name: Solo\n"
+    "        unique_id: solo\n"
+    "        state: '{{ 2 }}'\n"
+)
+_BATCH = [f"e{i}" for i in range(7)] + ["gone", "solo"]
+
+
+def _count_reloads(hass: HomeAssistant) -> AsyncMock:
+    reload = AsyncMock()
+    hass.services.async_register("template", "reload", reload)
+    return reload
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_writes_once_and_reloads_once(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    """Ten ids used to mean ten writes and ten full template reloads -
+    slow enough to time out partway (#127). Now one of each, with the same
+    result as deleting them one by one."""
+    path = tmp_path / "packages/energy_model.yaml"
+    _write_package(tmp_path, "packages/energy_model.yaml", _ENERGY_MODEL)
+    for unique_id in _BATCH:  # the old way, for comparison
+        await template_yaml_manager.delete_entity(unique_id)
+    expected = path.read_text()
+    path.write_text(_ENERGY_MODEL)
+    reload = _count_reloads(hass)
+    write = AsyncMock(wraps=template_yaml_manager.file_manager.write_file)
+
+    with patch.object(template_yaml_manager.file_manager, "write_file", write):
+        results = await template_yaml_manager.delete_entities(_BATCH)
+
+    assert write.await_count == 1
+    assert reload.await_count == 1
+    (result,) = results
+    assert result.file_path == "packages/energy_model.yaml"
+    assert result.unique_ids == _BATCH
+    assert result.reloaded is True
+    after = path.read_text()
+    assert after == expected == result.content_after
+    assert "unique_id: keep" in after and "# energy model" in after
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_dry_run_writes_nothing(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/energy_model.yaml", _ENERGY_MODEL)
+    reload = _count_reloads(hass)
+    (result,) = await template_yaml_manager.delete_entities(_BATCH, dry_run=True)
+    assert "unique_id: e0" not in result.content_after
+    assert (tmp_path / "packages/energy_model.yaml").read_text() == _ENERGY_MODEL
+    assert reload.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_tool_survives_a_cancelled_request(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    """The #127 scenario: the client times out mid-call. The commit phase -
+    write, reload, mirror - still runs to the end, so the change is whole
+    and mirrored instead of half-applied and missing from git."""
+    _write_package(tmp_path, "packages/energy_model.yaml", _ENERGY_MODEL)
+    reload_started = asyncio.Event()
+    release_reload = asyncio.Event()
+
+    async def slow_reload(call):
+        reload_started.set()
+        await release_reload.wait()
+
+    hass.services.async_register("template", "reload", slow_reload)
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        call = hass.async_create_task(
+            DeleteTemplateEntityTool(template_yaml_manager)._write(
+                hass,
+                llm.ToolInput(
+                    tool_name="delete_template_entity",
+                    tool_args={"unique_ids": _BATCH},
+                ),
+                _llm_context(),
+            )
+        )
+        await reload_started.wait()
+        call.cancel()  # the client gave up
+        release_reload.set()
+        await hass.async_block_till_done()
+
+    assert call.cancelled()
+    after = (tmp_path / "packages/energy_model.yaml").read_text()
+    assert not any(f"unique_id: {i}\n" in after for i in _BATCH)
+    mirror_write.assert_awaited_once()
+    assert mirror_write.await_args.kwargs["content_before"] == _ENERGY_MODEL
+    assert mirror_write.await_args.kwargs["content_after"] == after
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_tool_reports_and_mirrors_a_partial_failure(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    """Across two files, the second write fails: the first file's change is
+    reported, reloaded and mirrored; the rest are listed as not deleted."""
+    _write_package(tmp_path, "packages/a.yaml", _ENERGY_MODEL)
+    _write_package(
+        tmp_path,
+        "packages/b.yaml",
+        "template:\n  - sensor:\n      - name: B\n        unique_id: b\n"
+        "        state: '{{ 1 }}'\n",
+    )
+    reload = _count_reloads(hass)
+    real_write = template_yaml_manager.file_manager.write_file
+
+    async def write(path, content, **kwargs):
+        if path == "packages/b.yaml":
+            raise ValueError("disk full")
+        return await real_write(path, content, **kwargs)
+
+    mirror_write = AsyncMock(
+        return_value=MirrorResult(mirrored=True, commits=("after",))
+    )
+    with (
+        patch.object(template_yaml_manager.file_manager, "write_file", write),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write", mirror_write
+        ),
+    ):
+        result = await DeleteTemplateEntityTool(template_yaml_manager)._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_template_entity",
+                tool_args={"unique_ids": ["e0", "b", "e1"]},
+            ),
+            _llm_context(),
+        )
+
+    assert result["deleted"] == ["e0", "e1"]
+    assert result["not_deleted"] == ["b"]
+    assert "packages/b.yaml: disk full" in result["error"]
+    assert result["files"] == ["packages/a.yaml"]
+    assert reload.await_count == 1
+    assert [c.kwargs["path"] for c in mirror_write.await_args_list] == [
+        "packages/a.yaml"
+    ]
+    assert "unique_id: b\n" in (tmp_path / "packages/b.yaml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_tool_nothing_written_when_first_write_fails(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    _write_package(tmp_path, "packages/a.yaml", _ENERGY_MODEL)
+    reload = _count_reloads(hass)
+    with patch.object(
+        template_yaml_manager.file_manager,
+        "write_file",
+        AsyncMock(side_effect=ValueError("read-only")),
+    ):
+        result = await DeleteTemplateEntityTool(template_yaml_manager)._write(
+            hass,
+            llm.ToolInput(
+                tool_name="delete_template_entity",
+                tool_args={"unique_ids": ["e0", "e1"]},
+            ),
+            _llm_context(),
+        )
+    assert result["deleted"] == []
+    assert result["reloaded"] is False
+    assert result["not_deleted"] == ["e0", "e1"]
+    assert reload.await_count == 0
+
+
+def test_mirror_payload_flags_drift():
+    payload = _mirror_result_payload(
+        MirrorResult(mirrored=True, commits=("before", "after"))
+    )
+    assert "changed since its last mirrored copy" in payload["drift"]
+    assert "drift" not in _mirror_result_payload(
+        MirrorResult(mirrored=True, commits=("after",))
+    )
+
+
+@pytest.mark.asyncio
+async def test_template_delete_reports_an_entity_gone_since_it_was_resolved(
+    hass: HomeAssistant, template_yaml_manager, tmp_path
+):
+    """Resolved up front, then gone by the time of the delete (the file was
+    edited in between): reported as an error, not raised."""
+    from custom_components.ha_dev_tools.template_yaml_manager import (
+        TemplateEntityNotFoundError,
+    )
+
+    _write_package(tmp_path, "packages/a.yaml", _ENERGY_MODEL)
+    tool = DeleteTemplateEntityTool(template_yaml_manager)
+    gone = AsyncMock(side_effect=TemplateEntityNotFoundError("e0 is gone"))
+    for method, args in (
+        ("delete_entity", {"unique_id": "e0"}),
+        ("delete_entities", {"unique_ids": ["e0", "e1"]}),
+    ):
+        with patch.object(template_yaml_manager, method, gone):
+            result = await tool._write(
+                hass,
+                llm.ToolInput(tool_name="delete_template_entity", tool_args=args),
+                _llm_context(),
+            )
+        assert result["error_type"] == "TemplateEntityNotFoundError"
+
+    document = yaml.safe_load(_ENERGY_MODEL)
+    with pytest.raises(TemplateEntityNotFoundError):
+        template_yaml_manager._locate(document, "packages/a.yaml", "nope")

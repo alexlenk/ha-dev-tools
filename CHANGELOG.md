@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.2] - 2026-09-30
+
+### Fixed
+- A batch `delete_template_entity` (`unique_ids`) could leave a package half-edited and unmirrored (issue #127). Each id was deleted separately, with a file write and a full template reload per id. Ten ids were slow enough for the client to time out, which cancelled the call partway: in the reported case 7 of 10 entities were gone, and no mirror commit recorded it.
+  - All removals are now computed in memory, each file is written once, and templates are reloaded once.
+  - Once validation has passed, the write, reload and mirror run to completion even if the client gives up, so the change is never half-applied or missing from git.
+  - If a write fails partway through a multi-file batch, the files already written are still reloaded and mirrored, and the response lists what was deleted, what wasn't, and why.
+- Mirror results now say plainly when the live file had changed since its last mirrored copy (`drift`). That change is recorded as its own "live state ... before write" commit, so it isn't mistaken for the current write.
+
 ## [2.23.1] - 2026-09-29
 
 ### Fixed

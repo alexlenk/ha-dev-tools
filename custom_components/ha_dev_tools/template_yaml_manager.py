@@ -150,6 +150,26 @@ async def validate_triggers(hass: HomeAssistant, triggers: Any) -> None:
         ) from exc
 
 
+@dataclass
+class TemplateBatchResult:
+    """One file of a batch delete: which ids left it, and its content."""
+
+    file_path: str
+    unique_ids: list[str]
+    content_before: str
+    content_after: str
+    reloaded: bool
+
+
+class TemplateBatchError(Exception):
+    """A batch delete stopped at a failed write; `written` already changed."""
+
+    def __init__(self, message: str, written: list[TemplateBatchResult]) -> None:
+        """Init with the error and the files already written."""
+        super().__init__(message)
+        self.written = written
+
+
 @dataclass(frozen=True)
 class TemplateWriteResult:
     """What a template entity write actually did - location, reload status,
@@ -702,6 +722,95 @@ class TemplateYamlManager:
             content_before=content_before,
             content_after=content_after,
         )
+
+    def _locate(
+        self, document: Any, file_path: str, unique_id: str
+    ) -> TemplateEntityLocation:
+        """Synchronous: `unique_id`'s location in an already-loaded document
+        (find_entity already made sure it's there exactly once)."""
+        for block_index, block in enumerate(self._template_blocks(document)):
+            for platform in TEMPLATE_PLATFORMS:
+                entities = block.get(platform) if isinstance(block, dict) else None
+                for entity_index, conf in enumerate(entities or []):
+                    if isinstance(conf, dict) and conf.get("unique_id") == unique_id:
+                        return TemplateEntityLocation(
+                            file_path=file_path,
+                            is_package=file_path != DEFAULT_CONFIG_FILE,
+                            block_index=block_index,
+                            platform=platform,
+                            entity_index=entity_index,
+                        )
+        raise TemplateEntityNotFoundError(
+            f"No template entity with unique_id '{unique_id}' found"
+        )
+
+    def _build_multi_delete_content(
+        self, file_path: str, content: str, unique_ids: list[str]
+    ) -> str:
+        """Synchronous: `content` with every one of `unique_ids` removed -
+        one at a time in memory, each re-located after the previous
+        removal shifted the others, so the file is written once."""
+        for unique_id in unique_ids:
+            document = _load_yaml(content)
+            location = self._locate(document, file_path, unique_id)
+            content = self._build_delete_content(document, location, content)
+        return content
+
+    async def delete_entities(
+        self, unique_ids: list[str], *, dry_run: bool = False
+    ) -> list[TemplateBatchResult]:
+        """Delete several template entities: every id resolved first, all
+        removals computed in memory, each file written once and template
+        reloaded once (issue #127) - instead of a write and a full reload
+        per id, which was slow enough to time out partway.
+
+        One result per file. A write that fails stops the batch: the files
+        already written are returned (and reloaded) with the error, so the
+        caller can still report and mirror exactly what changed.
+        """
+        by_file: dict[str, list[str]] = {}
+        for unique_id in unique_ids:
+            location = await self.find_entity(unique_id)
+            by_file.setdefault(location.file_path, []).append(unique_id)
+
+        planned = []
+        for file_path, ids in by_file.items():
+            content_before = await self.file_manager.read_file(file_path)
+            content_after = await self.hass.async_add_executor_job(
+                self._build_multi_delete_content, file_path, content_before, ids
+            )
+            planned.append((file_path, ids, content_before, content_after))
+        if dry_run:
+            return [
+                TemplateBatchResult(path, ids, before, after, reloaded=False)
+                for path, ids, before, after in planned
+            ]
+
+        written: list[TemplateBatchResult] = []
+        error: str | None = None
+        for file_path, ids, content_before, content_after in planned:
+            try:
+                await self.file_manager.write_file(
+                    file_path, content_after, validate_before_write=True
+                )
+            except (OSError, PermissionError, ValueError, RuntimeError) as exc:
+                error = f"{file_path}: {exc}"
+                break
+            written.append(
+                TemplateBatchResult(
+                    file_path, ids, content_before, content_after, reloaded=False
+                )
+            )
+        reloaded = await self._reload_template() if written else False
+        _LOGGER.info(
+            "Deleted template entities %s in one write per file",
+            [unique_id for result in written for unique_id in result.unique_ids],
+        )
+        for result in written:
+            result.reloaded = reloaded
+        if error is not None:
+            raise TemplateBatchError(error, written)
+        return written
 
     def _build_delete_content(
         self,

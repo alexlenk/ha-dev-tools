@@ -11,7 +11,9 @@ why every tool but the diagnostic ping is gated.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, cast, override
 
@@ -81,6 +83,7 @@ from .script_manager import (
 from .supervisor_manager import SupervisorNotAvailableError
 from .template_yaml_manager import (
     DuplicateTemplateUniqueIdError,
+    TemplateBatchError,
     TemplateEntityNotFoundError,
     TemplateYamlManager,
     validate_triggers,
@@ -115,9 +118,29 @@ def _mirror_result_payload(result: mirror.MirrorResult) -> JsonObjectType:
         payload["reason"] = result.reason
     if result.commits:
         payload["commits"] = list(result.commits)
+    if "before" in result.commits:
+        # The live file had drifted from its last mirrored copy - changed
+        # outside this write (by hand, or a write that never got mirrored).
+        # Recorded as its own commit so it isn't mistaken for this write
+        # (issue #127).
+        payload["drift"] = (
+            "The live file had changed since its last mirrored copy; that "
+            "change is committed separately as 'live state ... before write'."
+        )
     if result.branch is not None:
         payload["branch"] = result.branch
     return payload
+
+
+async def _run_to_completion(
+    hass: HomeAssistant, work: Coroutine[Any, Any, JsonObjectType], name: str
+) -> JsonObjectType:
+    """Run a write's commit phase - write, reload, mirror - to the end even
+    if the MCP request is cancelled (issue #127): a client that times out
+    must not leave a half-applied, unmirrored change behind. Errors still
+    reach the caller."""
+    task: asyncio.Task[JsonObjectType] = hass.async_create_background_task(work, name)
+    return await asyncio.shield(task)
 
 
 async def _mirror_file_write(
@@ -2682,58 +2705,73 @@ class DeleteTemplateEntityTool(WriteGatedTool):
         try:
             ids = _one_or_many(args, "unique_id", "unique_ids")
             # Resolve every id before deleting any: an unknown or duplicated
-            # unique_id refuses the whole batch. Each delete then re-resolves
-            # its own location, since earlier deletes shift indices.
+            # unique_id refuses the whole batch.
             for unique_id in ids:
                 await self._manager.find_entity(unique_id)
-            results = [
-                await self._manager.delete_entity(unique_id) for unique_id in ids
-            ]
         except (
             TemplateEntityNotFoundError,
             DuplicateTemplateUniqueIdError,
             ValueError,
         ) as exc:
             return _tool_error(exc)
-        if "unique_id" in args:
-            (result,) = results
-            response: JsonObjectType = {
-                "file_path": result.location.file_path,
-                "platform": result.location.platform,
-                "reloaded": result.reloaded,
-            }
-            return await _mirror_file_write(
-                hass,
-                response,
-                file_path=result.location.file_path,
-                content_before=result.content_before,
-                content_after=result.content_after,
-            )
-        # One before/after pair per file: the first delete's "before" and
-        # the last delete's "after" in that file.
-        per_file: dict[str, list[str]] = {}
-        for result in results:
-            path = result.location.file_path
-            if path in per_file:
-                per_file[path][1] = result.content_after
-            else:
-                per_file[path] = [result.content_before, result.content_after]
-        response = {
-            "deleted": cast(JsonValueType, ids),
-            "files": cast(JsonValueType, sorted(per_file)),
-            "reloaded": all(result.reloaded for result in results),
+        work = (
+            self._delete_one(hass, ids[0])
+            if "unique_id" in args
+            else self._delete_many(hass, ids)
+        )
+        return await _run_to_completion(hass, work, "ha_dev_tools template delete")
+
+    async def _delete_one(self, hass: HomeAssistant, unique_id: str) -> JsonObjectType:
+        try:
+            result = await self._manager.delete_entity(unique_id)
+        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
+            return _tool_error(exc)
+        response: JsonObjectType = {
+            "file_path": result.location.file_path,
+            "platform": result.location.platform,
+            "reloaded": result.reloaded,
         }
+        return await _mirror_file_write(
+            hass,
+            response,
+            file_path=result.location.file_path,
+            content_before=result.content_before,
+            content_after=result.content_after,
+        )
+
+    async def _delete_many(self, hass: HomeAssistant, ids: list[str]) -> JsonObjectType:
+        """All removals applied in one write per file and one reload (issue
+        #127); whatever was written is mirrored, even if a later file failed."""
+        error: str | None = None
+        try:
+            results = await self._manager.delete_entities(ids)
+        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError) as exc:
+            return _tool_error(exc)
+        except TemplateBatchError as exc:
+            results, error = exc.written, str(exc)
+        deleted = [unique_id for result in results for unique_id in result.unique_ids]
+        response: JsonObjectType = {
+            "deleted": cast(JsonValueType, deleted),
+            "files": cast(JsonValueType, sorted(r.file_path for r in results)),
+            "reloaded": bool(results) and all(r.reloaded for r in results),
+        }
+        if error is not None:
+            response["error"] = f"Stopped at a failed write - {error}"
+            response["not_deleted"] = cast(
+                JsonValueType, [i for i in ids if i not in deleted]
+            )
         if mirror.is_mirror_enabled(hass):
-            mirrored = []
-            for path, (content_before, content_after) in per_file.items():
-                mirror_result = await mirror.mirror_write(
-                    hass,
-                    path=path,
-                    content_before=content_before,
-                    content_after=content_after,
+            response["mirror"] = [
+                _mirror_result_payload(
+                    await mirror.mirror_write(
+                        hass,
+                        path=result.file_path,
+                        content_before=result.content_before,
+                        content_after=result.content_after,
+                    )
                 )
-                mirrored.append(_mirror_result_payload(mirror_result))
-            response["mirror"] = cast(JsonValueType, mirrored)
+                for result in results
+            ]
         return response
 
     @override
