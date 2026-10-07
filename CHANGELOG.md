@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renamed the display name from "HA Dev Tools" to "HA Dev Tools MCP" (in HACS, the integration list and the setup dialog), so the integration turns up when people search for an MCP server. The integration domain (`ha_dev_tools`), the `dev_tools` API and the `/api/mcp/dev_tools` endpoint are unchanged, so existing installs and MCP client configurations keep working. Existing config entries keep their current title.
 - README now leads with "MCP server" and explains how it compares to other Home Assistant MCP servers. The HACS install steps no longer go through a custom repository, since the integration is in the default HACS list.
 
+### Fixed
+- Removed `pyyaml` from the manifest's requirements. Home Assistant already ships it, and newer hassfest versions reject a custom integration that lists one of Home Assistant's own dependencies.
+
 ## [2.24.0] - 2026-09-30
 
 ### Added
