@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.0] - 2026-10-07
+
+### Added
+- `list_traces` and `get_trace`: read automation and script traces, the automation editor's Traces view.
+  - `list_traces` lists the stored runs, newest first: trigger, start/finish, how each run ended (`script_execution`), last step and any error. Filter by automation/script (`entity_id`, or `domain` plus `item_id`), `errors_only`, and `include_not_triggered`.
+  - `get_trace` reads one run (the latest by default) step by step, in the order it ran: each trigger, condition and action with its result, error, template errors and changed variables (`include_variables`, on by default). A step that ran a script carries a `child_id` to read that script's run. `include_config` adds the config as it was at the time of the run.
+  - Both are read-only and use Home Assistant's own `trace/list` and `trace/get` commands, which are admin-only. The trace debugger (breakpoints, stepping) is not offered, since it pauses live runs.
+
 ## [2.24.1] - 2026-10-07
 
 ### Changed
