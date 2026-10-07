@@ -42,35 +42,6 @@ a live instance.
 > still a work in progress. Provided as-is, with no warranty - see
 > [LICENSE](LICENSE).
 
-### How it compares to other Home Assistant MCP servers
-
-There are several MCP servers for Home Assistant, including the popular
-[ha-mcp](https://github.com/homeassistant-ai/ha-mcp), which covers far more
-ground (device control, backups, HACS, cameras, automation traces and more)
-and is easier to connect from chat apps. HA Dev Tools MCP is narrower on
-purpose: it's for *building and maintaining* a configuration, especially one
-kept as YAML and packages, with guardrails on every change:
-
-- **YAML- and package-aware.** Automations, scripts and `template:` entities
-  are read and written wherever they actually live - `automations.yaml`,
-  `configuration.yaml` or `packages/*.yaml` - instead of only the files the
-  UI edits.
-- **Every write is proposed, then confirmed.** Each write returns a preview
-  first, and an optional dry-run mode can keep every change a preview.
-- **A git history of every change.** Optional git mirroring records a
-  before/after copy of everything it changes, and snapshots your hand-edited
-  config on each passing config check.
-- **No general-purpose device control.** There's no "call any service" or
-  restart tool; the only things it can switch directly are `input_boolean`,
-  `number` and `input_number` values.
-- **Built on Home Assistant's own MCP server.** It adds a `dev_tools` API to
-  the built-in `mcp_server` integration and uses Home Assistant's normal
-  token authentication, rather than running a server of its own.
-
-If you mainly want to control devices or chat with your home, ha-mcp or
-Home Assistant's built-in `mcp_server` on its own will likely suit you
-better.
-
 ## Quick start
 
 Needs Home Assistant **2026.8.2+** (see [Requirements](#requirements) below
