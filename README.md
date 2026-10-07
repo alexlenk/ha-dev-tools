@@ -1,6 +1,6 @@
-<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools logo">
+<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools MCP logo">
 
-# HA Dev Tools
+# HA Dev Tools MCP
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
@@ -8,9 +8,10 @@
 [![License][license-shield]](LICENSE)
 [![hacs][hacsbadge]][hacs]
 
-**Give your AI coding assistant hands-on access to your Home Assistant
-instance** - the same way it already helps you with code, but for
-automations, entities, dashboards, and helpers.
+**An MCP server for Home Assistant that runs inside Home Assistant itself** -
+it gives your AI coding assistant (Claude Code, Cursor, Codex, or any other
+MCP client) hands-on access to your instance, the same way it already helps
+you with code, but for automations, entities, dashboards, and helpers.
 
 It runs inside Home Assistant's own [`mcp_server`
 integration](https://developers.home-assistant.io/docs/core/llm/), so there's
@@ -40,6 +41,27 @@ a live instance.
 > before it reaches your live instance. AI can be wrong, and this is all
 > still a work in progress. Provided as-is, with no warranty - see
 > [LICENSE](LICENSE).
+
+### How it compares to other Home Assistant MCP servers
+
+There are several MCP servers for Home Assistant; most are separate
+processes (an add-on, a Docker container, or a `uvx`/Node server) that talk
+to HA over its API, and many focus on controlling devices. HA Dev Tools MCP
+is aimed at *building and maintaining* an instance instead, and differs in
+a few deliberate ways:
+
+- **Nothing extra to host.** It's a normal custom integration that plugs
+  into Home Assistant's own built-in `mcp_server` - no add-on, container, or
+  separate process to keep running.
+- **Writes are proposed, then confirmed.** Every write shows a preview
+  before it's applied, and an optional dry-run mode can keep it that way
+  permanently.
+- **A history you can roll back from.** Optional git mirroring records a
+  before/after copy of everything it changes.
+
+If you mainly want to control devices or chat with your home, a
+general-purpose server or HA's built-in `mcp_server` on its own may suit you
+better.
 
 ## Quick start
 
@@ -133,10 +155,10 @@ account, full stop).
 
 ### HACS (recommended)
 
-1. Open HACS → Integrations → the three-dot menu → **Custom repositories**.
-2. Add `https://github.com/alexlenk/ha-dev-tools`, category **Integration**.
-3. Find **HA Dev Tools** in the integration list and download it.
-4. Restart Home Assistant.
+1. Open HACS and search for **HA Dev Tools MCP** (it's in the default HACS
+   list, so no custom repository is needed).
+2. Download it.
+3. Restart Home Assistant.
 
 ### Manual
 
