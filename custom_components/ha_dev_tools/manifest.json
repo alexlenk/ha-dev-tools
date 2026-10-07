@@ -1,6 +1,6 @@
 {
   "domain": "ha_dev_tools",
-  "name": "HA Dev Tools",
+  "name": "HA Dev Tools MCP",
   "after_dependencies": ["hassio", "http", "logbook", "mqtt", "recorder"],
   "codeowners": ["@alexlenk"],
   "config_flow": true,
@@ -11,10 +11,9 @@
   "issue_tracker": "https://github.com/alexlenk/ha-dev-tools/issues",
   "requirements": [
     "aiofiles>=23.0.0",
-    "pyyaml>=6.0.0",
     "ruamel.yaml>=0.18.0",
     "voluptuous-serialize>=2.6.0"
   ],
   "single_config_entry": true,
-  "version": "2.24.0"
+  "version": "2.24.1"
 }

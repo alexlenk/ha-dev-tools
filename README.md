@@ -1,6 +1,6 @@
-<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools logo">
+<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools MCP logo">
 
-# HA Dev Tools
+# HA Dev Tools MCP
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
@@ -8,9 +8,10 @@
 [![License][license-shield]](LICENSE)
 [![hacs][hacsbadge]][hacs]
 
-**Give your AI coding assistant hands-on access to your Home Assistant
-instance** - the same way it already helps you with code, but for
-automations, entities, dashboards, and helpers.
+**An MCP server for Home Assistant that runs inside Home Assistant itself** -
+it gives your AI coding assistant (Claude Code, Cursor, Codex, or any other
+MCP client) hands-on access to your instance, the same way it already helps
+you with code, but for automations, entities, dashboards, and helpers.
 
 It runs inside Home Assistant's own [`mcp_server`
 integration](https://developers.home-assistant.io/docs/core/llm/), so there's
@@ -133,10 +134,10 @@ account, full stop).
 
 ### HACS (recommended)
 
-1. Open HACS → Integrations → the three-dot menu → **Custom repositories**.
-2. Add `https://github.com/alexlenk/ha-dev-tools`, category **Integration**.
-3. Find **HA Dev Tools** in the integration list and download it.
-4. Restart Home Assistant.
+1. Open HACS and search for **HA Dev Tools MCP** (it's in the default HACS
+   list, so no custom repository is needed).
+2. Download it.
+3. Restart Home Assistant.
 
 ### Manual
 
