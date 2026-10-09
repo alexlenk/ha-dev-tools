@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `reference_statistic_ids`: another meter's hourly changes, e.g. an inverter's own export counter, scaled so the window total is exactly the catch-up. Several can be given, in priority order.
     - `profile_weeks`: the meter's own mean by hour of the week over that many weeks either side of the window.
     - Even, as a last resort, with a warning.
-  - **Or `values`:** the caller's own numbers, one per hour, and 12 per hour (5-minute slots) for the part of the window the meter still has 5-minute rows for. The preview's `values_needed` says how many of each. They can also be `[{start, value}]`, with every other period 0. They must add up to the window total within 0.001 (`normalize` scales a miss of up to 2 %), with none negative and none above `max_per_hour`.
+  - **Or `values`:** the caller's own numbers, one per hour, and 12 per hour (5-minute slots) for the part of the window the meter still has 5-minute rows for. The preview's `values_needed` says how many of each. They can also be `[{start, value}]`, with every other period 0. They must add up to the window total within 0.001 (`normalize` scales a miss of up to 2 %), with none negative or non-finite and none above `max_per_hour`. References given with values are only compared: their ratio and fit, and their hours next to the values' per-hour before/after.
   - **5-minute rows** inside the window are rewritten too: each hour split by the first reference's 5-minute changes, evenly, or as given.
   - **The preview, per window:**
     - the moved amount, and which source shaped how many hours;

@@ -570,7 +570,7 @@ async def test_shape_fallbacks_and_reports(hass: HomeAssistant, freezer):
         (
             "sensor.m",
             {"values": [1] * 8, "profile_weeks": 1},
-            "no references or profile",
+            "no profile with them",
         ),
         ("ha_dev_tools:backup_x_20260101t000000", {}, "a backup can't be edited"),
         ("sensor.temp", {}, "isn't a meter"),
@@ -717,3 +717,292 @@ async def test_redistribute_tool_detects_waits_its_turn_and_refuses(
         _llm_context(),
     )
     assert "no window found" in refused["error"]
+
+
+# --- second review --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_detection_with_a_start_keeps_the_whole_window(
+    hass: HomeAssistant, freezer
+):
+    """An outage that began before detect.start: counted from the series'
+    start, so its catch-up isn't squeezed into the hours after `start`."""
+    freezer.move_to(_at(30))
+    await _hourly(hass, "sensor.m", {0: 0, 1: 1, 20: 21, 21: 22})
+    plan = await plan_redistribute(
+        hass,
+        "sensor.m",
+        detect={"min_silent_hours": 3, "min_catchup": 2, "start": _at(10)},
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    [window] = plan.report["windows"]
+    assert (window["start"], window["catchup_hour"]) == (
+        _at(2).isoformat(),
+        _at(20).isoformat(),
+    )
+    # A catch-up before `start` isn't picked.
+    with pytest.raises(sm.StatisticsChangeRefusedError, match="no window found"):
+        await plan_redistribute(
+            hass,
+            "sensor.m",
+            detect={"min_silent_hours": 3, "min_catchup": 2, "start": _at(21)},
+            can_back_up=False,
+            allow_no_backup=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([float("nan")] * 8, "finite number"),
+        ([float("inf")] + [0] * 7, "finite number"),
+        ([True] * 8, "finite number"),
+        ([{"start": _at(3).isoformat(), "value": float("nan")}], "each value is"),
+        ([{"start": _at(3).isoformat(), "value": True}], "each value is"),
+    ],
+)
+async def test_values_must_be_finite_numbers(
+    hass: HomeAssistant, freezer, values, expected
+):
+    freezer.move_to(_at(30))
+    await _hourly(hass, "sensor.m", {0: 0, 1: 1, 9: 10})
+    with pytest.raises(sm.StatisticsChangeRefusedError, match=expected):
+        await plan_redistribute(
+            hass,
+            "sensor.m",
+            windows=[{"start": _at(2), "catchup_hour": _at(9)}],
+            values=values,
+            can_back_up=False,
+            allow_no_backup=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_meter_cant_be_its_own_reference(hass: HomeAssistant, freezer):
+    freezer.move_to(_at(30))
+    await _hourly(hass, "sensor.m", {0: 0, 1: 1, 9: 10})
+    with pytest.raises(sm.StatisticsChangeRefusedError, match="its own reference"):
+        await plan_redistribute(
+            hass,
+            "sensor.m",
+            windows=[{"start": _at(2), "catchup_hour": _at(9)}],
+            reference_ids=["sensor.m"],
+            can_back_up=False,
+            allow_no_backup=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_values_are_compared_with_a_reference_not_shaped_by_it(
+    hass: HomeAssistant, freezer
+):
+    freezer.move_to(_at(30))
+    await _hourly(hass, "sensor.m", {0: 0, 1: 1, 4: 4})
+    await _hourly(hass, "sensor.ref", {0: 0, 1: 1, 2: 1, 3: 3, 4: 4})
+    plan = await plan_redistribute(
+        hass,
+        "sensor.m",
+        windows=[{"start": _at(2), "catchup_hour": _at(4)}],
+        values=[1, 1, 1],
+        reference_ids=["sensor.ref"],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    [window] = plan.report["windows"]
+    assert window["methods"] == {"values": 3}
+    assert window["reference_by_hour"] == {"sensor.ref": [0, 2, 1]}
+    assert [hour["after"] for hour in window["by_hour"]] == [1, 1, 1]
+    assert [hour["before"] for hour in window["by_hour"]] == [0, 0, 3]
+    assert window["references"][0]["ratio_to_moved"] == 1.0
+    assert window["quality"][0]["hours"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_an_ha_dev_tools_statistic_can_be_redistributed(
+    hass: HomeAssistant, freezer
+):
+    from homeassistant.components.recorder.statistics import (
+        async_add_external_statistics,
+    )
+
+    freezer.move_to(_at(30))
+    async_add_external_statistics(
+        hass,
+        {
+            **_metadata("ha_dev_tools:grid", "ha_dev_tools", "Grid"),
+            "unit_class": "energy",
+        },
+        [
+            {"start": _at(hour), "state": value, "sum": value}
+            for hour, value in ((0, 0), (1, 1), (9, 10), (10, 11))
+        ],
+    )
+    await async_wait_recording_done(hass)
+    plan = await plan_redistribute(
+        hass,
+        "ha_dev_tools:grid",
+        windows=[{"start": _at(2), "catchup_hour": _at(9)}],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    result = await redistribute_statistics(hass, plan)
+    assert await _changes(hass, "ha_dev_tools:grid", range(2, 11)) == pytest.approx(
+        [9 / 8] * 8 + [1]
+    )
+    assert result["next_compile"] == {"applies": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_live_meter_goes_on_compiling_and_nothing_outside_moves(
+    hass: HomeAssistant, freezer
+):
+    """End to end on a live sensor within the 5-minute retention: the
+    rows outside the window - hourly and 5-minute - stay exactly as they
+    were, and HA's own next compiles continue without a step."""
+    from homeassistant.setup import async_setup_component
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        do_adhoc_statistics,
+    )
+
+    meter = {
+        "state_class": "total_increasing",
+        "unit_of_measurement": "kWh",
+        "device_class": "energy",
+    }
+    assert await async_setup_component(hass, "sensor", {})
+    freezer.move_to(
+        _at(
+            12,
+        )
+        + timedelta(minutes=2)
+    )
+    hass.states.async_set("sensor.live", "1010", meter)
+    await async_wait_recording_done(hass)
+    # Hourly: 1/hour to hour 3, silent 4-8, catch-up of 6 at 9, then 10-11.
+    sums = {h: float(h + 1) for h in range(4)} | {9: 10.0, 10: 11.0, 11: 12.0}
+    async_import_statistics(
+        hass,
+        _meta("sensor.live"),
+        [{"start": _at(h), "state": 1000 + v, "sum": v} for h, v in sums.items()],
+    )
+    await async_wait_recording_done(hass)
+    # 5-minute rows from hour 2 on, as the recorder keeps them: hours 2-3,
+    # nothing while silent, hour 9 with the spike, hours 10-11.
+    short = {}
+    for h in (2, 3, 9, 10, 11):
+        start_sum = sums.get(h - 1, 3.0 if h == 9 else None) or sums[h] - 1
+        for i in range(12):
+            value = start_sum + (sums[h] - start_sum) * (i + 1) / 12
+            short[h + i / 12] = value
+    await _short(hass, "sensor.live", short)
+
+    def snapshot(rows):
+        return {
+            row["start_ts"]: (row["sum"], row["state"])
+            for row in rows
+            if not T0 + 4 * H <= row["start_ts"] < T0 + 10 * H
+        }
+
+    hourly_before = snapshot((await sm.read_rows(hass, ["sensor.live"]))["sensor.live"])
+    short_before = snapshot(
+        (await sm.read_rows(hass, ["sensor.live"], StatisticsShortTerm))["sensor.live"]
+    )
+
+    plan = await plan_redistribute(
+        hass,
+        "sensor.live",
+        windows=[{"start": _at(4), "catchup_hour": _at(9)}],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    assert plan.report["windows"][0]["values_needed"]["five_minute"] == 72
+    result = await redistribute_statistics(hass, plan)
+    assert result["next_compile"]["ok"] is True
+
+    assert (
+        snapshot((await sm.read_rows(hass, ["sensor.live"]))["sensor.live"])
+        == hourly_before
+    )
+    assert (
+        snapshot(
+            (await sm.read_rows(hass, ["sensor.live"], StatisticsShortTerm))[
+                "sensor.live"
+            ]
+        )
+        == short_before
+    )
+    assert await _changes(hass, "sensor.live", range(4, 12)) == pytest.approx([1.0] * 8)
+    window_short = [
+        row
+        for row in (await sm.read_rows(hass, ["sensor.live"], StatisticsShortTerm))[
+            "sensor.live"
+        ]
+        if T0 + 4 * H <= row["start_ts"] < T0 + 10 * H
+    ]
+    assert len(window_short) == 72
+    sums_5 = [row["sum"] for row in window_short]
+    assert all(b >= a for a, b in zip([4.0, *sums_5], sums_5))  # never down
+    assert window_short[-1]["sum"] == 10.0 and window_short[-1]["state"] == 1010.0
+
+    # HA's own compile goes on from the newest 5-minute row (hour 11's
+    # last, reading 1012): the meter reads 1014, so +2 on top of 12.
+    freezer.tick(timedelta(minutes=5))
+    hass.states.async_set("sensor.live", "1014", meter)
+    freezer.tick(timedelta(minutes=5))
+    await async_wait_recording_done(hass)
+    now = dt_util.utcnow()
+    do_adhoc_statistics(
+        hass, start=now.replace(minute=now.minute - now.minute % 5, second=0)
+    )
+    await async_wait_recording_done(hass)
+    latest = (await sm.read_rows(hass, ["sensor.live"], StatisticsShortTerm))[
+        "sensor.live"
+    ][-1]
+    assert latest["sum"] == pytest.approx(14.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_component_and_reference_in_wh_under_a_kwh_target(
+    hass: HomeAssistant, freezer
+):
+    freezer.move_to(_at(30))
+    a = {h: 0.0 if 2 <= h <= 4 else 4000.0 if h == 5 else 1000.0 for h in range(8)}
+    await _hourly(
+        hass, "sensor.a_wh", {h: v for h, v in _cumulative(a).items()}, unit="Wh"
+    )
+    await _hourly(
+        hass, "sensor.total", _cumulative({h: a[h] / 1000 + 2 for h in range(8)})
+    )
+    await _hourly(
+        hass,
+        "sensor.ref_wh",
+        _cumulative({h: 2000.0 if h == 3 else 1000.0 for h in range(8)}),
+        unit="Wh",
+    )
+    plan = await plan_redistribute(
+        hass,
+        "sensor.total",
+        windows=[{"start": _at(2), "catchup_hour": _at(5)}],
+        detect_on="sensor.a_wh",
+        reference_ids=["sensor.ref_wh"],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    [window] = plan.report["windows"]
+    assert window["moved"] == 4  # kWh, the target's unit
+    assert window["references"][0]["ratio_to_moved"] == pytest.approx(5 / 4)
+    await redistribute_statistics(hass, plan)
+    # a's 4 kWh shaped 1:2:1:1 by the reference (scaled to 4), plus b's 2.
+    assert await _changes(hass, "sensor.total", range(2, 8)) == pytest.approx(
+        [2.8, 3.6, 2.8, 2.8, 3.0, 3.0]
+    )

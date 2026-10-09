@@ -31,8 +31,9 @@ per hour, the first source that has it:
 Or `values`: the caller's own numbers, one per hour - and, for the part of
 the window the meter still has 5-minute rows for, one per 5-minute slot
 (12 per hour) - checked, never shaped: their sum must be the window total
-(or within 2 % with `normalize`), none negative, none above
-`max_per_hour`.
+(or within 2 % with `normalize`), none negative or non-finite, none
+above `max_per_hour`. References given with values only compare: their
+ratio and fit, and their hours next to the values', hour by hour.
 
 5-minute rows inside the window (the recorder keeps them ~10 days) are
 rewritten too, so 5-minute graphs match: each hour's new value split by
@@ -50,6 +51,7 @@ before/after by day and month, and which source shaped how many hours.
 from __future__ import annotations
 
 import bisect
+import math
 import statistics as stats_lib
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -162,11 +164,14 @@ def detect_windows(
     high: float = float("inf"),
 ) -> list[Window]:
     """Every run of at least min_silent_hours hours without a change (no
-    row, or change 0) followed by an hour above min_catchup, in [low, high)."""
+    row, or change 0) followed by an hour above min_catchup, whose catch-up
+    hour is in [low, high). The silent hours are counted from the series'
+    start, not from `low`: an outage that began before it keeps its whole
+    window, rather than its catch-up being squeezed into the part after."""
     if not series.rows:
         return []
-    first = max(series.starts[0] + HOUR, low - low % HOUR if low > 0 else low)
-    last = min(series.starts[-1], high - HOUR)
+    first = series.starts[0] + HOUR
+    last = series.starts[-1]
     windows: list[Window] = []
     silent = 0
     hour = first
@@ -175,7 +180,11 @@ def detect_windows(
         if abs(change) < _EPSILON:
             silent += 1
         else:
-            if silent >= min_silent_hours and change > min_catchup:
+            if (
+                silent >= min_silent_hours
+                and change > min_catchup
+                and low <= hour < high
+            ):
                 windows.append(Window(hour - silent * HOUR, hour))
             silent = 0
         hour += HOUR
@@ -370,7 +379,12 @@ def _parse_values(
         for item in values:
             start = dt_util.parse_datetime(str(item.get("start", "")))
             value = item.get("value")
-            if start is None or not isinstance(value, int | float):
+            if (
+                start is None
+                or not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
                 raise sm.StatisticsChangeRefusedError(
                     f"each value is {{'start': ISO 8601 time, 'value': number}}, "
                     f"got {item!r}"
@@ -382,10 +396,16 @@ def _parse_values(
                 )
             parsed[timestamp] = float(value)
         return parsed
-    if len(values) != len(periods) or not all(
-        isinstance(value, int | float) and not isinstance(value, bool)
+    if not all(
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
         for value in values
     ):
+        raise sm.StatisticsChangeRefusedError(
+            "each value is a finite number (or all are {start, value})"
+        )
+    if len(values) != len(periods):
         raise sm.StatisticsChangeRefusedError(
             f"this window needs {needed} (5-minute from "
             f"{_iso(five_minute_from) if hourly < len(window.hours) else 'nowhere'})"
@@ -452,8 +472,13 @@ async def plan_redistribute(
         problems.append("pass exactly one of windows or detect")
     if values is not None and (windows is None or len(windows) != 1):
         problems.append("values go with exactly one explicit window")
-    if values is not None and (reference_ids or profile_weeks):
-        problems.append("values replace the shape - no references or profile with them")
+    if values is not None and profile_weeks:
+        problems.append("values replace the shape - no profile with them")
+    if overlap := {statistic_id, component_id} & set(reference_ids):
+        problems.append(
+            f"'{sorted(overlap)[0]}' can't be its own reference - a reference is "
+            "another meter that kept recording"
+        )
     if backups.is_backup(statistic_id):
         problems.append("a backup can't be edited - restore_statistics restores one")
     if problems:
@@ -669,6 +694,8 @@ def _redistribute(
         )
         warnings += shape_warnings
         report["methods"] = counts
+    if inputs.references:
+        # With values, only compared against - see _parse_values.
         report["references"] = []
         for reference in inputs.references:
             measured = [
@@ -703,6 +730,18 @@ def _redistribute(
         report["quality"] = [
             _quality(component, reference, window) for reference in inputs.references
         ]
+        if values is not None:
+            report["reference_by_hour"] = {
+                reference.statistic_id: [
+                    (
+                        round(change, 6)
+                        if (change := reference.measured(hour)) is not None
+                        else None
+                    )
+                    for hour in hours
+                ]
+                for reference in inputs.references
+            }
 
     new_target = {
         hour: target_current[hour] - current[hour] + new_component[hour]
@@ -722,6 +761,15 @@ def _redistribute(
         )
     report["max_hour_before"] = round(max(target_current.values()), 6)
     report["max_hour_after"] = round(max(new_target.values()), 6)
+    if values is not None:
+        report["by_hour"] = [
+            {
+                "hour": _iso(hour),
+                "before": round(target_current[hour], 6),
+                "after": round(new_target[hour], 6),
+            }
+            for hour in hours
+        ]
     report["by_day"] = _before_after(target_current, new_target, "%Y-%m-%d", "day")
     report["by_month"] = _before_after(target_current, new_target, "%Y-%m", "month")
     if warnings:
