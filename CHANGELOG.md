@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.3] - 2026-10-09
+
+### Added
+- `derive_statistics` builds a meter statistic from another one, hour by hour (issue #143). It's made for the Energy dashboard's cost and compensation series, which HA only fills from the moment a source is configured: swapping the source sensor starts an empty series, and a correction to the kWh series (an "Adjust sum" catch-up) is never priced.
+  - **The factor:** each hour's change of the source meter is multiplied by one of
+    - a fixed number (a feed-in rate);
+    - rate periods, `[{from, value}, ...]`, for tariff changes;
+    - a measurement statistic's hourly mean, for a dynamic price. A missing hour takes the last known price, and the preview counts those hours and the longest gap.
+  - **Units:** a price in e.g. `EUR/kWh` converts the meter to kWh first. For a number or periods, `source_unit` says what they're per.
+  - **The target:**
+    - a new statistic under `ha_dev_tools:`, with `unit` and an optional `name`; or
+    - an existing meter statistic whose `start`..`end` range is replaced. Inside the range the derived series counts, and target hours without a source row count 0. Outside it, the target keeps its own changes.
+  - **A live target**, such as the dashboard's own cost sensor, goes on recording from the new sum (the same continuation as `merge_statistics`), and `next_compile` checks it.
+  - **The preview** shows hours, total, totals by local month and, for an existing target, what the range held before and the difference.
+  - **Backups:** an existing target is backed up first, in the recorder and to the mirror repo, like the other statistics writes. Point the dashboard at a new statistic with `write_energy_config` (`stat_compensation` / `stat_cost`).
+  - **Example:** export compensation since commissioning is `derive_statistics source_statistic_id=<export meter> factor=<feed-in rate> source_unit=kWh target_statistic_id=ha_dev_tools:grid_export_compensation unit=EUR`, and then `stat_compensation` set to it.
+
 ## [2.26.2] - 2026-10-09
 
 ### Fixed

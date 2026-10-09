@@ -50,6 +50,7 @@ from . import (
     registry_manager,
     service_call_manager,
     statistics_backup,
+    statistics_derive,
     statistics_manager,
     statistics_merge,
     supervisor_manager,
@@ -1671,6 +1672,109 @@ class MergeStatisticsTool(WriteGatedTool):
         return await _guarded_statistics_write(
             hass,
             [args["target_statistic_id"]],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+
+class DeriveStatisticsTool(WriteGatedTool):
+    """Build a meter statistic from another one - see statistics_derive.py."""
+
+    name = "derive_statistics"
+    description = (
+        "Build a meter (sum) statistic from another one, hour by hour: each "
+        "hour's change of source_statistic_id times factor - a number (a "
+        "feed-in rate), rate periods [{from, value}, ...] (tariff changes), "
+        "or a measurement statistic's id whose hourly mean is the factor (a "
+        "dynamic price; a missing hour takes the last known price). For the "
+        "Energy dashboard's cost/compensation series, which HA only fills "
+        "from the moment a source is configured: rebuild the EUR history of "
+        "a meter, corrections included. A price in e.g. 'EUR/kWh' converts "
+        "the meter to kWh first; for a number or periods, source_unit says "
+        "what they're per. target_statistic_id is a new statistic under "
+        "'ha_dev_tools:' (pass unit, e.g. 'EUR', and optionally name) or an "
+        "existing meter statistic whose start..end range is replaced: "
+        "inside it the derived series counts (target hours without a source "
+        "row count 0), outside it the target keeps its own changes, and a "
+        "live target goes on recording from the new sum (next_compile "
+        "checks it). The preview shows hours, total, totals by month and, "
+        "for an existing target, what the range held before. An existing "
+        "target is backed up first, like merge_statistics. Point the "
+        "dashboard at a new statistic with write_energy_config (stat_cost / "
+        "stat_compensation)."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("source_statistic_id"): str,
+            vol.Required("factor"): vol.Any(int, float, [dict], str),
+            vol.Required("target_statistic_id"): str,
+            vol.Optional("unit"): str,
+            vol.Optional("source_unit"): str,
+            vol.Optional("name"): str,
+            vol.Optional("start"): str,
+            vol.Optional("end"): str,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> statistics_merge.MergePlan:
+        return await statistics_derive.plan_derive(
+            hass,
+            args["source_statistic_id"],
+            args["factor"],
+            args["target_statistic_id"],
+            unit=args.get("unit"),
+            source_unit=args.get("source_unit"),
+            name=args.get("name"),
+            start=(
+                _parse_datetime(args["start"], field="start")
+                if args.get("start")
+                else None
+            ),
+            end=_parse_datetime(args["end"], field="end") if args.get("end") else None,
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The derived series as it would be written, or why it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return {"problems": str(exc)}
+        return {"would_derive": cast(JsonValueType, plan.preview())}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up an existing target, then write the derived series."""
+        args = tool_input.tool_args
+        try:
+            plan = await self._plan(hass, args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return _tool_error(exc)
+
+        async def write() -> JsonObjectType:
+            result = await statistics_merge.merge_statistics(hass, plan)
+            result["derived"] = result.pop("merged")
+            return cast(JsonObjectType, result)
+
+        return await _guarded_statistics_write(
+            hass,
+            [] if plan.target.get("new") else [args["target_statistic_id"]],
             self.name,
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
@@ -4197,6 +4301,7 @@ class DevToolsAPI(llm.API):
                 ClearStatisticsTool(),
                 MigrateStatisticsTool(),
                 MergeStatisticsTool(),
+                DeriveStatisticsTool(),
                 RestoreStatisticsTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),
