@@ -220,7 +220,9 @@ async def get_config_file(
     if rel_path is None:
         return {"files": [{"path": rel, "via": via} for rel, via in files.items()]}
     content = await _content(hass, rel_path, source)
-    findings = mirror_secrets.find_file_credentials(rel_path, content)
+    findings = await hass.async_add_executor_job(
+        mirror_secrets.find_file_credentials, rel_path, content
+    )
     if findings:
         raise ConfigFileError(_withheld(f"'{rel_path}'", findings))
     return {
@@ -262,7 +264,9 @@ async def _get_blocks(
                 "via": files[candidate],
                 "lines": [first, last],
             }
-            if findings := mirror_secrets.find_file_credentials(candidate, text):
+            if findings := await hass.async_add_executor_job(
+                mirror_secrets.find_file_credentials, candidate, text
+            ):
                 block["withheld"] = _withheld("This block", findings)
             else:
                 block["content"] = text

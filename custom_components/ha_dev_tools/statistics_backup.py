@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
+from homeassistant.components.recorder.models import StatisticMetaData
 from homeassistant.components.recorder.statistics import (
     STATISTIC_UNIT_TO_UNIT_CONVERTER,
     UNIT_CLASS_TO_UNIT_CONVERTER,
@@ -95,30 +96,49 @@ async def create_backups(
         if statistic_id in metadata
     }
 
+    backup_meta = {
+        statistic_id: cast(
+            StatisticMetaData,
+            {
+                **metadata[statistic_id],
+                "name": f"Backup of {statistic_id} before {operation} "
+                f"{now.isoformat()}",
+                "source": DOMAIN,
+                "statistic_id": backup_id,
+            },
+        )
+        for statistic_id, backup_id in backups.items()
+    }
+
     def queue() -> None:
         for statistic_id, backup_id in backups.items():
-            sm.queue_import(
-                hass,
-                {
-                    **metadata[statistic_id],
-                    "name": f"Backup of {statistic_id} before {operation} "
-                    f"{now.isoformat()}",
-                    "source": DOMAIN,
-                    "statistic_id": backup_id,
-                },
-                rows.get(statistic_id, []),
-            )
+            sm.queue_import(hass, backup_meta[statistic_id], rows.get(statistic_id, []))
 
-    await sm.on_recorder(hass, queue)
-    copied = await sm.describe_statistics(hass, list(backups.values()))
-    for statistic_id, backup_id in backups.items():
-        expected = len(rows.get(statistic_id, []))
-        if (copied.get(backup_id) or {}).get("rows", -1) != expected:
-            raise sm.StatisticsBackupError(
-                f"the in-recorder backup of '{statistic_id}' ({backup_id}) "
-                f"didn't get all {expected} hourly rows, so nothing was "
-                "changed"
+    async def verify() -> list[str]:
+        problems = []
+        for statistic_id, backup_id in backups.items():
+            problems += await sm.row_mismatches(
+                hass, backup_id, rows.get(statistic_id, [])
             )
+        return problems
+
+    try:
+        for meta in backup_meta.values():
+            sm.check_importable(meta)
+        await sm.on_recorder_verified(
+            hass, queue, verify, what="the in-recorder backup copy"
+        )
+    except (
+        sm.StatisticsTimeoutError,
+        sm.StatisticsNotAppliedError,
+        sm.StatisticsChangeRefusedError,
+    ) as exc:
+        # The write it protects hasn't been queued - say so (issue #145).
+        raise sm.StatisticsBackupError(
+            f"{exc} - so nothing was changed. Run the write again once the "
+            "recorder has caught up (a timed-out copy may still complete - "
+            "list_statistics source=ha_dev_tools shows the backups)"
+        ) from exc
     return backups
 
 
@@ -250,6 +270,12 @@ async def restore_statistics(
     )
     metadata = plan["metadata"]
     instance = sm._instance(hass)
+    # Before anything is queued: the clear must never go ahead of an import
+    # HA would then refuse.
+    sm.check_importable(metadata)
+    now = dt_util.utcnow().timestamp()
+    cutoff = now - now % 3600 - 3600
+    expected = {row["start_ts"] for row in rows}
 
     def queue() -> None:
         if plan["overwrites"]:
@@ -258,12 +284,21 @@ async def restore_statistics(
         if metadata["has_sum"] and metadata["source"] == "recorder" and rows:
             sm.queue_short_term_seed(hass, metadata, rows[-1])
 
-    await sm.on_recorder(hass, queue)
+    async def verify() -> list[str]:
+        # The backup's rows, and nothing older than the restore besides -
+        # a live entity may have compiled a new hour since.
+        left = [
+            row["start_ts"]
+            for row in (await sm.read_rows(hass, [target])).get(target, [])
+            if row["start_ts"] not in expected and row["start_ts"] < cutoff
+        ]
+        return await sm.row_mismatches(hass, target, rows) + [
+            f"{target} still has its own row for {sm._iso(start)}" for start in left
+        ]
+
+    await sm.on_recorder_verified(hass, queue, verify, what="the restore")
     restored = (await sm.describe_statistics(hass, [target])).get(target)
-    result: dict[str, Any] = {
-        "restored": restored,
-        "complete": (restored or {}).get("rows") == len(rows),
-    }
+    result: dict[str, Any] = {"restored": restored, "complete": True}
     if metadata["has_sum"]:
         result["next_compile"] = await sm.continuity_check(hass, target)
     return result

@@ -290,7 +290,11 @@ async def mirror_write(
     - After-commit: pushes content_after, skipped if it's already what the
       mirror repo now has (e.g. the write produced byte-identical content).
     """
-    findings = _credential_findings(content_before, content_after, content_type)
+    # Off the event loop: ruamel's YAML() scans its plugin directory, and
+    # parsing a large file is CPU work - HA flagged the blocking scandir.
+    findings = await hass.async_add_executor_job(
+        _credential_findings, content_before, content_after, content_type
+    )
     if findings:
         return MirrorResult(
             mirrored=False,
@@ -344,7 +348,11 @@ async def mirror_dry_run(
     that. Resolves the mirror repo's actual default branch (issue #50)
     rather than assuming "main".
     """
-    findings = _credential_findings(content_before, content_after, content_type)
+    # Off the event loop: ruamel's YAML() scans its plugin directory, and
+    # parsing a large file is CPU work - HA flagged the blocking scandir.
+    findings = await hass.async_add_executor_job(
+        _credential_findings, content_before, content_after, content_type
+    )
     if findings:
         return MirrorResult(
             mirrored=False,
@@ -423,7 +431,9 @@ async def mirror_snapshots(
             skipped=tuple((path, f"mirror push failed: {exc}") for path, _ in files)
         )
     for path, content in files:
-        findings = mirror_secrets.find_file_credentials(path, content)
+        findings = await hass.async_add_executor_job(
+            mirror_secrets.find_file_credentials, path, content
+        )
         if findings:
             skipped.append((path, _snapshot_skip_reason(findings)))
             continue

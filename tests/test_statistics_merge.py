@@ -397,7 +397,9 @@ async def test_backups_are_listed_with_their_origin_and_age(
 async def test_an_incomplete_backup_stops_the_write(hass: HomeAssistant, monkeypatch):
     await _seed(hass)
     monkeypatch.setattr(sm, "queue_import", lambda *_: None)
-    with pytest.raises(sm.StatisticsBackupError, match="didn't get all 3"):
+    with pytest.raises(
+        sm.StatisticsBackupError, match="has no row for.*nothing was changed"
+    ):
         await backups.create_backups(hass, ["sensor.old_meter"], "clear_statistics")
 
 
@@ -534,7 +536,8 @@ async def test_merge_statistics_tool(hass: HomeAssistant):
             hass, _input(tool.name, **args, overlap="target_wins"), _llm_context()
         )
     assert failed["error_type"] == "StatisticsBackupError"
-    assert "didn't get all 5" in failed["error"]
+    assert "has no row for" in failed["error"]
+    assert "nothing was changed" in failed["error"]
 
 
 @pytest.mark.asyncio
