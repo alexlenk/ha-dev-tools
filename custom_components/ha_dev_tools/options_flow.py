@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-import voluptuous as vol
+try:
+    # HA 2026.9+ validates with probatio and types its schemas (llm.Tool's
+    # parameters, a flow's data_schema) as probatio's - the voluptuous it
+    # installs is a shim handing out the same objects (issue #138).
+    import probatio as vol
+except ImportError:  # pragma: no cover - HA before 2026.9
+    import voluptuous as vol  # type: ignore[no-redef]
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.helpers import selector
 
