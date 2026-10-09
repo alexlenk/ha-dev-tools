@@ -1543,7 +1543,9 @@ class _StubWriteTool(WriteGatedTool):
 
     name = "stub_write"
     description = "stub"
-    parameters = vol.Schema({vol.Optional("confirm_token"): str})
+    parameters = vol.Schema(
+        {vol.Optional("foo"): str, vol.Optional("confirm_token"): str}
+    )
 
     def __init__(self) -> None:
         self.write_called = False

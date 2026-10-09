@@ -76,6 +76,8 @@ ARM_FILE_NAME = ".storage/ha_dev_tools.armed"
 IDLE_TIMEOUT = timedelta(minutes=30)
 MAX_SESSION = timedelta(hours=4)
 CLEANUP_INTERVAL = timedelta(minutes=5)
+# How far an arm time may lie ahead of this host's clock (see _is_expired).
+CLOCK_SKEW = timedelta(minutes=1)
 
 
 class NotArmedError(Exception):
@@ -114,7 +116,10 @@ def _is_expired(path: Path, *, now: float | None = None) -> bool:
     armed_at = _read_armed_at(path)
     if armed_at is None or now - armed_at > MAX_SESSION.total_seconds():
         return True
-    return False
+    # A future arm time would hold the hard cap off indefinitely (until
+    # then plus 4 hours) - only a mistyped or deliberately forward-dated
+    # file has one, so it fails closed like an unparseable one.
+    return armed_at > now + CLOCK_SKEW.total_seconds()
 
 
 def _armed_error_message(path: Path) -> str | None:

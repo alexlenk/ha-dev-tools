@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.6] - 2026-10-09
+
+Findings of a full code audit, each fixed with a test that failed before.
+
+### Security
+- **`create_helper` / `update_helper` could run any WebSocket command as the calling admin.** The helper's `config` was spread into the WebSocket message after its `type`, so a `type` key in the config replaced the command. That allowed any service call, bypassing the deliberately narrow service tools (#76), and could mint a long-lived access token (verified: it returned one). That token outlives the arm window. `id` and `type` can no longer be passed as command arguments.
+  - **How to check whether it was used:** in your HA profile, under Security, look for long-lived access tokens you didn't create, and delete them. With mirroring on, the mirror repo's `.storage/<domain>` history shows every helper write.
+- **Tool arguments were never checked against their schema.** Home Assistant passes the client's JSON straight to a tool, so the declared types, ranges and required fields weren't enforced. Examples: `get_logs` `lines` above 1000, a `list_mqtt_topics` listen beyond its 10 s cap, a string where a list belongs (iterated character by character), or an unknown key crashing a tool. Every call is now validated first, with the schema's defaults filled in, and an invalid one returns `error_type: "Invalid"`. A tool error that escapes is now returned as a tool error and logged, rather than raised raw.
+- **`package` could point a write at another allowlisted file.** `write_automation` / `write_script` / `create_template_entity` joined it as `packages/<package>`, and the path check normalised `..` away. With `package="../scripts.yaml"`, an automation was written into `scripts.yaml` as a script named `automation`. `package` must now be a `.yaml` path inside `packages/`. File paths with a `..` component are refused outright.
+- **A symlink could lead around the denylist.** The denylist was matched against a path's name, not against where it leads. A link inside `packages/` to `secrets.yaml` was readable. It's now also matched against the resolved path. Containment in the config folder is now a path check, not a string prefix, so `/config` no longer also matches `/config_old`.
+- **The mirror token was sent to the browser.** The options form pre-filled the token field, and a form's defaults are sent to the frontend, password field or not. The field is now left empty, and leaving it empty keeps the stored token. The mirror repository must be in `owner/repo` form.
+- **A future time in the arm file lifted the 4-hour cap.** The cap counts from the time written in the file, so a mistyped or forward-dated one kept dev_tools armed for as long as it stayed in use. A time more than a minute ahead now counts as not armed.
+- **`get_rest_command` returned literal credentials.** Passwords, API keys, `Bearer` tokens and URL passwords came back as written, even though `get_config_file` withholds the same block (#105). They're now masked, and `!secret` references are shown as before. The same gap in `get_automation` / `get_script` is tracked in #151: those feed write round-trips, so masking needs a decision first.
+- **Hardening:**
+  - Mirror paths are percent-encoded in GitHub API URLs, and a `.`/`..` segment is refused.
+  - `get_addon_logs` only takes an add-on slug.
+  - The credential checks also recognise `passphrase`, `psk`, `encryption_key`, `network_key` and header spellings like `X-Api-Key`.
+  - An inactive user is never resolved as the caller.
+
+### Fixed
+- `get_logs` ignored `since` / `until`, which its description offers. They're now applied, as ISO 8601 times (a time without an offset is in HA's time zone). Log times are timezone-aware, and `lines` no longer has a default that would override `offset`/`limit` paging.
+- Tools say which integration provides them (`Tool.integration`), which HA 2026.10 logs a warning about otherwise. Returning `llm.ToolResult` (HA 2026.10's other deprecation, breaking in 2027.11) is tracked in #152.
+
 ## [2.26.5] - 2026-10-09
 
 ### Fixed

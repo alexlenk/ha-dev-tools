@@ -21,6 +21,7 @@ trip.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from homeassistant.components.hassio import const as hassio_const
@@ -35,6 +36,10 @@ from homeassistant.core import HomeAssistant
 # older ones (confirmed: 2025.1.4) - checked directly rather than assumed,
 # same pattern as ws_call.py's ActiveConnection signature handling.
 _HASSIO_DATA_KEY = getattr(hassio_const, "DATA_COMPONENT", hassio_const.DOMAIN)
+
+
+# The Supervisor's own add-on slug format.
+_SLUG = re.compile(r"[A-Za-z0-9][-_.A-Za-z0-9]*")
 
 
 class SupervisorNotAvailableError(Exception):
@@ -79,6 +84,10 @@ async def get_addon_logs(
     limit or filtering of its own.
     """
     hassio = _get_hassio(hass)
+    if not _SLUG.fullmatch(slug) or ".." in slug:
+        # Interpolated into the Supervisor API path below: a `/` would
+        # reach other endpoints under /addons/ with HA core's own token.
+        return {"error": f"{slug!r} isn't an add-on slug (list_addons shows them)"}
     try:
         text = await hassio.send_command(
             f"/addons/{slug}/logs", method="get", return_text=True

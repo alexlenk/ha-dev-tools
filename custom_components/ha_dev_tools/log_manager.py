@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .security import SecurityManager
 
@@ -137,7 +138,8 @@ class LogManager:
         """
         messages = record.get("message") or [""]
         return LogEntry(
-            timestamp=datetime.fromtimestamp(record["timestamp"]),
+            # Timezone-aware, so since/until (ISO 8601, any offset) compare.
+            timestamp=dt_util.utc_from_timestamp(record["timestamp"]),
             level=record["level"],
             source="core",
             message=messages[-1],
@@ -159,12 +161,14 @@ class LogManager:
         """
         filtered = entries
 
-        # Filter by time range
+        # Filter by time range (a naive time is local, as HA reads one)
         if filters.since:
-            filtered = [e for e in filtered if e.timestamp >= filters.since]
+            since = dt_util.as_utc(filters.since)
+            filtered = [e for e in filtered if e.timestamp >= since]
 
         if filters.until:
-            filtered = [e for e in filtered if e.timestamp <= filters.until]
+            until = dt_util.as_utc(filters.until)
+            filtered = [e for e in filtered if e.timestamp <= until]
 
         # Filter by log level
         if filters.level:

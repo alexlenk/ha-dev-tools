@@ -599,9 +599,15 @@ class SecurityManager:
             # Normalize the path using os.path.normpath for consistent handling
             normalized_path = os.path.normpath(file_path)
 
-            # Check for path traversal attempts (but allow absolute paths
-            # starting with /config/ or /addon_configs/)
-            if ".." in normalized_path:
+            # Any `..` component is refused, before normalizing: normpath
+            # folds `packages/../scripts.yaml` into `scripts.yaml` lexically,
+            # so the checks below would pass a path the callers then open
+            # as written - where the OS, following symlinks, may resolve it
+            # elsewhere - and a `package` argument could aim a write at
+            # another allowlisted file.
+            if ".." in normalized_path or ".." in file_path.replace(os.sep, "/").split(
+                "/"
+            ):
                 self.log_security_event(
                     "path_traversal_attempt",
                     {"path": file_path, "operation": operation},
@@ -660,13 +666,24 @@ class SecurityManager:
                 resolved_path = full_path.resolve()
                 config_path_resolved = config_path.resolve()
 
-                # Check if path is within config directory
-                if not str(resolved_path).startswith(str(config_path_resolved)):
+                # Check if path is within config directory - as a path, not
+                # a string prefix (/config would also prefix /config_old).
+                if not resolved_path.is_relative_to(config_path_resolved):
                     self.log_security_event(
                         "path_outside_config",
                         {"path": file_path, "operation": operation},
                     )
                     return False, ERROR_INVALID_PATH
+                # The denylist applies to what the path really is, too: a
+                # symlink inside an allowlisted folder (packages/x.yaml ->
+                # secrets.yaml) passed the checks above by its own name.
+                real = resolved_path.relative_to(config_path_resolved).as_posix()
+                if self.is_denylisted(real) or self.is_denylisted(f"/config/{real}"):
+                    self.log_security_event(
+                        "denylist_access_attempt",
+                        {"path": file_path, "resolved": real, "operation": operation},
+                    )
+                    return False, ERROR_BLACKLISTED_FILE
 
             except (OSError, ValueError) as e:
                 _LOGGER.warning("Path resolution failed for %s: %s", file_path, e)

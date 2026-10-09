@@ -35,6 +35,8 @@ from homeassistant.helpers import llm
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 10
+# The WebSocket message's own fields - never command arguments.
+_RESERVED_KEYS = frozenset({"id", "type"})
 
 
 class WebSocketCommandError(HomeAssistantError):
@@ -65,7 +67,7 @@ async def resolve_user(hass: HomeAssistant, llm_context: llm.LLMContext) -> User
     """
     user_id = llm_context.context.user_id if llm_context.context else None
     user = await hass.auth.async_get_user(user_id) if user_id else None
-    if user is None:
+    if user is None or not user.is_active:
         raise UnresolvedUserError(
             "Could not resolve a real Home Assistant user from this request's "
             "context - refusing rather than acting with elevated/ambiguous "
@@ -103,6 +105,15 @@ async def call_ws_command(
     subscription-style command that streams rather than resolving once -
     not supported here, only fire-once request/response commands are).
     """
+    if reserved := sorted(_RESERVED_KEYS & kwargs.keys()):
+        # A caller-supplied dict spread into kwargs (a helper's config)
+        # must never pick the command itself: `type` would run any WS
+        # command as this user - any service, or minting a long-lived
+        # access token.
+        raise ValueError(
+            f"{', '.join(repr(key) for key in reserved)} can't be passed to "
+            f"'{command_type}' - it's part of the WebSocket message itself"
+        )
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
 
@@ -152,7 +163,7 @@ async def call_ws_command(
         **{k: v for k, v in all_kwargs.items() if k in accepted}
     )
 
-    msg: dict[str, Any] = {"id": 1, "type": command_type, **kwargs}
+    msg: dict[str, Any] = {**kwargs, "id": 1, "type": command_type}
     connection.async_handle(msg)
 
     try:

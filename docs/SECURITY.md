@@ -117,6 +117,17 @@ allowlist/denylist of paths - independent of, and in addition to, the two
 gates above. Sensitive files (`secrets.yaml`, auth storage, the arm file
 itself) are permanently denylisted no matter what.
 
+A path with a `..` component is refused outright, even when it would stay
+inside the config folder, and the denylist is matched against where a path
+really leads as well as its name, so a symlink can't lead around it.
+Containment in the config folder is a path check, not a string prefix.
+
+Every tool's arguments are checked against its declared schema before it
+runs: Home Assistant itself passes an MCP client's JSON to a tool
+unchecked. And no tool argument can choose the WebSocket command a tool
+runs. A helper's `config` once could, by carrying a `type` key, which ran
+any command as the calling admin, up to minting a long-lived access token.
+
 There's currently no way to customize this - it's defaults-only (no
 `configuration.yaml` option, no UI options flow yet). The defaults
 (`custom_components/ha_dev_tools/const.py`):
