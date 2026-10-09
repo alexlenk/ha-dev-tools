@@ -50,6 +50,7 @@ from . import (
     registry_manager,
     service_call_manager,
     statistics_backup,
+    statistics_derive,
     statistics_manager,
     statistics_merge,
     supervisor_manager,
@@ -1671,6 +1672,133 @@ class MergeStatisticsTool(WriteGatedTool):
         return await _guarded_statistics_write(
             hass,
             [args["target_statistic_id"]],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+
+class DeriveStatisticsTool(WriteGatedTool):
+    """Derive a scaled statistic from a meter - see statistics_derive.py."""
+
+    name = "derive_statistics"
+    description = (
+        "Build a scaled statistic from a meter's hourly changes - HA's "
+        "Energy dashboard prices import/export only while a source is "
+        "configured, so a source swap or a later meter correction leaves "
+        "the cost/compensation series empty; this rebuilds it from the "
+        "meter itself. Every hour's change in the range is multiplied by "
+        "factor - a fixed number (a feed-in rate, e.g. 0.0794 per kWh), a "
+        "list of {from, value} periods (tariff changes), or a mean "
+        "statistic (a dynamic price, multiplied hour by hour) - and "
+        "accumulated into target_statistic_id's running sum: an existing "
+        "meter statistic, replaced in the range (its rows after it are "
+        "shifted onto the new basis, so a live target continues from the "
+        "derived sum), or a new external one ('ha_dev_tools:...', which "
+        "needs unit). The factor is per source_unit (the source's own "
+        "unit by default); source rows are converted within one unit "
+        "class. Hours the source covers but the factor doesn't are "
+        "refused, listed. The preview shows the derived total, per-month "
+        "totals with the old ones for comparison, and how many of the "
+        "target's rows the range replaces. An existing target is backed "
+        "up first, in the recorder (restore_statistics) and to the mirror "
+        "repo - refused if either fails; with mirroring off it needs "
+        "allow_no_backup=true, which skips only the mirror copy. A long "
+        "derive answers still_running after 40 s and finishes in the "
+        "background - don't call it again. The result can be set as the "
+        "Energy dashboard's cost/compensation statistic via "
+        "write_energy_config."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("source_statistic_id"): str,
+            vol.Required("target_statistic_id"): str,
+            vol.Required("factor"): vol.Any(
+                vol.Coerce(float),
+                str,
+                vol.All(
+                    [
+                        {
+                            vol.Required("from"): str,
+                            vol.Required("value"): vol.Coerce(float),
+                        }
+                    ],
+                    vol.Length(min=1),
+                ),
+            ),
+            vol.Optional("start"): str,
+            vol.Optional("end"): str,
+            vol.Optional("unit"): str,
+            vol.Optional("source_unit"): str,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> statistics_derive.DerivePlan:
+        factor: float | str | list[tuple[Any, float]] = args["factor"]
+        if isinstance(factor, list):
+            factor = [
+                (
+                    _parse_datetime(period["from"], field="from"),
+                    float(period["value"]),
+                )
+                for period in factor
+            ]
+        return await statistics_derive.plan_derive(
+            hass,
+            args["source_statistic_id"],
+            args["target_statistic_id"],
+            factor,
+            start=(
+                _parse_datetime(args["start"], field="start")
+                if args.get("start")
+                else None
+            ),
+            end=_parse_datetime(args["end"], field="end") if args.get("end") else None,
+            unit=args.get("unit"),
+            source_unit=args.get("source_unit"),
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The derivation as it would be written, or why it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return {"problems": str(exc)}
+        return {"would_derive": cast(JsonObjectType, plan.preview())}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up an existing target, then write the derivation."""
+        args = tool_input.tool_args
+        try:
+            plan = await self._plan(hass, args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return _tool_error(exc)
+
+        async def write() -> JsonObjectType:
+            return cast(
+                JsonObjectType, await statistics_derive.derive_statistics(hass, plan)
+            )
+
+        return await _guarded_statistics_write(
+            hass,
+            [args["target_statistic_id"]] if plan.existing else [],
             self.name,
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
@@ -4197,6 +4325,7 @@ class DevToolsAPI(llm.API):
                 ClearStatisticsTool(),
                 MigrateStatisticsTool(),
                 MergeStatisticsTool(),
+                DeriveStatisticsTool(),
                 RestoreStatisticsTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),

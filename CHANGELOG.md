@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`derive_statistics`** - builds a scaled statistic from a meter's hourly changes: a fixed rate (a feed-in tariff), `{from, value}` rate periods (tariff changes) or a mean statistic (a dynamic price) multiplied hour by hour. The result lands in an existing meter statistic - replaced in the range, with the same live-continuation guarantees as `merge_statistics` (later rows shift onto the new basis, a target without 5-minute rows gets one seeded) - or in a new external one (`ha_dev_tools:...`). The preview shows the derived total, per-month totals with the old ones for comparison, and how many of the target's rows the range replaces (issue #143).
+
 ## [2.26.2] - 2026-10-09
 
 ### Fixed
