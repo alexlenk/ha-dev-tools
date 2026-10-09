@@ -266,9 +266,13 @@ RESTORE_HINT = (
 )
 
 
-# HA's own recorder/clear_statistics waits 10 s; a big clear on SQLite can
-# take longer, and the work stays queued either way.
-RECORDER_TIMEOUT = 60
+# How long a statistics write waits for the recorder to run what it queued.
+# HA's import checks every row on its own, so copying a long series takes
+# minutes on a real install (issue #145: ~14,600 hourly rows outlasted the
+# 60 s this used to be, and the write after the backup never ran). Nothing
+# needs a short wait here: the tools answer `still_running` long before
+# (llm_api._STATISTICS_DEADLINE) and report the outcome when it's known.
+RECORDER_TIMEOUT = 30 * 60
 
 
 class StatisticsChangeRefusedError(Exception):
@@ -564,7 +568,9 @@ def _resolve(done: Any) -> None:
         done.set_result(None)
 
 
-async def on_recorder(hass: HomeAssistant, queue: Callable[[], None]) -> None:
+async def on_recorder(
+    hass: HomeAssistant, queue: Callable[[], None], *, what: str = "the change"
+) -> None:
     """Run `queue` - which queues recorder tasks - and wait until the
     recorder thread has run them all. The queue is FIFO and `queue` runs
     without yielding, so nothing (not even a statistics compile) gets in
@@ -582,9 +588,8 @@ async def on_recorder(hass: HomeAssistant, queue: Callable[[], None]) -> None:
             await done
     except TimeoutError as exc:
         raise StatisticsTimeoutError(
-            f"the recorder hasn't confirmed the change within {RECORDER_TIMEOUT} "
-            "s - it's still queued and will most likely still happen; check "
-            "with list_statistics"
+            f"the recorder hasn't finished {what} within "
+            f"{RECORDER_TIMEOUT // 60} min - it's queued and may still run"
         ) from exc
 
 

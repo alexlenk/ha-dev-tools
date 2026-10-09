@@ -730,6 +730,9 @@ async def test_update_entities_preview_warns_about_a_rename_onto_statistics(
 async def test_tools_report_a_recorder_that_never_confirms(
     hass: HomeAssistant, monkeypatch
 ):
+    """Nothing the recorder is asked to do comes back: the in-recorder
+    backup isn't confirmed, so the write is never queued - and the answer
+    says nothing was changed (issue #145)."""
     from homeassistant.components.recorder import get_instance
 
     from custom_components.ha_dev_tools import statistics_manager
@@ -765,9 +768,60 @@ async def test_tools_report_a_recorder_that_never_confirms(
             _llm_context(),
         )
     for result in (cleared, moved):
-        assert result["error_type"] == "StatisticsTimeoutError"
-        assert "still queued" in result["error"]
+        assert result["error_type"] == "StatisticsBackupError"
+        assert "in-recorder backup copy" in result["error"]
+        assert "nothing was changed" in result["error"]
         assert result["mirror"]["mirrored"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_an_unconfirmed_write_reports_what_the_statistics_hold_now(
+    hass: HomeAssistant, monkeypatch
+):
+    """Clearing a backup statistic makes no backup of it, so the write is
+    what goes unconfirmed: the answer shows the statistic as it is now."""
+    from homeassistant.components.recorder import get_instance
+
+    from custom_components.ha_dev_tools import statistics_backup, statistics_manager
+    from custom_components.ha_dev_tools.llm_api import ClearStatisticsTool
+
+    await _seed(hass)
+    made = await statistics_backup.create_backups(
+        hass, ["sensor.old_meter"], "clear_statistics"
+    )
+    backup_id = made["sensor.old_meter"]
+    monkeypatch.setattr(statistics_manager, "RECORDER_TIMEOUT", 0.01)
+    instance = get_instance(hass)
+    monkeypatch.setattr(instance, "async_clear_statistics", lambda *_, **__: None)
+    monkeypatch.setattr(
+        instance, "async_update_statistics_metadata", lambda *_, **__: None
+    )
+    result = await ClearStatisticsTool()._write(
+        hass,
+        _input("clear_statistics", statistic_ids=[backup_id], allow_no_backup=True),
+        _llm_context(),
+    )
+    assert result["error_type"] == "StatisticsTimeoutError"
+    assert "may still run" in result["error"]
+    assert result["now"][backup_id]["rows"] == 3
+
+    # With a backup made first, the answer names it too.
+    monkeypatch.undo()
+
+    async def unconfirmed(*_):
+        raise statistics_manager.StatisticsTimeoutError("not confirmed")
+
+    monkeypatch.setattr(statistics_manager, "clear_statistics", unconfirmed)
+    _, (enabled, pushed) = _mirror()
+    with enabled, pushed:
+        result = await ClearStatisticsTool()._write(
+            hass,
+            _input("clear_statistics", statistic_ids=["sensor.old_meter"]),
+            _llm_context(),
+        )
+    assert result["now"]["sensor.old_meter"]["rows"] == 3
+    assert result["backups"]["sensor.old_meter"].startswith("ha_dev_tools:backup_")
 
 
 @pytest.mark.asyncio
@@ -862,3 +916,61 @@ async def test_migrated_meter_continues_its_sum_without_short_term_rows(
     await async_wait_recording_done(hass)
     # The old meter ended at sum 3.0 with state 2; the new one reads 8.5.
     assert await _compile_now(hass) == pytest.approx(3.0 + 8.5 - 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_busy_recorder_delays_but_doesnt_drop_the_write(
+    hass: HomeAssistant, monkeypatch
+):
+    """Issue #145: the in-recorder backup of a long series took longer than
+    the 60 s the write used to wait - which then gave up before queueing
+    the clear at all, while the notification said it would still happen.
+    A recorder busy for a while now just delays the write."""
+    import time
+    from dataclasses import dataclass
+
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.tasks import RecorderTask
+
+    from custom_components.ha_dev_tools import statistics_manager
+    from custom_components.ha_dev_tools.llm_api import ClearStatisticsTool
+
+    @dataclass(slots=True)
+    class Busy(RecorderTask):
+        seconds: float
+
+        def run(self, instance) -> None:
+            time.sleep(self.seconds)
+
+    await _seed(hass)
+    instance = get_instance(hass)
+    _, (enabled, pushed) = _mirror()
+
+    # The old 60 s against a long copy, scaled down: the write isn't queued,
+    # and the answer says so.
+    monkeypatch.setattr(statistics_manager, "RECORDER_TIMEOUT", 0.5)
+    instance.queue_task(Busy(1.5))
+    with enabled, pushed:
+        refused = await ClearStatisticsTool()._write(
+            hass,
+            _input("clear_statistics", statistic_ids=["sensor.old_meter"]),
+            _llm_context(),
+        )
+    assert refused["error_type"] == "StatisticsBackupError"
+    assert "nothing was changed" in refused["error"]
+    await async_wait_recording_done(hass)
+    assert "sensor.old_meter" in await _ids(hass)
+
+    # With room to wait, the same busy recorder only delays it.
+    monkeypatch.setattr(statistics_manager, "RECORDER_TIMEOUT", 30)
+    instance.queue_task(Busy(1.5))
+    with enabled, pushed:
+        cleared = await ClearStatisticsTool()._write(
+            hass,
+            _input("clear_statistics", statistic_ids=["sensor.old_meter"]),
+            _llm_context(),
+        )
+    assert cleared["cleared"][0]["statistic_id"] == "sensor.old_meter"
+    await async_wait_recording_done(hass)
+    assert "sensor.old_meter" not in await _ids(hass)

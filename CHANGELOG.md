@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.4] - 2026-10-09
+
+### Fixed
+- **`clear_statistics` / `restore_statistics` / `merge_statistics` / `migrate_statistics` / `derive_statistics` on a long series made the in-recorder backup but never applied the change** (issue #145).
+  - **Cause:** the backup copy goes through HA's own import, which checks every row on its own. For a series of about 14,600 hourly rows that takes minutes on a real install. The wait for it gave up after 60 s and ended the operation before the write was queued, while the copy itself carried on and finished. The answer, and the notification after `still_running`, then said the change was "still queued and will most likely still happen", but it was never going to.
+  - **Fix:** the recorder is now waited on for up to 30 minutes, in the background after the tool has answered `still_running`, and the notification reports the real outcome.
+  - A backup that still isn't confirmed says that nothing was changed. A write that isn't confirmed comes back with what the statistics hold now (`now`) instead of a guess.
+  - A busy-recorder test reproduces the old behaviour: the write wasn't queued but was reported as still happening.
+  - **If you hit this:** the target is unchanged. The backups those attempts made (`list_statistics source=ha_dev_tools`) are complete copies of it and can be removed with `clear_statistics`. Run the write again on this version.
+- Mirroring and config-file access scanned content for credentials on Home Assistant's event loop. ruamel's YAML parser scans its plugin directory, which HA logged as a blocking `scandir` in `mirror_secrets.py`, and a large file is parsed there too. The scans now run in HA's executor.
+
 ## [2.26.3] - 2026-10-09
 
 ### Added

@@ -109,7 +109,14 @@ async def create_backups(
                 rows.get(statistic_id, []),
             )
 
-    await sm.on_recorder(hass, queue)
+    try:
+        await sm.on_recorder(hass, queue, what="the in-recorder backup copy")
+    except sm.StatisticsTimeoutError as exc:
+        # The write it protects hasn't been queued - say so (issue #145).
+        raise sm.StatisticsBackupError(
+            f"{exc}, so nothing was changed; once the backup is there "
+            "(list_statistics source=ha_dev_tools), run the write again"
+        ) from exc
     copied = await sm.describe_statistics(hass, list(backups.values()))
     for statistic_id, backup_id in backups.items():
         expected = len(rows.get(statistic_id, []))

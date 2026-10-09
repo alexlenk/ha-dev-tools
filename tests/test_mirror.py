@@ -729,3 +729,48 @@ async def test_mirror_write_still_pushes_flags_named_like_credentials(
             content_type="json",
         )
     assert result.mirrored is True
+
+
+@pytest.mark.asyncio
+async def test_credential_scans_run_off_the_event_loop(
+    hass: HomeAssistant, mirror_entry, monkeypatch
+):
+    """ruamel's YAML() scans its plugin directory - HA flagged a blocking
+    scandir in mirror_secrets (issue #145) - and a scan parses the whole
+    file, so neither may run on the event loop."""
+    import threading
+
+    from custom_components.ha_dev_tools import mirror_secrets
+
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+    yaml_scan = mirror_secrets.find_yaml_credentials
+    file_scan = mirror_secrets.find_file_credentials
+
+    def recording(scan):
+        def wrapped(*args):
+            threads.append(threading.get_ident())
+            return scan(*args)
+
+        return wrapped
+
+    monkeypatch.setattr(mirror_secrets, "find_yaml_credentials", recording(yaml_scan))
+    monkeypatch.setattr(mirror_secrets, "find_file_credentials", recording(file_scan))
+    monkeypatch.setitem(mirror._SCANNERS, "yaml", mirror_secrets.find_yaml_credentials)
+    with _patched(FakeSession([])):
+        await mirror.mirror_write(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  password: hunter2\n",
+        )
+        await mirror.mirror_dry_run(
+            hass,
+            path="automations.yaml",
+            content_before=None,
+            content_after="- id: a\n  password: hunter2\n",
+            kind="automation",
+            entity_id="a",
+        )
+    assert len(threads) == 2
+    assert loop_thread not in threads

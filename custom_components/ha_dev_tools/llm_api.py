@@ -1342,6 +1342,16 @@ async def _guarded_statistics_write(
             if made:
                 response["backups"] = cast(JsonValueType, made)
                 response["restore"] = statistics_manager.RESTORE_HINT
+        except statistics_manager.StatisticsTimeoutError as exc:
+            # Queued but unconfirmed: report what the statistics hold now,
+            # not a guess (issue #145).
+            response = _tool_error(exc)
+            response["now"] = cast(
+                JsonValueType,
+                await statistics_manager.describe_statistics(hass, statistic_ids),
+            )
+            if progress.get("backups"):
+                response["backups"] = progress["backups"]
         except _STATISTICS_WRITE_ERRORS as exc:
             response = _tool_error(exc)
         if mirrored is not None:
