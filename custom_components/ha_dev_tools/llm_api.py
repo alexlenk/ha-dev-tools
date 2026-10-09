@@ -15,10 +15,18 @@ import asyncio
 import json
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, cast, override
 
-import voluptuous as vol
+try:
+    # HA 2026.9+ validates with probatio and types its schemas (llm.Tool's
+    # parameters, a flow's data_schema) as probatio's - the voluptuous it
+    # installs is a shim handing out the same objects (issue #138).
+    import probatio as vol
+except ImportError:  # pragma: no cover - HA before 2026.9
+    import voluptuous as vol  # type: ignore[no-redef]
 from homeassistant.auth.models import User
+from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
@@ -85,6 +93,7 @@ from .script_manager import (
 )
 from .supervisor_manager import SupervisorNotAvailableError
 from .template_yaml_manager import (
+    BLOCK_FIELDS,
     DuplicateTemplateUniqueIdError,
     TemplateBatchError,
     TemplateEntityNotFoundError,
@@ -1303,13 +1312,22 @@ async def _guarded_statistics_write(
     """Every destructive statistics write (issue #136): copy the series it
     changes to the mirror repo (refused if that fails, unless
     allow_no_backup) and into backup statistics in the recorder (always -
-    refused if that fails), then write. Run to the end even if the client
-    gives up."""
+    refused if that fails), then write.
+
+    Runs as a background task, so it finishes even if the client gives up.
+    A big one (a merge of a year or two of hourly rows) can outlast the
+    client's timeout, which then reported an error for a write that was in
+    fact still happening (issue #141): after _STATISTICS_DEADLINE seconds
+    this answers `still_running` with the backups already made, and the
+    task posts a Home Assistant notification with its result when done."""
+    progress: JsonObjectType = {}
 
     async def commit() -> JsonObjectType:
         mirrored = (
             await _back_up_statistics(hass, statistic_ids) if statistic_ids else None
         )
+        if mirrored is not None:
+            progress["mirror"] = mirrored
         if mirrored is not None and not mirrored["mirrored"] and not allow_no_backup:
             return _backup_failed(mirrored)
         response: JsonObjectType
@@ -1317,6 +1335,8 @@ async def _guarded_statistics_write(
             made = await statistics_backup.create_backups(
                 hass, statistic_ids, operation
             )
+            if made:
+                progress["backups"] = cast(JsonValueType, made)
             response = await write()
             if made:
                 response["backups"] = cast(JsonValueType, made)
@@ -1327,7 +1347,55 @@ async def _guarded_statistics_write(
             response["mirror"] = mirrored
         return response
 
-    return await _run_to_completion(hass, commit(), f"ha_dev_tools {operation}")
+    task: asyncio.Task[JsonObjectType] = hass.async_create_background_task(
+        commit(), f"ha_dev_tools {operation}"
+    )
+    # asyncio.wait doesn't cancel the task, on timeout or when this request
+    # is cancelled.
+    await asyncio.wait({task}, timeout=_STATISTICS_DEADLINE)
+    if task.done():
+        return task.result()
+    task.add_done_callback(partial(_notify_statistics_result, hass, operation))
+    return {
+        "still_running": True,
+        "operation": operation,
+        **progress,
+        "note": (
+            f"Still writing after {_STATISTICS_DEADLINE:.0f} s - it carries on "
+            "in Home Assistant and posts a notification with its result when "
+            "done. Don't call it again; check the result with get_statistics "
+            "or list_statistics in a minute."
+        ),
+    }
+
+
+_STATISTICS_DEADLINE = 40.0
+
+
+def _notify_statistics_result(
+    hass: HomeAssistant, operation: str, task: asyncio.Task[JsonObjectType]
+) -> None:
+    """Tell the owner how a statistics write the tool stopped waiting for
+    ended."""
+    if task.cancelled():
+        outcome = "was cancelled"
+    elif (exc := task.exception()) is not None:
+        outcome = f"failed: {exc}"
+    else:
+        result = task.result()
+        outcome = (
+            f"failed: {result['error']}"
+            if "error" in result
+            else "finished:\n\n```json\n"
+            + json.dumps(result, indent=1, default=str)[:4000]
+            + "\n```"
+        )
+    persistent_notification.async_create(
+        hass,
+        f"`{operation}` {outcome}",
+        title=f"HA Dev Tools: {operation}",
+        notification_id=f"{DOMAIN}_{operation}",
+    )
 
 
 class ClearStatisticsTool(WriteGatedTool):
@@ -1532,7 +1600,11 @@ class MergeStatisticsTool(WriteGatedTool):
         "removes them). The target is backed up first, in the recorder "
         "(restore_statistics) and to the mirror repo - refused if either "
         "fails; with mirroring off it needs allow_no_backup=true, which "
-        "skips only the mirror copy."
+        "skips only the mirror copy. The result's next_compile checks the "
+        "target's newest 5-minute sum - what its next compile continues "
+        "from - against its last hourly one (ok=false: the next hour would "
+        "drop). A long merge answers still_running after 40 s and finishes "
+        "in the background - don't call it again."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -3057,9 +3129,17 @@ class UpdateTemplateEntityTool(WriteGatedTool):
     name = "update_template_entity"
     description = (
         "Update an existing YAML `template:` entity's config by its "
-        "unique_id (from list_template_entities). Only that entity's own "
-        "dict is replaced - sibling entities and the block's triggers/"
-        "conditions/variables are left untouched. To change an entity's "
+        "unique_id (from list_template_entities). config replaces only that "
+        "entity's own dict - sibling entities and the block's triggers/"
+        "conditions/variables are left untouched. To change the block "
+        "itself - a trigger-based block's triggers, conditions, variables or "
+        "actions - pass those instead of (or with) config: each replaces "
+        "the block's key in place (null removes conditions/variables/"
+        "actions), checked with HA's own validation, then reloaded. That "
+        "changes every entity in the block - the preview lists them all - "
+        "and keeps their state (accumulators, counters, attributes), unlike "
+        "delete + create. Turning a state-based block into a trigger-based "
+        "one (or back) is refused. To change an entity's "
         "unique_id, use delete_template_entity + create_template_entity "
         "instead (a rename is really two operations, not supported "
         "directly here). Fails with a permission error if the entity "
@@ -3068,12 +3148,48 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         "package-defined entities can be updated this way."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
-        {vol.Required("unique_id"): str, vol.Required("config"): dict}
+        {
+            vol.Required("unique_id"): str,
+            vol.Optional("config"): dict,
+            vol.Optional("triggers"): [dict],
+            vol.Optional("conditions"): vol.Any([dict], None),
+            vol.Optional("variables"): vol.Any(dict, None),
+            vol.Optional("actions"): vol.Any([dict], None),
+        }
     )
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
         """Init with the TemplateYamlManager backing this tool."""
         self._manager = template_yaml_manager
+
+    @staticmethod
+    def _block(args: dict[str, Any]) -> dict[str, Any] | None:
+        return {field: args[field] for field in BLOCK_FIELDS if field in args} or None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """For a block edit: every entity it changes, and the keys before
+        and after - or why it's refused."""
+        args = tool_input.tool_args
+        block = self._block(args)
+        if not block:
+            return {}
+        try:
+            result = await self._manager.update_entity(
+                args["unique_id"], args.get("config"), block=block, dry_run=True
+            )
+        except (
+            ValueError,
+            TemplateEntityNotFoundError,
+            DuplicateTemplateUniqueIdError,
+        ) as exc:
+            return {"problems": str(exc)}
+        return {"block": cast(JsonValueType, result.block)}
 
     @override
     async def _write(
@@ -3082,11 +3198,11 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Update the template entity."""
+        """Update the template entity and/or its block."""
         args = tool_input.tool_args
         try:
             result = await self._manager.update_entity(
-                args["unique_id"], args["config"]
+                args["unique_id"], args.get("config"), block=self._block(args)
             )
         except (
             ValueError,
@@ -3099,6 +3215,8 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             "platform": result.location.platform,
             "reloaded": result.reloaded,
         }
+        if result.block is not None:
+            response["block"] = cast(JsonValueType, result.block)
         # An edit HA rejects on reload drops the entity just as silently.
         response.update(
             await _template_entity_status(
@@ -3664,14 +3782,23 @@ class TriggerAutomationTool(WriteGatedTool):
         "never accepts an arbitrary entity_id or service. Useful for "
         "one-shot testing without a throwaway automation edit cycle (see "
         "issue #76). skip_condition defaults to true (conditions in the "
-        "automation are not evaluated, matching the UI default). Fails "
-        "clearly if no live automation.* entity exists yet for this id "
-        "(e.g. never reloaded since being added)."
+        "automation are not evaluated, matching the UI default). The run "
+        "is started and left to finish on its own, like the UI button - a "
+        "client timeout never cuts it off. It returns right away with "
+        "finished=false and the run's context_id; wait_seconds (up to 50) "
+        "waits that long for a short run to end and reports finished and "
+        "any error. Follow a longer run with list_traces / get_trace or "
+        "get_logbook. Fails clearly if no live automation.* entity exists "
+        "yet for this id (e.g. never reloaded since being added)."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("automation_id"): str,
             vol.Optional("skip_condition", default=True): bool,
+            vol.Optional("wait_seconds", default=0): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0, max=service_call_manager.MAX_WAIT_SECONDS),
+            ),
         }
     )
 
@@ -3685,14 +3812,15 @@ class TriggerAutomationTool(WriteGatedTool):
         """Resolve the automation's live entity and trigger it."""
         args = tool_input.tool_args
         try:
-            entity_id = await service_call_manager.trigger_automation(
+            run = await service_call_manager.trigger_automation(
                 hass,
                 args["automation_id"],
                 skip_condition=args.get("skip_condition", True),
+                wait_seconds=args.get("wait_seconds", 0),
             )
         except service_call_manager.AutomationNotRunningError as exc:
             return _tool_error(exc)
-        return {"triggered": True, "entity_id": entity_id}
+        return {"triggered": True, **run}
 
 
 class SetNumberValueTool(WriteGatedTool):

@@ -54,6 +54,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.condition import async_validate_conditions_config
+from homeassistant.helpers.script import async_validate_actions_config
 from homeassistant.helpers.trigger import async_validate_trigger_config
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
@@ -150,6 +152,69 @@ async def validate_triggers(hass: HomeAssistant, triggers: Any) -> None:
         ) from exc
 
 
+# A trigger-based block's own keys (issue #140), with the singular names
+# older configs use. An edit keeps whichever name the block already has.
+BLOCK_FIELDS: dict[str, tuple[str, ...]] = {
+    "triggers": ("triggers", "trigger"),
+    "conditions": ("conditions", "condition"),
+    "variables": ("variables",),
+    "actions": ("actions", "action"),
+}
+
+
+def _block_key(block: Any, field: str) -> str | None:
+    """The name `field` has in `block`, if it's there at all."""
+    return next((name for name in BLOCK_FIELDS[field] if name in block), None)
+
+
+def block_members(block: Any) -> list[dict[str, Any]]:
+    """Every entity a template block defines - all of them change when its
+    triggers do."""
+    return [
+        {
+            "platform": platform,
+            "unique_id": entity.get("unique_id"),
+            "name": entity.get("name"),
+        }
+        for platform in TEMPLATE_PLATFORMS
+        if isinstance(block.get(platform), list)
+        for entity in block[platform]
+        if isinstance(entity, dict)
+    ]
+
+
+async def validate_block_changes(hass: HomeAssistant, changes: dict[str, Any]) -> None:
+    """Check new block-level triggers/conditions/variables/actions with HA's
+    own validation, before anything is written (as validate_triggers)."""
+    if "triggers" in changes:
+        if not changes["triggers"]:
+            raise ValueError(
+                "a trigger-based block can't lose its triggers - that would "
+                "turn every entity in it into a state-based one; use "
+                "delete_template_entity + create_template_entity for that"
+            )
+        await validate_triggers(hass, changes["triggers"])
+    checks = {
+        "conditions": lambda value: async_validate_conditions_config(
+            hass, cv.CONDITIONS_SCHEMA(value)
+        ),
+        "actions": lambda value: async_validate_actions_config(
+            hass, cv.SCRIPT_SCHEMA(value)
+        ),
+    }
+    for field, check in checks.items():
+        if changes.get(field) is None:
+            continue
+        try:
+            await check(changes[field])
+        except (vol.Invalid, HomeAssistantError) as exc:
+            raise ValueError(f"Invalid {field} - nothing was written: {exc}") from exc
+    if changes.get("variables") is not None and not isinstance(
+        changes["variables"], dict
+    ):
+        raise ValueError("variables is a mapping of name: template")
+
+
 @dataclass
 class TemplateBatchResult:
     """One file of a batch delete: which ids left it, and its content."""
@@ -183,6 +248,9 @@ class TemplateWriteResult:
     reloaded: bool
     content_before: str
     content_after: str
+    # For a block-level edit (issue #140): every entity the block defines,
+    # and its changed keys before and after.
+    block: dict[str, Any] | None = None
 
 
 class TemplateEntityNotFoundError(Exception):
@@ -574,8 +642,9 @@ class TemplateYamlManager:
     async def update_entity(
         self,
         unique_id: str,
-        config: dict[str, Any],
+        config: dict[str, Any] | None,
         *,
+        block: dict[str, Any] | None = None,
         expected_hash: str | None = None,
         dry_run: bool = False,
     ) -> TemplateWriteResult:
@@ -591,23 +660,69 @@ class TemplateYamlManager:
         See _reload_template for when the result's reloaded can come back
         False despite a successful write.
 
+        `block` changes the entity's *block* instead of (or as well as) the
+        entity itself (issue #140): its triggers, conditions, variables or
+        actions (BLOCK_FIELDS; None removes conditions/variables/actions).
+        That changes every entity in the block, and only works on a
+        trigger-based one - turning a state-based block into a trigger-based
+        one, or back, changes what every entity in it updates on, so it's
+        refused (delete + create). A reload keeps a trigger-based entity's
+        state, unlike delete + create.
+
         `dry_run=True` - see create_entity's identical parameter.
         """
-        config = dict(config)
-        if config.get("unique_id") not in (None, unique_id):
-            raise ValueError(
-                f"config's unique_id ('{config['unique_id']}') does not match "
-                f"the unique_id being updated ('{unique_id}') - use delete_entity "
-                "+ create_entity to change a unique_id"
-            )
-        config["unique_id"] = unique_id
-        config = quote_ambiguous_scalars(config)
+        if config is None and not block:
+            raise ValueError("nothing to change - pass config and/or block fields")
+        if config is not None:
+            config = dict(config)
+            if config.get("unique_id") not in (None, unique_id):
+                raise ValueError(
+                    f"config's unique_id ('{config['unique_id']}') does not match "
+                    f"the unique_id being updated ('{unique_id}') - use "
+                    "delete_entity + create_entity to change a unique_id"
+                )
+            config["unique_id"] = unique_id
+            config = quote_ambiguous_scalars(config)
+        if block:
+            unknown = sorted(set(block) - set(BLOCK_FIELDS))
+            if unknown:
+                raise ValueError(f"not block fields: {unknown}")
+            await validate_block_changes(self.hass, block)
+            block = {
+                field: quote_ambiguous_scalars(value) if value else value
+                for field, value in block.items()
+            }
 
         location = await self.find_entity(unique_id)
         content_before = await self.file_manager.read_file(location.file_path)
         document = await self.hass.async_add_executor_job(_load_yaml, content_before)
+        current = self._template_blocks(document)[location.block_index]
+        block_report = None
+        if block:
+            if _block_key(current, "triggers") is None:
+                raise ValueError(
+                    f"'{unique_id}' is in a state-based template block (no "
+                    "triggers) - adding triggers would turn every entity in "
+                    "it into a trigger-based one; use delete_template_entity "
+                    "+ create_template_entity with triggers instead"
+                )
+            block_report = {
+                "members": block_members(current),
+                "before": {
+                    field: to_json_safe(
+                        current.get(_block_key(current, field) or field)
+                    )
+                    for field in block
+                },
+                "after": {field: to_json_safe(value) for field, value in block.items()},
+            }
         content_after = await self.hass.async_add_executor_job(
-            self._build_update_content, document, location, config, content_before
+            self._build_update_content,
+            document,
+            location,
+            config,
+            content_before,
+            block,
         )
 
         if dry_run:
@@ -616,6 +731,7 @@ class TemplateYamlManager:
                 reloaded=False,
                 content_before=content_before,
                 content_after=content_after,
+                block=block_report,
             )
 
         await self.file_manager.write_file(
@@ -636,14 +752,16 @@ class TemplateYamlManager:
             reloaded=reloaded,
             content_before=content_before,
             content_after=content_after,
+            block=block_report,
         )
 
     def _build_update_content(
         self,
         document: Any,
         location: TemplateEntityLocation,
-        config: dict[str, Any],
+        config: dict[str, Any] | None,
         original: str | None = None,
+        block: dict[str, Any] | None = None,
     ) -> str:
         """Synchronous: patch one entity's config in place, return the new file content.
 
@@ -661,7 +779,34 @@ class TemplateYamlManager:
         def _replace() -> None:
             entities[index] = merge_preserving_style(entities[index], config)
 
-        spliced = surgical_edit(original, entities, index, "replace", yaml, _replace)
+        def _patch_block() -> None:
+            current = blocks[location.block_index]
+            patched = dict(current)
+            for field, value in (block or {}).items():
+                name = _block_key(current, field) or field
+                if value is None:
+                    patched.pop(name, None)
+                else:
+                    patched[name] = value
+            blocks[location.block_index] = merge_preserving_style(current, patched)
+
+        if block and config is not None:
+            # Both: the whole block is rewritten - entity and block keys.
+            def _both() -> None:
+                _replace()
+                _patch_block()
+
+            spliced = surgical_edit(
+                original, blocks, location.block_index, "replace", yaml, _both
+            )
+        elif block:
+            spliced = surgical_edit(
+                original, blocks, location.block_index, "replace", yaml, _patch_block
+            )
+        else:
+            spliced = surgical_edit(
+                original, entities, index, "replace", yaml, _replace
+            )
 
         from io import StringIO
 

@@ -26,11 +26,18 @@ aren't a replacement for that, just a narrower surface underneath it.
 
 from __future__ import annotations
 
-from homeassistant.core import HomeAssistant
+import asyncio
+import logging
+from typing import Any
+
+from homeassistant.core import Context, HomeAssistant
 
 from . import audit_manager
 
+_LOGGER = logging.getLogger(__name__)
+
 NUMBER_DOMAINS = ("number", "input_number")
+MAX_WAIT_SECONDS = 50
 BOOLEAN_DOMAIN = "input_boolean"
 
 
@@ -51,9 +58,13 @@ def _domain_of(entity_id: str) -> str:
 
 
 async def trigger_automation(
-    hass: HomeAssistant, automation_id: str, *, skip_condition: bool = True
-) -> str:
-    """Trigger an existing automation by its config id, return its entity_id.
+    hass: HomeAssistant,
+    automation_id: str,
+    *,
+    skip_condition: bool = True,
+    wait_seconds: float = 0,
+) -> dict[str, Any]:
+    """Trigger an existing automation by its config id.
 
     Resolves automation_id (the YAML `id:` field) to a live automation.*
     entity the same way get_automation's runtime-state check does -
@@ -61,6 +72,15 @@ async def trigger_automation(
     derived from the automation's `alias`, not its `id` (see
     audit_manager.find_automation_state). Raises if no live entity exists
     yet for this id, rather than guessing or silently no-oping.
+
+    The run is detached from the caller, as the UI's "Run actions" button
+    is: it used to be awaited (blocking=True), so a client that gave up
+    after its timeout cancelled the automation - and the scripts it was
+    waiting on - part-way through (issue #131). Now it runs as a task of
+    its own with its own context, and this waits at most `wait_seconds`
+    (default 0) to report how a short run ended; waiting longer never
+    cancels it. `context_id` identifies the run in the logbook and its
+    trace.
     """
     state = audit_manager.find_automation_state(hass, automation_id)
     if state is None:
@@ -69,13 +89,34 @@ async def trigger_automation(
             "may not have been reloaded since being added or last edited. "
             "Call reload_domain with domain='automation' first."
         )
-    await hass.services.async_call(
-        "automation",
-        "trigger",
-        {"entity_id": state.entity_id, "skip_condition": skip_condition},
-        blocking=True,
+    context = Context()
+    run = hass.async_create_background_task(
+        hass.services.async_call(
+            "automation",
+            "trigger",
+            {"entity_id": state.entity_id, "skip_condition": skip_condition},
+            blocking=True,
+            context=context,
+        ),
+        f"ha_dev_tools trigger_automation {state.entity_id}",
     )
-    return state.entity_id
+    run.add_done_callback(_log_failed_run)
+    if wait_seconds > 0:
+        await asyncio.wait({run}, timeout=min(wait_seconds, MAX_WAIT_SECONDS))
+    result: dict[str, Any] = {
+        "entity_id": state.entity_id,
+        "context_id": context.id,
+        "finished": run.done(),
+    }
+    if run.done() and not run.cancelled() and run.exception() is not None:
+        result["error"] = str(run.exception())
+    return result
+
+
+def _log_failed_run(run: asyncio.Task[Any]) -> None:
+    """Retrieve a detached run's error, so it's logged once, as HA would."""
+    if not run.cancelled() and (exc := run.exception()) is not None:
+        _LOGGER.warning("Triggered automation failed: %s", exc)
 
 
 async def set_number_value(hass: HomeAssistant, entity_id: str, value: float) -> None:

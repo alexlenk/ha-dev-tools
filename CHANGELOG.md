@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.2] - 2026-10-09
+
+### Fixed
+- **`merge_statistics` (2.26.1) into a meter with no hourly statistics yet made its next hour drop by the whole merged total** (issue #141). That is a target entity only minutes old, with at most a few 5-minute rows at `sum` 0. The merge only shifted a target's sum basis when it had hourly rows, so the 5-minute rows stayed at 0, and the next compile continued from 0. The hourly rows were correct, but the next hour showed a `change` of minus the merged total.
+  - Such a target now gets the merged total added from its first 5-minute row's hour (or the current hour), by HA's own sum adjustment, which also shifts any compile row written in the meantime.
+  - A target with no 5-minute row at all gets one, carrying the merged sum and its own meter reading.
+  - Targets that already had hourly rows were not affected. Reproduced with HA's own compile: the meter continued from 2.0 / 0.0 instead of 5 before the fix, and from 5 after.
+  - **Who can be affected:** 2.26.1 merges whose target had no hourly statistics yet.
+  - **How an agent checks:** call `get_statistics` on the target with `period="hour"` and `types=["sum", "change"]`, from the hour of the merge on. It was hit if the first hour after the merge shows a negative `change` of about the merged total, with `sum` back near 0.
+  - **How to repair it:** `restore_statistics` with the backup that merge made (`ha_dev_tools:backup_<target>_<time>`, named in its result and listed by `list_statistics source=ha_dev_tools`), then merge again with this version. Alternatively, "Adjust sum" in Developer Tools > Statistics on that hour, by the drop.
+- `merge_statistics`, `migrate_statistics` and `restore_statistics` results carry `next_compile`. It compares the target's newest 5-minute sum, which the next compile continues from, with its last hourly sum, and gives `ok: false` with the drop if they don't line up. A failure like #141 shows up in the result instead of an hour later.
+- A statistics write that outlasted the MCP client's timeout came back as an error while it was still happening (issue #141). After 40 s, `clear_statistics` / `migrate_statistics` / `merge_statistics` / `restore_statistics` now answer `still_running`, with the backups already made. The write carries on and posts a Home Assistant notification with its result.
+- `trigger_automation` no longer cancels the automation when the client times out (issue #131). The run was awaited (`blocking=True`), so a client giving up after its timeout cut the automation, and the scripts it waited on, off part-way through.
+  - The run is now left to finish on its own, like the UI's "Run actions" button. The tool returns at once with `finished: false` and the run's `context_id`.
+  - `wait_seconds` (up to 50) waits for a short run and reports its error, without ever cancelling it.
+  - `set_number_value` / `set_boolean_value` are unaffected: they only wait for the helper's own service, and automations triggered by the change run separately.
+
+### Added
+- `update_template_entity` can change a trigger-based block's `triggers`, `conditions`, `variables` and `actions` in place (issue #140). Before this, only delete + create could do it, and that loses the state of entities built on their previous state (accumulators, counters, rolling attributes).
+  - Each key is replaced in place, keeping the singular name an older block uses. `null` removes conditions, variables or actions.
+  - Changes are checked with HA's own validation before anything is written.
+  - The preview lists every entity in the block, since all of them change, and shows the keys before and after.
+  - A reload keeps a trigger-based entity's state and attributes.
+  - Turning a state-based block into a trigger-based one, or removing the triggers, is refused.
+
+### Changed
+- Tests run against HA 2026.10.0. Tool and flow schemas are typed as probatio's, which HA 2026.9+ uses (issue #138). There's no runtime change: HA's `voluptuous` there hands out the same objects.
+
 ## [2.26.1] - 2026-10-09
 
 ### Fixed

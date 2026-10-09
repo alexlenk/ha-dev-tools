@@ -15,5 +15,5 @@
     "voluptuous-serialize>=2.6.0"
   ],
   "single_config_entry": true,
-  "version": "2.26.1"
+  "version": "2.26.2"
 }

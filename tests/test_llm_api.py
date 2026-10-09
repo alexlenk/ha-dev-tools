@@ -3174,7 +3174,13 @@ async def test_trigger_automation_tool_confirm_flow_calls_manager(
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
     with patch(
         "custom_components.ha_dev_tools.llm_api.service_call_manager.trigger_automation",
-        AsyncMock(return_value="automation.kitchen_lights"),
+        AsyncMock(
+            return_value={
+                "entity_id": "automation.kitchen_lights",
+                "context_id": "c1",
+                "finished": False,
+            }
+        ),
     ) as mock_trigger:
         result = await tool.async_call(
             hass,
@@ -3185,8 +3191,12 @@ async def test_trigger_automation_tool_confirm_flow_calls_manager(
     assert _without_arm(result) == {
         "triggered": True,
         "entity_id": "automation.kitchen_lights",
+        "context_id": "c1",
+        "finished": False,
     }
-    mock_trigger.assert_called_once_with(hass, "kitchen_id", skip_condition=True)
+    mock_trigger.assert_called_once_with(
+        hass, "kitchen_id", skip_condition=True, wait_seconds=0
+    )
 
 
 @pytest.mark.asyncio

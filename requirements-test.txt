@@ -13,16 +13,16 @@
 # manifest.json) but gets imported unconditionally the moment llm_api.py
 # imports `llm`. Pinned exactly to homeassistant/components/conversation/
 # manifest.json's requirements at the homeassistant version pinned below
-# (read from the installed 2026.9.4 package, not assumed) - re-verify the
+# (read from the installed 2026.10.0 package, not assumed) - re-verify the
 # same way whenever the pin below changes. gazetteer-matcher is new in 2026.9.
 gazetteer-matcher==1.1.0
 hassil==3.12.1
-home-assistant-intents==2026.8.28
+home-assistant-intents==2026.10.6
 
-# Pins homeassistant==2026.9.4 transitively (the current release). HA is
+# Pins homeassistant==2026.10.0 transitively (the current release). HA is
 # pinned through pytest-homeassistant-custom-component's own exact pin
 # rather than a floor on `homeassistant`, because HA's Requires-Python has
 # climbed release over release (>=3.14.2 from 2026.3 on) - a bare floor on
 # an older interpreter silently resolves to an old release instead of
 # erroring.
-pytest-homeassistant-custom-component==0.13.367
+pytest-homeassistant-custom-component==0.13.371
