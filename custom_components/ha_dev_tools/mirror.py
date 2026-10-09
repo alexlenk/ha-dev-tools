@@ -22,6 +22,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -74,6 +75,17 @@ def _headers(hass: HomeAssistant) -> dict[str, str]:
     }
 
 
+def _url_path(path: str) -> str:
+    """A repo path (or branch) as a URL path: each segment percent-encoded,
+    and refused if a segment is empty, `.` or `..` - those would let a path
+    built from a write's arguments steer the token to another GitHub API
+    endpoint (`contents/../../...`)."""
+    segments = path.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise ValueError(f"not a mirror repo path: {path!r}")
+    return "/".join(quote(segment, safe="") for segment in segments)
+
+
 def proposed_branch_name(kind: str, entity_id: str) -> str:
     """Build a proposed/<kind>-<id> branch name from an arbitrary entity id.
 
@@ -111,7 +123,7 @@ async def _get_current(
     """Fetch (content, sha) for path at the given branch's HEAD, or None if it
     doesn't exist there yet."""
     session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{path}"
+    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{_url_path(path)}"
     async with session.get(url, headers=_headers(hass), params={"ref": branch}) as resp:
         if resp.status == 404:
             return None
@@ -136,7 +148,7 @@ async def _put(
     commit scoped to exactly the file a write tool actually touched.
     """
     session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{path}"
+    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{_url_path(path)}"
     payload: dict[str, Any] = {
         "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
@@ -153,7 +165,7 @@ async def _put(
 async def _get_ref_sha(hass: HomeAssistant, branch: str) -> str | None:
     """Get a branch's current HEAD commit sha, or None if it doesn't exist."""
     session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/ref/heads/{branch}"
+    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/ref/heads/{_url_path(branch)}"
     async with session.get(url, headers=_headers(hass)) as resp:
         if resp.status == 404:
             return None
@@ -178,7 +190,10 @@ async def _set_ref(hass: HomeAssistant, branch: str, sha: str) -> None:
         async with session.post(url, headers=_headers(hass), json=payload) as resp:
             resp.raise_for_status()
     elif existing != sha:
-        url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs/heads/{branch}"
+        url = (
+            f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs/heads/"
+            f"{_url_path(branch)}"
+        )
         payload = {"sha": sha, "force": True}
         async with session.patch(url, headers=_headers(hass), json=payload) as resp:
             resp.raise_for_status()

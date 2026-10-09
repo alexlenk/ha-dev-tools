@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, cast, override
 
@@ -25,6 +26,7 @@ try:
     import probatio as vol
 except ImportError:  # pragma: no cover - HA before 2026.9
     import voluptuous as vol  # type: ignore[no-redef]
+
 from homeassistant.auth.models import User
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
@@ -46,6 +48,7 @@ from . import (
     helper_manager,
     history_manager,
     mirror,
+    mirror_secrets,
     mqtt_manager,
     references,
     registry_manager,
@@ -105,6 +108,8 @@ from .template_yaml_manager import (
 from .ws_call import WebSocketCommandError
 from .yaml_style import find_misread_scalars, to_json_safe
 
+_LOGGER = logging.getLogger(__name__)
+
 API_ID = "dev_tools"
 API_NAME = "HA Dev Tools"
 API_PROMPT = (
@@ -113,6 +118,16 @@ API_PROMPT = (
     "entities. Prefer these over asking the user to copy/paste YAML or "
     "restart Home Assistant - config changes take effect via reload."
 )
+
+
+def _validated(tool: llm.Tool, tool_input: llm.ToolInput) -> llm.ToolInput:
+    """tool_input with its arguments checked against the tool's own
+    parameters schema, defaults filled in. Home Assistant doesn't do this:
+    llm.APIInstance.async_call_tool hands the client's JSON to the tool
+    as-is, so every type, range and required field a schema declares was
+    only documentation - a string where a list belongs, a 1-hour MQTT
+    listen past its 10 s cap, an unknown key crashing a `**args` call."""
+    return replace(tool_input, tool_args=tool.parameters(tool_input.tool_args or {}))
 
 
 def _tool_error(exc: Exception) -> JsonObjectType:
@@ -355,6 +370,10 @@ class GatedTool(llm.Tool):
     A successful call extends the idle arm window via touch_armed().
     """
 
+    # HA 2026.10+ records which integration provides a tool (and logs one
+    # that doesn't say); a plain class attribute before that.
+    integration = DOMAIN
+
     @override
     async def async_call(
         self,
@@ -365,7 +384,15 @@ class GatedTool(llm.Tool):
         """Check both gates, run the tool, then extend the idle window."""
         await access_control.check_armed(hass)
         await access_control.require_admin(hass, llm_context)
-        result = await self._run(hass, tool_input, llm_context)
+        try:
+            tool_input = _validated(self, tool_input)
+        except vol.Invalid as exc:
+            return {"error": f"invalid arguments: {exc}", "error_type": "Invalid"}
+        try:
+            result = await self._run(hass, tool_input, llm_context)
+        except Exception as exc:  # noqa: BLE001 - see _tool_error
+            _LOGGER.exception("dev_tools %s failed", self.name)
+            return _tool_error(exc)
         await access_control.touch_armed(hass)
         return result
 
@@ -524,6 +551,7 @@ class DevToolsPingTool(llm.Tool):
     itself, and deliberately the one tool NOT behind GatedTool.
     """
 
+    integration = DOMAIN
     name = "dev_tools_ping"
     description = (
         "Check that the ha_dev_tools API is registered and reachable, and "
@@ -1054,11 +1082,12 @@ class GetLogsTool(GatedTool):
     )
     parameters = vol.Schema(
         {
-            vol.Optional("lines", default=100): vol.All(
-                int, vol.Range(min=1, max=1000)
-            ),
+            # No default: lines, when given, overrides offset/limit paging.
+            vol.Optional("lines"): vol.All(int, vol.Range(min=1, max=1000)),
             vol.Optional("level"): str,
             vol.Optional("search"): str,
+            vol.Optional("since"): str,
+            vol.Optional("until"): str,
             vol.Optional("offset", default=0): vol.All(int, vol.Range(min=0)),
             vol.Optional("limit", default=100): vol.All(
                 int, vol.Range(min=1, max=1000)
@@ -1079,13 +1108,26 @@ class GetLogsTool(GatedTool):
     ) -> JsonObjectType:
         """Return filtered log entries, newest first."""
         args = tool_input.tool_args
-        filters = LogFilters(
-            lines=args.get("lines"),
-            level=args.get("level"),
-            search=args.get("search"),
-            offset=args.get("offset", 0),
-            limit=args.get("limit", 100),
-        )
+        try:
+            filters = LogFilters(
+                lines=args.get("lines"),
+                since=(
+                    dt_util.as_utc(_parse_datetime(args["since"], field="since"))
+                    if args.get("since")
+                    else None
+                ),
+                until=(
+                    dt_util.as_utc(_parse_datetime(args["until"], field="until"))
+                    if args.get("until")
+                    else None
+                ),
+                level=args.get("level"),
+                search=args.get("search"),
+                offset=args.get("offset", 0),
+                limit=args.get("limit", 100),
+            )
+        except ValueError as exc:
+            return _tool_error(exc)
         entries = await self._log_manager.get_core_logs(filters)
         return {"entries": [e.to_dict() for e in entries], "count": len(entries)}
 
@@ -4337,7 +4379,9 @@ class GetRestCommandTool(GatedTool):
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
-            "config": to_json_safe(config),
+            # Read-only, so never written back: a literal password or
+            # token in it is withheld, as get_config_file withholds it.
+            "config": mirror_secrets.mask_credentials(to_json_safe(config)),
         }
 
 

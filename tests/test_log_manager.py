@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
 from custom_components.ha_dev_tools.log_manager import LogEntry, LogFilters, LogManager
 from custom_components.ha_dev_tools.security import SecurityManager
@@ -121,18 +122,20 @@ async def test_log_filtering_by_time_range(hass: HomeAssistant, log_manager):
     await _setup_system_log(hass)
     await _seed_log_entries(hass)
 
-    now = datetime.now()
+    # HA's own clock: a naive time is read in HA's time zone, not the host's.
+    now = dt_util.now()
     since = now - timedelta(hours=1)
     until = now + timedelta(hours=1)
 
-    filters = LogFilters(since=since, until=until)
-
-    logs = await log_manager.get_core_logs(filters)
+    logs = await log_manager.get_core_logs(LogFilters(since=since, until=until))
 
     assert len(logs) > 0
     # All logs should be within the time range
     for log in logs:
         assert since <= log.timestamp <= until
+    # A window that ended an hour ago holds none of them.
+    old = await log_manager.get_core_logs(LogFilters(until=now - timedelta(hours=1)))
+    assert old == []
 
 
 async def test_log_entry_to_dict(hass: HomeAssistant):

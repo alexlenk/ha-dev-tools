@@ -219,22 +219,21 @@ def test_log_security_event(hass: HomeAssistant, security_manager, caplog):
 
 
 def test_validate_file_path_normalization(hass: HomeAssistant, security_manager):
-    """Test that paths are properly normalized.
-
-    Note: os.path.normpath() resolves relative paths, so 'subdir/../configuration.yaml'
-    becomes 'configuration.yaml', which is valid. This is correct behavior - benign
-    relative paths are allowed after normalization.
+    """Paths are normalized (./, //), but a `..` component is refused even
+    when it stays inside the config folder: normpath folds it lexically,
+    while the file is then opened as written - which a `package` argument
+    used to aim a write at another allowlisted file (packages/../scripts.yaml).
     """
     # Simple path should be valid
     is_valid, error = security_manager.validate_file_path("configuration.yaml")
     assert is_valid is True
+    is_valid, error = security_manager.validate_file_path("./configuration.yaml")
+    assert is_valid is True
 
-    # Path that normalizes to a valid path should be accepted
-    # (subdir/../configuration.yaml normalizes to configuration.yaml)
     is_valid, error = security_manager.validate_file_path(
         "subdir/../configuration.yaml"
     )
-    assert is_valid is True  # This is valid after normalization
+    assert (is_valid, error) == (False, ERROR_INVALID_PATH)
 
     # But paths that try to escape the config directory should be rejected
     is_valid, error = security_manager.validate_file_path("../etc/passwd")
@@ -2449,3 +2448,31 @@ def test_custom_templates_are_readable_not_writable(hass: HomeAssistant):
         ]
         is False
     )
+
+
+def test_symlink_to_a_denied_file_is_refused(hass: HomeAssistant, tmp_path):
+    """The denylist applies to where a path really leads, not just its name."""
+    hass.config.config_dir = str(tmp_path)
+    (tmp_path / "secrets.yaml").write_text("password: hunter2\n")
+    (tmp_path / "packages").mkdir()
+    (tmp_path / "packages" / "innocent.yaml").symlink_to(tmp_path / "secrets.yaml")
+    (tmp_path / "packages" / "real.yaml").write_text("a: 1\n")
+    manager = SecurityManager(hass, {})
+
+    assert manager.validate_file_path("packages/real.yaml") == (True, None)
+    assert manager.validate_file_path("packages/innocent.yaml") == (
+        False,
+        ERROR_BLACKLISTED_FILE,
+    )
+
+
+def test_a_sibling_folder_sharing_the_prefix_is_outside(hass: HomeAssistant, tmp_path):
+    config = tmp_path / "config"
+    (config / "packages").mkdir(parents=True)
+    (tmp_path / "config_old").mkdir()
+    (tmp_path / "config_old" / "x.yaml").write_text("a: 1\n")
+    (config / "packages" / "x.yaml").symlink_to(tmp_path / "config_old" / "x.yaml")
+    hass.config.config_dir = str(config)
+    manager = SecurityManager(hass, {})
+
+    assert manager.validate_file_path("packages/x.yaml") == (False, ERROR_INVALID_PATH)

@@ -6,7 +6,7 @@ import hashlib
 import logging
 import os
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Tuple
 
 from homeassistant.core import HomeAssistant
@@ -20,6 +20,26 @@ from .const import (
 from .security import SecurityManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def package_file(package: str) -> str:
+    """The config-relative path of a `package` argument - a file under
+    packages/, named relative to it. Refuses anything else: `..` or an
+    absolute path used to reach another allowlisted file
+    (package='../scripts.yaml' wrote an `automation:` key into
+    scripts.yaml), and a non-YAML name was never a package."""
+    path = PurePosixPath(package.replace("\\", "/"))
+    if (
+        not package.strip()
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.suffix not in (".yaml", ".yml")
+    ):
+        raise ValueError(
+            f"package is a .yaml file's path inside packages/ (e.g. "
+            f"'energy.yaml' or 'heating/rooms.yaml'), not {package!r}"
+        )
+    return f"packages/{path.as_posix()}"
 
 
 class FileManager:

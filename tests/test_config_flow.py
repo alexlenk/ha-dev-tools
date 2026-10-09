@@ -98,7 +98,56 @@ async def test_options_flow_mirror_fields_default_unset(hass: HomeAssistant):
     defaults = result["data_schema"]({})
     assert defaults[OPT_MIRROR_ENABLED] is False
     assert defaults[OPT_MIRROR_REPO] == ""
-    assert defaults[OPT_MIRROR_TOKEN] == ""
+    assert OPT_MIRROR_TOKEN not in defaults
+
+
+@pytest.mark.asyncio
+async def test_options_flow_never_sends_the_stored_token(hass: HomeAssistant):
+    """A form's defaults go to the browser; the token used to be one."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        options={
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+            OPT_MIRROR_TOKEN: "ghp_stored_secret",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    # Every default the form carries - what the frontend is sent.
+    defaults = result["data_schema"]({})
+    assert "ghp_stored_secret" not in defaults.values()
+    assert defaults[OPT_MIRROR_REPO] == "alexlenk/ha-mirror"
+
+    # Left empty, the stored token stays.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            OPT_DRY_RUN: False,
+            OPT_MIRROR_ENABLED: True,
+            OPT_MIRROR_REPO: "alexlenk/ha-mirror",
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[OPT_MIRROR_TOKEN] == "ghp_stored_secret"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "repo", ["not a repo", "owner/repo/extra", "../../user", "owner/"]
+)
+async def test_options_flow_refuses_a_malformed_repo(hass: HomeAssistant, repo):
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {OPT_DRY_RUN: False, OPT_MIRROR_ENABLED: True, OPT_MIRROR_REPO: repo},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {OPT_MIRROR_REPO: "invalid_repo"}
 
 
 @pytest.mark.asyncio

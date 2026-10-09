@@ -30,13 +30,19 @@ SENSITIVE_KEY_SUBSTRINGS = (
     "client_secret",
     "private_key",
     "secret",
+    "passphrase",
+    "psk",
+    "encryption_key",
+    "network_key",
+    "authorization",
 )
 
 
 def _is_sensitive_key(key: Any) -> bool:
     if not isinstance(key, str):
         return False
-    lowered = key.lower()
+    # X-Api-Key, client-secret: an HTTP header's spelling of the same names.
+    lowered = key.lower().replace("-", "_")
     return any(needle in lowered for needle in SENSITIVE_KEY_SUBSTRINGS)
 
 
@@ -115,8 +121,9 @@ def find_storage_credentials(content: str) -> list[str]:
 # A false positive only means a refused read, never a leak.
 _TEXT_CREDENTIAL = re.compile(
     r"""(?<![\w.-])["']?
-    ([\w.-]*(?:password|passwd|passcode|pwd|token|api_?key|secret|private_?key
-    |credential|authorization)[\w.-]*)
+    ([\w.-]*(?:password|passwd|passcode|passphrase|pwd|psk|token|api_?key
+    |secret|private_?key|encryption_?key|network_?key|credential
+    |authorization)[\w.-]*)
     ["']?[ \t]*[:=](?!=)[ \t]*([^\s,}\]]*)""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -164,3 +171,32 @@ def find_file_credentials(path: str, content: str) -> list[str]:
         if not (structured and structured[0].startswith("<content did not parse")):
             findings += [f"key {finding}" for finding in structured]
     return findings
+
+
+WITHHELD = "<withheld: a literal credential - move it to secrets.yaml (!secret)>"
+
+
+def mask_credentials(node: Any) -> Any:
+    """A JSON-safe config (yaml_style.to_json_safe) with every literal
+    credential replaced by WITHHELD, for a read-only tool's answer:
+    credential-shaped keys' values (but not `!secret ...` references), and
+    passwords in URLs and bearer tokens inside any string - the same checks
+    get_config_file withholds a block for (issue #105)."""
+    if isinstance(node, dict):
+        return {
+            key: (
+                WITHHELD
+                if _is_sensitive_key(key)
+                and isinstance(value, str | int | float)
+                and not isinstance(value, bool)
+                and not str(value).startswith(("!secret ", "!env_var "))
+                else mask_credentials(value)
+            )
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [mask_credentials(item) for item in node]
+    if isinstance(node, str):
+        node = _URL_USERINFO.sub(f"://{WITHHELD}@", node)
+        return _BEARER.sub(f"Bearer {WITHHELD}", node)
+    return node

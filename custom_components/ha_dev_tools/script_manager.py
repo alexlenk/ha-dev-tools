@@ -33,7 +33,7 @@ from homeassistant.core import HomeAssistant
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-from .file_manager import FileManager
+from .file_manager import FileManager, package_file
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
@@ -274,7 +274,7 @@ class ScriptManager:
         if locations:
             location = locations[0]
         elif package:
-            file_path = f"{PACKAGES_DIR}/{package}"
+            file_path = package_file(package)
             if not (self._config_dir / file_path).is_file():
                 raise ScriptNotFoundError(
                     f"Package file '{file_path}' does not exist - create it "

@@ -60,7 +60,7 @@ from homeassistant.helpers.trigger import async_validate_trigger_config
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-from .file_manager import FileManager
+from .file_manager import FileManager, package_file
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
@@ -527,7 +527,7 @@ class TemplateYamlManager:
         config = quote_ambiguous_scalars(config)
         triggers = quote_ambiguous_scalars(triggers) if triggers else triggers
 
-        file_path = f"{PACKAGES_DIR}/{package}"
+        file_path = package_file(package)
         if not (self._config_dir / file_path).is_file():
             raise TemplateEntityNotFoundError(
                 f"Package file '{file_path}' does not exist - create it "
