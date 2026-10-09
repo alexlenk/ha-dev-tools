@@ -44,6 +44,7 @@ from . import (
     statistics_manager,
     supervisor_manager,
     template_manager,
+    trace_manager,
     write_confirmation,
 )
 from .automation_manager import (
@@ -3299,6 +3300,146 @@ class AuditAutomationsTool(GatedTool):
         return await audit_manager.audit_automations(hass, self._manager)
 
 
+class ListTracesTool(GatedTool):
+    """Stored automation/script runs - see trace_manager.py."""
+
+    name = "list_traces"
+    description = (
+        "List the stored runs (traces) of automations or scripts, newest "
+        "first - the automation editor's Traces view. Home Assistant keeps "
+        "the last few runs of each (5 by default), across restarts. Each "
+        "has its run_id, start/finish, the trigger that fired, "
+        "script_execution (how it ended: finished, failed_conditions, "
+        "error, cancelled, ...), last_step and any error. Pass entity_id "
+        "(automation.x / script.x) or domain plus item_id (an automation's "
+        "config id, a script's object id) for one item, or just domain for "
+        "all of them. errors_only keeps runs that raised an error. "
+        "include_not_triggered also lists the trigger checks that didn't "
+        "fire (recent Home Assistant versions only). get_trace reads one "
+        "run's steps. Read-only."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("entity_id"): str,
+            vol.Optional("domain", default="automation"): vol.In(trace_manager.DOMAINS),
+            vol.Optional("item_id"): str,
+            vol.Optional("errors_only", default=False): bool,
+            vol.Optional("include_not_triggered", default=False): bool,
+            vol.Optional("limit", default=trace_manager.DEFAULT_LIST_LIMIT): vol.All(
+                int, vol.Range(min=1, max=500)
+            ),
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List traces."""
+        args = tool_input.tool_args
+        try:
+            domain, item_id = trace_manager.resolve_item(
+                hass,
+                domain=args.get("domain"),
+                item_id=args.get("item_id"),
+                entity_id=args.get("entity_id"),
+            )
+            user = await helper_manager.resolve_user(hass, llm_context)
+            return cast(
+                JsonObjectType,
+                await trace_manager.list_traces(
+                    hass,
+                    user,
+                    domain=domain,
+                    item_id=item_id,
+                    errors_only=args.get("errors_only", False),
+                    include_not_triggered=args.get("include_not_triggered", False),
+                    limit=args.get("limit", trace_manager.DEFAULT_LIST_LIMIT),
+                ),
+            )
+        except (
+            trace_manager.TraceNotFoundError,
+            UnresolvedUserError,
+            ValueError,
+            WebSocketCommandError,
+        ) as exc:
+            return _tool_error(exc)
+
+
+class GetTraceTool(GatedTool):
+    """One automation/script run in full - see trace_manager.py."""
+
+    name = "get_trace"
+    description = (
+        "Read one run (trace) of an automation or script step by step - "
+        "the most direct way to see why it did or didn't do something. "
+        "Pass entity_id (automation.x / script.x) or domain plus item_id, "
+        "and a run_id from list_traces (omitted: the latest run). Returns "
+        "the run's summary (trigger, script_execution, error), its context "
+        "(parent_id is set when something else - e.g. another automation "
+        "- caused it) and every trigger/condition/action step in the order "
+        "it ran: path (e.g. 'condition/0', 'action/1/then/0'), timestamp, "
+        "result (a condition's true/false, a service call's params, which "
+        "choose branch ran, ...), error and template_errors. A step with "
+        "child_id ran a script - pass that to get_trace for its own steps. "
+        "include_variables (default true) adds what each step changed, "
+        "e.g. the trigger's from_state/to_state; include_config adds the "
+        "automation's config as it was when this run happened. Read-only."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("entity_id"): str,
+            vol.Optional("domain", default="automation"): vol.In(trace_manager.DOMAINS),
+            vol.Optional("item_id"): str,
+            vol.Optional("run_id"): str,
+            vol.Optional("include_variables", default=True): bool,
+            vol.Optional("include_config", default=False): bool,
+        }
+    )
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Read one trace."""
+        args = tool_input.tool_args
+        try:
+            domain, item_id = trace_manager.resolve_item(
+                hass,
+                domain=args.get("domain"),
+                item_id=args.get("item_id"),
+                entity_id=args.get("entity_id"),
+            )
+            if item_id is None:
+                raise ValueError("Pass entity_id, or item_id")
+            user = await helper_manager.resolve_user(hass, llm_context)
+            return cast(
+                JsonObjectType,
+                await trace_manager.get_trace(
+                    hass,
+                    user,
+                    domain=domain,
+                    item_id=item_id,
+                    run_id=args.get("run_id"),
+                    include_variables=args.get("include_variables", True),
+                    include_config=args.get("include_config", False),
+                ),
+            )
+        except (
+            trace_manager.TraceNotFoundError,
+            UnresolvedUserError,
+            ValueError,
+            WebSocketCommandError,
+        ) as exc:
+            return _tool_error(exc)
+
+
 class TriggerAutomationTool(WriteGatedTool):
     """Run an existing automation on demand - see service_call_manager.py."""
 
@@ -3725,6 +3866,8 @@ class DevToolsAPI(llm.API):
                 WriteAutomationTool(self.automation_manager),
                 DeleteAutomationTool(self.automation_manager),
                 AuditAutomationsTool(self.automation_manager),
+                ListTracesTool(),
+                GetTraceTool(),
                 TriggerAutomationTool(),
                 SetNumberValueTool(),
                 SetBooleanValueTool(),

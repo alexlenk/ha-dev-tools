@@ -240,6 +240,8 @@ async def test_dev_tools_real_tools_registered(
         "write_automation",
         "delete_automation",
         "audit_automations",
+        "list_traces",
+        "get_trace",
         "trigger_automation",
         "set_number_value",
         "set_boolean_value",
