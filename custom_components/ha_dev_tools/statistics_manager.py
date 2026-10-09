@@ -33,7 +33,11 @@ can be restored with one call.
 Issue #136 adds merging and in-recorder backups (statistics_merge.py,
 statistics_backup.py), built on the same queue: HA's own import task
 (`Recorder.async_import_statistics`, for long- and short-term rows) and
-sum adjustment (`Recorder.async_adjust_statistics`). One thing every write
+a sum adjustment like `Recorder.async_adjust_statistics` - which is ours,
+as HA's commits half of one on MySQL/MariaDB (issue #148, _adjust_sums).
+Every task is followed until it has run, HA's retries included
+(on_recorder), and the statistics are read back after a write
+(on_recorder_verified). One thing every write
 that changes a meter's sums has to respect: the sensor's 5-minute compile
 continues its `sum` from the latest *short-term* row only
 (`get_latest_short_term_statistics_with_session`, no fall-back to the
@@ -47,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Any, cast
@@ -58,12 +63,20 @@ from homeassistant.components.recorder.db_schema import (
     StatisticsMeta,
     StatisticsShortTerm,
 )
-from homeassistant.components.recorder.models import StatisticMetaData
-from homeassistant.components.recorder.util import session_scope
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
+from homeassistant.components.recorder.tasks import ImportStatisticsTask, RecorderTask
+from homeassistant.components.recorder.util import (
+    retryable_database_job,
+    session_scope,
+)
 from homeassistant.core import HomeAssistant, valid_entity_id
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.sql import Select
 
 from .const import DOMAIN
@@ -539,28 +552,45 @@ def check_importable(metadata: StatisticMetaData | dict[str, Any]) -> None:
 
 
 def queue_import(
-    hass: HomeAssistant, metadata: StatisticMetaData, rows: list[dict[str, Any]]
+    hass: HomeAssistant,
+    metadata: StatisticMetaData,
+    rows: list[dict[str, Any]],
+    *,
+    only_if: Callable[[Any], bool] | None = None,
 ) -> None:
     """Queue hourly rows (raw shape) for import into metadata's statistic,
-    through the same validation as WS recorder/import_statistics. Existing
-    rows with the same start are overwritten, others inserted."""
+    through the same validation as WS recorder/import_statistics
+    (check_importable). Existing rows with the same start are overwritten,
+    others inserted. `only_if(instance)`, if given, is checked on the
+    recorder thread right before: False skips the import."""
     check_importable(metadata)
     data = [statistic_data(row) for row in rows]
-    if metadata["source"] == "recorder":
-        importer = statistics.async_import_statistics
-    else:
-        importer = statistics.async_add_external_statistics
-    importer(hass, cast(StatisticMetaData, dict(metadata)), cast(Any, data))
+    for row in data:
+        if row["start"].minute or row["start"].second or row["start"].microsecond:
+            raise StatisticsChangeRefusedError(
+                f"{row['start'].isoformat()} isn't the start of an hour"
+            )
+    meta = cast(StatisticMetaData, dict(metadata))
+    meta.setdefault("mean_type", StatisticMeanType.NONE)
+    meta.setdefault("unit_class", None)
+    task = _Import(meta, cast(list[StatisticData], data), Statistics)
+    task.only_if = only_if
+    _queue(hass, task)
 
 
 def queue_short_term_seed(
-    hass: HomeAssistant, metadata: StatisticMetaData, last_row: dict[str, Any]
+    hass: HomeAssistant,
+    metadata: StatisticMetaData,
+    last_row: dict[str, Any],
+    *,
+    only_if: Callable[[Any], bool] | None = None,
 ) -> None:
     """Queue a 5-minute row carrying a meter series' last hourly sum/state,
     so the sensor's next compile continues from it rather than from 0 (see
     the module docstring). Placed in the last 5-minute slot of that hour,
     where the compile that made the hourly row took them from - so it
-    rewrites that row with the same values when it still exists."""
+    rewrites that row with the same values when it still exists.
+    `only_if` as for queue_import."""
     seed = statistic_data(
         {
             **{column: last_row.get(column) for column in ("state", "sum")},
@@ -568,7 +598,56 @@ def queue_short_term_seed(
             "start_ts": last_row["start_ts"] + 55 * 60,
         }
     )
-    _instance(hass).async_import_statistics(dict(metadata), [seed], StatisticsShortTerm)
+    task = _Import(
+        cast(StatisticMetaData, dict(metadata)),
+        [cast(StatisticData, seed)],
+        StatisticsShortTerm,
+    )
+    task.only_if = only_if
+    _queue(hass, task)
+
+
+# Conditions for only_if. HA runs a clear or a rename once - a lock-wait
+# timeout on MySQL/MariaDB just fails it - so what's queued after one
+# checks it happened, on the recorder thread, right after it ran.
+
+
+def _known(instance: Any, statistic_ids: set[str]) -> set[str]:
+    """Which of statistic_ids have metadata. Blocking - recorder thread."""
+    with session_scope(session=instance.get_session(), read_only=True) as session:
+        return set(
+            instance.statistics_meta_manager.get_many(
+                session, statistic_ids=statistic_ids
+            )
+        )
+
+
+def was_moved(from_id: str, to_id: str) -> Callable[[Any], bool]:
+    """only_if: from_id's series is under to_id now (the rename ran)."""
+    return lambda instance: _known(instance, {from_id, to_id}) == {to_id}
+
+
+def was_cleared(statistic_id: str) -> Callable[[Any], bool]:
+    """only_if: statistic_id is gone (the clear ran). Decided once, when
+    first checked - before the import that recreates it."""
+    decided: list[bool] = []
+
+    def check(instance: Any) -> bool:
+        if not decided:
+            decided.append(not _known(instance, {statistic_id}))
+        return decided[0]
+
+    return check
+
+
+def queue_adjust(
+    hass: HomeAssistant, statistic_id: str, start: datetime, offset: float
+) -> None:
+    """Queue a sum adjustment: `offset` - in the statistic's own unit -
+    added to every hourly and 5-minute row of `statistic_id` from `start`
+    on, as HA's own (Recorder.async_adjust_statistics) does, but all or
+    nothing and retried like an import (_adjust_sums)."""
+    _queue(hass, _Adjust(statistic_id, start, offset))
 
 
 async def backup_document(
@@ -608,6 +687,123 @@ async def backup_document(
     }
 
 
+# --- running writes on the recorder's queue -------------------------------------
+
+
+class _Pending:
+    """The import and adjustment tasks of one on_recorder call that haven't
+    finished: on MySQL/MariaDB - only there - HA's statistics import and
+    sum adjustment retry a lock-wait timeout or a deadlock (errors
+    1205/1206/1213, recorder.util.retryable_database_job) by re-queueing
+    the task at the end of the queue, for as long as it fails (issue
+    #148). Counted on the recorder thread, read on the event loop after a
+    barrier task."""
+
+    def __init__(self) -> None:
+        self.tasks = 0
+        self.retries = 0
+
+
+# The _Pending of the on_recorder call whose `queue` is running - queue
+# runs without yielding, so only its tasks are counted.
+_counting: _Pending | None = None
+
+
+def _queue(hass: HomeAssistant, task: _Import | _Adjust) -> None:
+    pending = _counting if _counting is not None else _Pending()
+    task.pending = pending
+    pending.tasks += 1
+    _instance(hass).queue_task(task)
+
+
+class _Import(ImportStatisticsTask):
+    """HA's import task (recorder.tasks.ImportStatisticsTask - the one
+    Recorder.async_import_statistics queues), counted in a _Pending."""
+
+    pending: _Pending
+    # Checked on the recorder thread first: False skips the import.
+    only_if: Callable[[Any], bool] | None = None
+
+    def run(self, instance: Any) -> None:
+        _run_counted(
+            self,
+            instance,
+            lambda: (self.only_if is not None and not self.only_if(instance))
+            or statistics.import_statistics(
+                instance, self.metadata, self.statistics, self.table
+            ),
+        )
+
+
+@retryable_database_job("ha_dev_tools sum adjustment")
+def _adjust_sums(
+    instance: Any, statistic_id: str, start: datetime, offset: float
+) -> bool:
+    """HA's adjust_statistics, minus what made it unsafe on MySQL/MariaDB
+    (issue #148): HA's _adjust_sum_statistics catches every database error
+    - a lock-wait timeout included - logs it and carries on, so the
+    adjustment is never retried, and with the 5-minute rows already updated
+    and the hourly ones not, the half-done adjustment is committed. Here
+    both UPDATEs are one transaction (session_scope discards it on an
+    error), and HA's own retry wrapper re-queues a lock-wait timeout or a
+    deadlock. Blocking - runs on the recorder thread."""
+    with session_scope(session=instance.get_session()) as session:
+        found = instance.statistics_meta_manager.get_many(
+            session, statistic_ids={statistic_id}
+        )
+        if statistic_id not in found:
+            return True
+        metadata_id = found[statistic_id][0]
+        for table, since in (
+            (StatisticsShortTerm, start),
+            (Statistics, start.replace(minute=0)),
+        ):
+            session.execute(
+                update(table)
+                .where(table.metadata_id == metadata_id)
+                .where(table.start_ts >= since.timestamp())
+                .values(sum=table.sum + offset)
+                .execution_options(synchronize_session=False)
+            )
+    return True
+
+
+@dataclass(slots=True)
+class _Adjust(RecorderTask):
+    """A sum adjustment (_adjust_sums) on the recorder's queue, counted in a
+    _Pending."""
+
+    statistic_id: str
+    start: datetime
+    offset: float
+    pending: _Pending = field(default_factory=_Pending)
+
+    def run(self, instance: Any) -> None:
+        _run_counted(
+            self,
+            instance,
+            lambda: _adjust_sums(instance, self.statistic_id, self.start, self.offset),
+        )
+
+
+def _run_counted(
+    task: _Import | _Adjust, instance: Any, job: Callable[[], bool]
+) -> None:
+    """Run on the recorder thread: `job` returns False when it hit a
+    retryable error and should run again - re-queued as HA's own task does
+    - and True when it's done, successfully or not (a permanent error is
+    logged by HA, and the check after the write reports it)."""
+    finished = True
+    try:
+        finished = job()
+    finally:
+        if finished:
+            task.pending.tasks -= 1
+        else:
+            task.pending.retries += 1
+            instance.queue_task(task)
+
+
 def _resolve(done: Any) -> None:
     if not done.done():
         done.set_result(None)
@@ -617,34 +813,46 @@ async def on_recorder(
     hass: HomeAssistant, queue: Callable[[], None], *, what: str = "the change"
 ) -> None:
     """Run `queue` - which queues recorder tasks - and wait until the
-    recorder thread has run them all. The queue is FIFO and `queue` runs
-    without yielding, so nothing (not even a statistics compile) gets in
-    between its tasks; a no-op metadata update with on_done marks the end."""
+    recorder thread has run them all, including any HA is still retrying
+    (_Pending). The queue is FIFO and `queue` runs without yielding, so
+    nothing (not even a statistics compile) gets in between its tasks; a
+    no-op metadata update with on_done marks the end."""
+    global _counting
     instance = _instance(hass)
-    done = hass.loop.create_future()
+    pending = _Pending()
+    _counting = pending
+    try:
+        queue()
+    finally:
+        _counting = None
 
-    def finished() -> None:
-        hass.loop.call_soon_threadsafe(_resolve, done)
+    async def barrier() -> None:
+        done = hass.loop.create_future()
 
-    queue()
-    instance.async_update_statistics_metadata(DOMAIN, on_done=finished)
+        def finished() -> None:
+            hass.loop.call_soon_threadsafe(_resolve, done)
+
+        instance.async_update_statistics_metadata(DOMAIN, on_done=finished)
+        await done
+
     try:
         async with asyncio.timeout(RECORDER_TIMEOUT):
-            await done
+            await barrier()
+            # A task re-queued behind the barrier has run (or been
+            # re-queued again) by the next one.
+            while pending.tasks:
+                await barrier()
     except TimeoutError as exc:
+        if pending.tasks:
+            raise StatisticsTimeoutError(
+                f"the database stayed locked: Home Assistant was still retrying "
+                f"{what} after {RECORDER_TIMEOUT // 60} min ({pending.retries} "
+                "lock-wait timeouts or deadlocks so far) - it may still apply"
+            ) from exc
         raise StatisticsTimeoutError(
             f"the recorder hasn't finished {what} within "
             f"{RECORDER_TIMEOUT // 60} min - it's queued and may still run"
         ) from exc
-
-
-# Extra barrier rounds after a write that doesn't verify yet: on
-# MySQL/MariaDB, an import or adjust task that hits a lock-wait timeout or a
-# deadlock re-queues itself at the end of the queue - behind the barrier
-# (recorder.tasks.ImportStatisticsTask / AdjustStatisticsTask) - and one
-# more round lets it run. On SQLite a failing task is dropped (and logged),
-# so the check fails for good.
-VERIFY_ROUNDS = 3
 
 
 async def on_recorder_verified(
@@ -655,15 +863,12 @@ async def on_recorder_verified(
     what: str,
 ) -> None:
     """on_recorder, then check the statistics hold what was written:
-    `verify` returns the problems (empty when it landed). Raises
-    StatisticsNotAppliedError naming them if it still hasn't after
-    VERIFY_ROUNDS rounds - never reports a write as done that isn't
-    (issue #145)."""
+    `verify` returns the problems (empty when it landed). Once the recorder
+    has run everything - retries included - a problem is final: a task
+    failed inside the recorder (HA logs it and drops it). Raises
+    StatisticsNotAppliedError naming them - never reports a write as done
+    that isn't (issue #145)."""
     await on_recorder(hass, queue, what=what)
-    for _ in range(VERIFY_ROUNDS):
-        if not (problems := await verify()):
-            return
-        await on_recorder(hass, lambda: None, what=what)
     if problems := await verify():
         raise StatisticsNotAppliedError(
             f"{what} didn't land as planned - {'; '.join(problems[:5])}"
@@ -881,7 +1086,9 @@ async def migrate_statistics(
             # dead for longer than the recorder keeps them (10 days by
             # default) - without one, the entity's next compile would
             # restart the sum at 0 (issue #136).
-            queue_short_term_seed(hass, plan["metadata"], last)
+            queue_short_term_seed(
+                hass, plan["metadata"], last, only_if=was_moved(from_id, target)
+            )
 
     async def verify() -> list[str]:
         after = await describe_statistics(hass, [from_id, target])

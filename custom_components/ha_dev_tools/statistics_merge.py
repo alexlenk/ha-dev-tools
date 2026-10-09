@@ -358,7 +358,14 @@ async def plan_merge(
         rows=rows,
         report=report,
         rebase=rebase,
-        seed=has_sum and not short_term and bool(rows),
+        # Only an entity's own statistics are compiled from 5-minute rows;
+        # an external one (an integration's import) never reads them.
+        seed=(
+            has_sum
+            and target_meta["source"] == "recorder"
+            and not short_term
+            and bool(rows)
+        ),
         existing=target.by_start,
     )
 
@@ -406,7 +413,6 @@ async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, An
     written = [
         row for row in rows if not _unchanged(row, plan.existing.get(row["start_ts"]))
     ]
-    instance = sm._instance(hass)
     metadata = cast(StatisticMetaData, plan.metadata)
     sm.check_importable(metadata)
     # The compile measures from this row's state, so it's the target
@@ -434,11 +440,9 @@ async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, An
     if shift_from is not None:
 
         def queue_adjust() -> None:
-            instance.async_adjust_statistics(
-                target_id,
-                dt_util.utc_from_timestamp(shift_from),
-                offset,
-                plan.metadata["unit_of_measurement"],
+            # The rows are in the target's own unit, so is the offset.
+            sm.queue_adjust(
+                hass, target_id, dt_util.utc_from_timestamp(shift_from), offset
             )
 
         async def adjusted() -> list[str]:

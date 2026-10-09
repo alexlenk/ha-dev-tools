@@ -1,0 +1,8 @@
+# The statistics tests against a MariaDB recorder (issue #148): CI's
+# `test (MariaDB)` job. mysqlclient is the driver HA's recorder uses for a
+# mysql:// db_url (it needs libmariadb-dev and pkg-config to build);
+# sqlalchemy-utils is what pytest-homeassistant-custom-component's
+# --dburl support creates and drops the test database with.
+-r requirements-test.txt
+mysqlclient==2.3.0
+sqlalchemy-utils==0.42.1

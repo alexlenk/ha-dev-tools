@@ -273,16 +273,26 @@ async def restore_statistics(
     # Before anything is queued: the clear must never go ahead of an import
     # HA would then refuse.
     sm.check_importable(metadata)
+    # A target that got a series since the plan (an entity recording for
+    # the first time) would be imported into, not replaced.
+    if not plan["overwrites"] and target in await sm.read_metadata(hass, [target]):
+        raise sm.StatisticsChangeRefusedError(
+            f"'{target}' has statistics of its own since this was planned - "
+            "preview again (they're replaced, after a backup)"
+        )
     now = dt_util.utcnow().timestamp()
     cutoff = now - now % 3600 - 3600
     expected = {row["start_ts"] for row in rows}
+    # Imported only once the clear has run: HA doesn't retry a clear, and
+    # the backup imported over the target's own series would mix the two.
+    gone = sm.was_cleared(target) if plan["overwrites"] else None
 
     def queue() -> None:
         if plan["overwrites"]:
             instance.async_clear_statistics([target])
-        sm.queue_import(hass, metadata, rows)
+        sm.queue_import(hass, metadata, rows, only_if=gone)
         if metadata["has_sum"] and metadata["source"] == "recorder" and rows:
-            sm.queue_short_term_seed(hass, metadata, rows[-1])
+            sm.queue_short_term_seed(hass, metadata, rows[-1], only_if=gone)
 
     async def verify() -> list[str]:
         # The backup's rows, and nothing older than the restore besides -

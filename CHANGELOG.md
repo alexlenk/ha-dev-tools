@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.5] - 2026-10-09
+
+### Fixed
+- **On MariaDB/MySQL, a statistics write could be reported as failed while Home Assistant was still retrying it, and then apply anyway** (issue #148). On a lock-wait timeout or a deadlock, HA re-queues the import at the end of the recorder's queue, and keeps doing so for as long as it fails. 2.26.4 checked the result after three extra rounds and then reported `StatisticsNotAppliedError`. It also released the per-statistic lock, so a retry by then could apply the write twice.
+  - Every import and sum adjustment is now tracked until it has actually run. While HA is still retrying, the write waits, for up to 30 minutes, and the lock stays held.
+  - If the database is still locked after 30 minutes, the error says HA is still retrying and that the write may still apply.
+  - Once nothing is pending, a mismatch is reported at once, as before.
+- **On MariaDB/MySQL, `merge_statistics` / `derive_statistics` into a live meter could commit half a sum adjustment.** This is a Home Assistant bug: its sum adjustment catches every database error, a lock-wait timeout included, logs `Unexpected exception when updating statistics`, and carries on. The 5-minute rows were then shifted and the hourly rows not, in one committed transaction, and the adjustment was never retried. The meter then continued from the shifted 5-minute sum.
+  - The adjustment is now our own task: the same two UPDATEs, in one transaction that is discarded as a whole on an error, and retried through HA's own retry wrapper like an import.
+  - Reproduced against MariaDB 10.11 with a real row lock. Before the fix the hourly sums were `[…, 1.0, 2.0]` while the 5-minute sum was `5.0`; after it they are `[…, 4.0, 5.0]` and `5.0`.
+  - **How an agent checks:** this only applies to merges and derives on MariaDB/MySQL that answered `StatisticsNotAppliedError` naming "the sum adjustment", or whose HA log shows `Unexpected exception when updating statistics` at that time. Call `get_statistics` on the target with `period="hour"` and `types=["sum", "change"]` from the merge's `sum_shift.from` on. It was hit if `change` at that hour is negative by about `sum_shift.offset`, and the first hour compiled after the merge is too high by the same amount.
+  - **How to repair it:** `restore_statistics` from the merge's backup, then merge again on this version.
+- **`restore_statistics` could mix the backup into the target's own series.** HA doesn't retry a clear, so on MariaDB/MySQL a lock-wait timeout fails it, and the backup's import queued behind it still ran over the target's own rows. A target that started recording after the preview got the same treatment. The import and the seed row now run only if the clear really happened, checked on the recorder thread right after it ran. A target that has appeared since the preview is refused ("preview again").
+  - **How an agent checks:** a restore that answered `StatisticsNotAppliedError` saying the target "still has its own row" was hit. `restore_statistics` the backup that restore made of the target (`list_statistics source=ha_dev_tools`) to undo it.
+- **A failed `migrate_statistics` rename could leave the old meter's sum under the new id.** On MariaDB/MySQL HA doesn't retry the rename after a lock-wait timeout, and the 5-minute seed row queued after it still created the new id, holding the old meter's last sum, and the entity's next compile continued from it. The seed now goes in only if the series really moved.
+- **`merge_statistics` into an external statistic** (e.g. `tibber:…`) with no 5-minute rows wrote a stray 5-minute row carrying the merged sum. Only an entity's own statistics continue from one, which is what derive and restore already did.
+
+### Added
+- **A `test (MariaDB)` CI job** runs every statistics test against a MariaDB 10.11 recorder, the version HA's MariaDB add-on ships (issue #148). `tests/test_statistics_mysql.py` adds real lock contention: a second connection holds the rows while a merge, a sum adjustment, a clear or a restore runs. The import and the adjustment retry for as long as the lock is held, and the clear and the restore fail without changing anything. Locally: `pip install -r requirements-test-mariadb.txt`, then run pytest with `--dburl "mysql://…/ha_test?charset=utf8mb4" --drop-existing-db`.
+
 ## [2.26.4] - 2026-10-09
 
 ### Fixed
