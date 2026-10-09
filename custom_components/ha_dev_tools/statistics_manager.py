@@ -142,6 +142,8 @@ async def list_statistics(
     bounds = await instance.async_add_executor_job(_period_bounds, hass)
     issues = await instance.async_add_executor_job(statistics.validate_statistics, hass)
     wanted = search.casefold() if search else None
+    # statistics_backup builds on this module, so it's imported here.
+    from .statistics_backup import backup_info
 
     rows = []
     for item in sorted(listed, key=lambda item: item["statistic_id"]):
@@ -169,8 +171,6 @@ async def list_statistics(
         mean_type = item.get("mean_type")
         extra: dict[str, Any] = {}
         if item["source"] == DOMAIN:
-            from .statistics_backup import backup_info
-
             extra["backup"] = backup_info(item.get("name"))
         rows.append(
             {
