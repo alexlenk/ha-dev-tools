@@ -233,6 +233,7 @@ async def test_dev_tools_real_tools_registered(
         "migrate_statistics",
         "merge_statistics",
         "derive_statistics",
+        "redistribute_statistics",
         "restore_statistics",
         "list_addons",
         "get_addon_logs",

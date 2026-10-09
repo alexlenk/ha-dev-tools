@@ -57,6 +57,7 @@ from . import (
     statistics_derive,
     statistics_manager,
     statistics_merge,
+    statistics_redistribute,
     supervisor_manager,
     template_manager,
     trace_manager,
@@ -1892,6 +1893,167 @@ class DeriveStatisticsTool(WriteGatedTool):
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
             touches=[args["target_statistic_id"], args["source_statistic_id"]],
+        )
+
+
+def _time_or_none(args: dict[str, Any], field: str) -> Any:
+    return _parse_datetime(args[field], field=field) if args.get(field) else None
+
+
+class RedistributeStatisticsTool(WriteGatedTool):
+    """Spread a meter's catch-up hour over its silent window - see
+    statistics_redistribute.py."""
+
+    name = "redistribute_statistics"
+    description = (
+        "Spread the energy a meter booked into one catch-up hour (after a "
+        "reader or recorder outage) back over the silent hours it belongs "
+        "to, without changing any total: the sum at the end of the catch-up "
+        "hour stays, so later hours, the live state and the next compile are "
+        "untouched. A window runs from its first silent hour to the catch-up "
+        "hour: pass windows=[{start, catchup_hour}] (ISO 8601, start of an "
+        "hour), or detect={min_silent_hours, min_catchup, start?, end?} for "
+        "every run of at least min_silent_hours hours without a change "
+        "followed by an hour above min_catchup (both required). detect_on: "
+        "detect on, and move only the catch-up of, another meter - a "
+        "component of a merged target; its other components' hours stay. "
+        "Shape, per hour: reference_statistic_ids (another meter's hourly "
+        "changes, e.g. an inverter's own counter, scaled to the moved "
+        "amount; several in priority order), then profile_weeks (the "
+        "series' own mean by hour of week over that many weeks around the "
+        "window), then even (with a warning). Or values: the window's new "
+        "hourly values, oldest first - and for the part the meter still has "
+        "5-minute rows for, 12 per hour instead (the preview's values_needed "
+        "says how many of each); or [{start, value}] with every other period "
+        "0. They must add up to the window total (normalize scales a miss "
+        "within 2 %); none negative, none above max_per_hour. 5-minute rows "
+        "inside the window are rewritten to match. Refused: a negative hour "
+        "or a meter reset in a window, overlapping windows, an incomplete "
+        "catch-up hour. The preview shows per window the moved amount, which "
+        "source shaped how many hours, each reference's total vs the moved "
+        "amount (warning beyond 15 %, or when it looks like a flat "
+        "estimate), its fit to the meter on clean hours around the window, "
+        "before/after by day and month and the largest hour. Amounts are in "
+        "the statistic's unit. Backed up first, like merge_statistics; "
+        "series derive_statistics built from it are named, to rerun."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("statistic_id"): str,
+            vol.Optional("windows"): vol.All(
+                [{vol.Required("start"): str, vol.Required("catchup_hour"): str}],
+                vol.Length(min=1),
+            ),
+            vol.Optional("detect"): {
+                vol.Required("min_silent_hours"): vol.All(int, vol.Range(min=1)),
+                vol.Required("min_catchup"): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, min_included=False)
+                ),
+                vol.Optional("start"): str,
+                vol.Optional("end"): str,
+            },
+            vol.Optional("detect_on"): str,
+            vol.Optional("reference_statistic_ids"): [str],
+            vol.Optional("profile_weeks"): vol.All(int, vol.Range(min=1, max=26)),
+            vol.Optional("values"): vol.All(
+                [vol.Any(int, float, dict)], vol.Length(min=1)
+            ),
+            vol.Optional("normalize"): bool,
+            vol.Optional("max_per_hour"): vol.All(
+                vol.Coerce(float), vol.Range(min=0, min_included=False)
+            ),
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> statistics_redistribute.RedistributePlan:
+        detect = args.get("detect")
+        return await statistics_redistribute.plan_redistribute(
+            hass,
+            args["statistic_id"],
+            windows=(
+                [
+                    {
+                        "start": _parse_datetime(item["start"], field="start"),
+                        "catchup_hour": _parse_datetime(
+                            item["catchup_hour"], field="catchup_hour"
+                        ),
+                    }
+                    for item in args["windows"]
+                ]
+                if args.get("windows") is not None
+                else None
+            ),
+            detect=(
+                {
+                    **detect,
+                    "start": _time_or_none(detect, "start"),
+                    "end": _time_or_none(detect, "end"),
+                }
+                if detect is not None
+                else None
+            ),
+            detect_on=args.get("detect_on"),
+            reference_ids=args.get("reference_statistic_ids"),
+            profile_weeks=args.get("profile_weeks"),
+            values=args.get("values"),
+            normalize=bool(args.get("normalize")),
+            max_per_hour=args.get("max_per_hour"),
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    def _touches(self, args: dict[str, Any]) -> list[str]:
+        return [
+            args["statistic_id"],
+            *([args["detect_on"]] if args.get("detect_on") else []),
+        ]
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """What each window becomes, or why it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return {"problems": str(exc)}
+        return {"would_redistribute": cast(JsonValueType, plan.preview())}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up the statistic, then write the redistributed hours."""
+        args = tool_input.tool_args
+        if busy := _statistics_busy(hass, self._touches(args)):
+            return busy
+        try:
+            plan = await self._plan(hass, args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return _tool_error(exc)
+
+        async def write() -> JsonObjectType:
+            return cast(
+                JsonObjectType,
+                await statistics_redistribute.redistribute_statistics(hass, plan),
+            )
+
+        return await _guarded_statistics_write(
+            hass,
+            [args["statistic_id"]],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+            touches=self._touches(args),
         )
 
 
@@ -4423,6 +4585,7 @@ class DevToolsAPI(llm.API):
                 MigrateStatisticsTool(),
                 MergeStatisticsTool(),
                 DeriveStatisticsTool(),
+                RedistributeStatisticsTool(),
                 RestoreStatisticsTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),

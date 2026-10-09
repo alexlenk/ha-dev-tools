@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.26.6] - 2026-10-09
+## [2.27.0] - 2026-10-09
+
+### Added
+- **`redistribute_statistics`** spreads a catch-up hour back over the hours a meter missed (issue #155). When a reader goes quiet, through a cloud outage or with the recorder down, HA books everything missed into the first hour after it comes back: one spike instead of the usage spread over the silent hours. Totals are right, but hour, day and month views, and the costs derived from them, are not. This moves the energy back without changing any total. The sum at the end of the catch-up hour stays what it is, so every later hour, the live state and the next compile are untouched; only hours inside the window change.
+  - **Windows:**
+    - given as `windows: [{start, catchup_hour}]`; or
+    - detected with `detect: {min_silent_hours, min_catchup}` (both required), with optional `start`/`end`. Detection finds every run of at least that many hours without a change, followed by an hour above `min_catchup`, and treats all of them in one preview.
+    - `detect_on` detects on another meter, and moves only that meter's catch-up. This is for a merged target, whose other components went on recording through the stall.
+  - **The shape, per hour, from the first source that has it:**
+    - `reference_statistic_ids`: another meter's hourly changes, e.g. an inverter's own export counter, scaled so the window total is exactly the catch-up. Several can be given, in priority order.
+    - `profile_weeks`: the meter's own mean by hour of the week over that many weeks either side of the window.
+    - Even, as a last resort, with a warning.
+  - **Or `values`:** the caller's own numbers, one per hour, and 12 per hour (5-minute slots) for the part of the window the meter still has 5-minute rows for. The preview's `values_needed` says how many of each. They can also be `[{start, value}]`, with every other period 0. They must add up to the window total within 0.001 (`normalize` scales a miss of up to 2 %), with none negative and none above `max_per_hour`.
+  - **5-minute rows** inside the window are rewritten too: each hour split by the first reference's 5-minute changes, evenly, or as given.
+  - **The preview, per window:**
+    - the moved amount, and which source shaped how many hours;
+    - each reference's total against the moved amount, with a warning beyond 15 % or when the reference looks like a flat estimate rather than a measurement;
+    - each reference's fit to the meter (mean absolute error, ratio) on clean hours around the window;
+    - before/after by day and month, and the largest hour before and after.
+    - It also names any `derive_statistics` series built from the meter, to run again.
+  - **Refused:** a window with a negative hour or a meter reset, overlapping windows, and an incomplete catch-up hour.
+  - Backed up first, like the other statistics writes, and checked against the recorder after writing. Tested on SQLite and on MariaDB.
+
 
 Findings of a full code audit, each fixed with a test that failed before.
 
