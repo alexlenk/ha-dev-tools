@@ -374,7 +374,7 @@ async def test_row_mismatches_names_the_column(hass: HomeAssistant):
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("recorder_mock")
-@pytest.mark.parametrize("outcome", ["gone", "elsewhere"])
+@pytest.mark.parametrize("outcome", ["gone", "nowhere", "elsewhere"])
 async def test_migrate_checks_where_the_series_ended_up(
     hass: HomeAssistant, monkeypatch, outcome
 ):
@@ -401,6 +401,8 @@ async def test_migrate_checks_where_the_series_ended_up(
             )
 
     monkeypatch.setattr(instance, "async_update_statistics_metadata", not_a_move)
+    if outcome == "nowhere":  # not even the seed row created it
+        monkeypatch.setattr(sm, "queue_short_term_seed", lambda *_: None)
     result = await sm.migrate_statistics(hass, plan)
     assert result["moved"] is False
 
@@ -460,3 +462,19 @@ async def test_migrate_refused_when_the_target_started_recording_since_the_plan(
     assert await _sums(hass, "sensor.old_meter") == [0, 1.5, 3]
     short_term = await sm.read_rows(hass, ["sensor.brand_new"], StatisticsShortTerm)
     assert short_term == {}
+
+
+@pytest.mark.asyncio
+async def test_the_guard_itself_refuses_a_busy_statistic(hass: HomeAssistant):
+    """Planning can take a while: the guard checks again before claiming."""
+    from unittest.mock import AsyncMock
+
+    from custom_components.ha_dev_tools import llm_api
+
+    hass.data[llm_api._STATISTICS_WRITES_RUNNING] = {"sensor.a"}
+    write = AsyncMock()
+    result = await llm_api._guarded_statistics_write(
+        hass, ["sensor.a"], "clear_statistics", write, allow_no_backup=True
+    )
+    assert result["error_type"] == "StatisticsBusyError"
+    write.assert_not_called()
