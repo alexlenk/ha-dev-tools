@@ -640,6 +640,22 @@ def was_cleared(statistic_id: str) -> Callable[[Any], bool]:
     return check
 
 
+def queue_short_term_rows(
+    hass: HomeAssistant, metadata: StatisticMetaData, rows: list[dict[str, Any]]
+) -> None:
+    """Queue 5-minute rows (raw shape) for import into metadata's statistic;
+    existing rows with the same start are overwritten, others inserted."""
+    check_importable(metadata)
+    _queue(
+        hass,
+        _Import(
+            cast(StatisticMetaData, dict(metadata)),
+            [cast(StatisticData, statistic_data(row)) for row in rows],
+            StatisticsShortTerm,
+        ),
+    )
+
+
 def queue_adjust(
     hass: HomeAssistant, statistic_id: str, start: datetime, offset: float
 ) -> None:
@@ -886,13 +902,17 @@ def _close(a: Any, b: Any) -> bool:
 
 
 async def row_mismatches(
-    hass: HomeAssistant, statistic_id: str, expected: list[dict[str, Any]]
+    hass: HomeAssistant,
+    statistic_id: str,
+    expected: list[dict[str, Any]],
+    table: type[StatisticsBase] = Statistics,
 ) -> list[str]:
-    """Where `statistic_id`'s hourly rows differ from `expected` (raw
-    shape; only the values `expected` sets are compared)."""
+    """Where `statistic_id`'s rows in `table` (hourly by default) differ
+    from `expected` (raw shape; only the values `expected` sets are
+    compared)."""
     actual = {
         row["start_ts"]: row
-        for row in (await read_rows(hass, [statistic_id])).get(statistic_id, [])
+        for row in (await read_rows(hass, [statistic_id], table)).get(statistic_id, [])
     }
     problems = []
     for row in expected:
