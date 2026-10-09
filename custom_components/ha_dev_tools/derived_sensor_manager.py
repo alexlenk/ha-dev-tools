@@ -170,10 +170,17 @@ def _get_entry(hass: HomeAssistant, entry_id: str) -> ConfigEntry:
 # voluptuous_serialize.convert doesn't recognize as "defer" - it hands that
 # sentinel back as the serialized schema itself, which then crashes the
 # MCP response with "Object of type _Unsupported is not JSON serializable"
-# (issues #80, #81). Use whichever field-list converter cv itself imports
-# (`to_field_list` from probatio on 2026.9+, the same function HA's own
-# data_entry_flow HTTP view switched to) so the sentinel always matches.
-_to_field_list = getattr(cv, "to_field_list", voluptuous_serialize.convert)
+# (issues #80, #81). So use probatio's own field-list converter, as HA's
+# data_entry_flow HTTP view does. Imported from probatio itself: 2026.9's
+# config_validation happened to re-export it (what this used to look up),
+# 2026.10's imports probatio as a module instead, and the lookup silently
+# fell back to voluptuous_serialize - the same crash, on every flow's first
+# step (issue #137). HA before 2026.9 has no probatio, and a matching
+# voluptuous custom_serializer.
+try:
+    from probatio import to_field_list as _to_field_list
+except ImportError:  # pragma: no cover - HA before 2026.9
+    _to_field_list = voluptuous_serialize.convert
 
 
 def _serialize_schema(schema: Any) -> list[dict[str, Any]]:

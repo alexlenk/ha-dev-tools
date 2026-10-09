@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, cast, override
 
@@ -41,7 +41,9 @@ from . import (
     references,
     registry_manager,
     service_call_manager,
+    statistics_backup,
     statistics_manager,
+    statistics_merge,
     supervisor_manager,
     template_manager,
     trace_manager,
@@ -1253,6 +1255,10 @@ _STATISTICS_ERRORS = (
     RecorderNotAvailableError,
     statistics_manager.StatisticsChangeRefusedError,
 )
+_STATISTICS_WRITE_ERRORS = (
+    statistics_manager.StatisticsTimeoutError,
+    statistics_manager.StatisticsBackupError,
+)
 
 
 async def _back_up_statistics(
@@ -1279,11 +1285,49 @@ def _backup_failed(backup: JsonObjectType) -> JsonObjectType:
     return {
         "error": (
             "the backup couldn't be pushed to the mirror repo, so nothing "
-            "was cleared - fix mirroring, or pass allow_no_backup=true"
+            "was changed - fix mirroring, or pass allow_no_backup=true"
         ),
         "error_type": "StatisticsBackupError",
         "mirror": backup,
     }
+
+
+async def _guarded_statistics_write(
+    hass: HomeAssistant,
+    statistic_ids: list[str],
+    operation: str,
+    write: Callable[[], Coroutine[Any, Any, JsonObjectType]],
+    *,
+    allow_no_backup: bool,
+) -> JsonObjectType:
+    """Every destructive statistics write (issue #136): copy the series it
+    changes to the mirror repo (refused if that fails, unless
+    allow_no_backup) and into backup statistics in the recorder (always -
+    refused if that fails), then write. Run to the end even if the client
+    gives up."""
+
+    async def commit() -> JsonObjectType:
+        mirrored = (
+            await _back_up_statistics(hass, statistic_ids) if statistic_ids else None
+        )
+        if mirrored is not None and not mirrored["mirrored"] and not allow_no_backup:
+            return _backup_failed(mirrored)
+        response: JsonObjectType
+        try:
+            made = await statistics_backup.create_backups(
+                hass, statistic_ids, operation
+            )
+            response = await write()
+            if made:
+                response["backups"] = cast(JsonValueType, made)
+                response["restore"] = statistics_manager.RESTORE_HINT
+        except _STATISTICS_WRITE_ERRORS as exc:
+            response = _tool_error(exc)
+        if mirrored is not None:
+            response["mirror"] = mirrored
+        return response
+
+    return await _run_to_completion(hass, commit(), f"ha_dev_tools {operation}")
 
 
 class ClearStatisticsTool(WriteGatedTool):
@@ -1300,11 +1344,13 @@ class ClearStatisticsTool(WriteGatedTool):
         "first/last period and row count. Refused, for the whole batch: an "
         "unknown id; an id that belongs to an existing entity (the series "
         "it records into) unless allow_live=true; one the Energy dashboard "
-        "uses unless allow_energy=true. With mirroring on, the series are "
-        "pushed to the mirror repo first (statistics/cleared-<time>.json, "
-        "in recorder/import_statistics' shape, so a mistake can be "
-        "imported back) and nothing is cleared if that fails; with "
-        "mirroring off it's refused unless allow_no_backup=true."
+        "uses unless allow_energy=true. Each series is backed up first, "
+        "twice: into a backup statistic in HA's own database (the result "
+        "names it; restore_statistics puts it back) and to the mirror repo "
+        "(statistics/cleared-<time>.json, in recorder/import_statistics' "
+        "shape). Nothing is cleared if either fails; with mirroring off "
+        "it's refused unless allow_no_backup=true, which skips only the "
+        "mirror copy. Clearing a backup statistic makes no backup of it."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -1356,25 +1402,17 @@ class ClearStatisticsTool(WriteGatedTool):
             return _tool_error(exc)
         ids = [info["statistic_id"] for info in planned]
 
-        async def commit() -> JsonObjectType:
-            backup = await _back_up_statistics(hass, ids)
-            if backup is not None and not backup["mirrored"]:
-                if not args.get("allow_no_backup"):
-                    return _backup_failed(backup)
-            response: JsonObjectType
-            try:
-                await statistics_manager.clear_statistics(hass, ids)
-                response = {
-                    "cleared": cast(JsonValueType, planned),
-                    "restore": statistics_manager.RESTORE_HINT,
-                }
-            except statistics_manager.StatisticsTimeoutError as exc:
-                response = _tool_error(exc)
-            if backup is not None:
-                response["mirror"] = backup
-            return response
+        async def write() -> JsonObjectType:
+            await statistics_manager.clear_statistics(hass, ids)
+            return {"cleared": cast(JsonValueType, planned)}
 
-        return await _run_to_completion(hass, commit(), "ha_dev_tools clear_statistics")
+        return await _guarded_statistics_write(
+            hass,
+            ids,
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
 
 
 class MigrateStatisticsTool(WriteGatedTool):
@@ -1389,9 +1427,11 @@ class MigrateStatisticsTool(WriteGatedTool):
         "whose entity is gone (delete the dead entity first with "
         "delete_entity). A series already under to_statistic_id (the hours "
         "the replacement collected so far) is cleared and replaced, since "
-        "HA can't merge two series - with mirroring on it's backed up "
-        "first, like clear_statistics; with mirroring off that's refused "
-        "unless allow_no_backup=true. Units and sum/mean kind must match. "
+        "HA can't merge two series - it's backed up first, like "
+        "clear_statistics (merge_statistics keeps both instead). A meter "
+        "gets a 5-minute row with the moved series' last sum, so the "
+        "entity's next compile continues it. Units and sum/mean kind must "
+        "match. "
         "The result has the moved series and its continuity: the gap since "
         "its last period and the jump from its last state to the entity's "
         "current state; check the next hours with get_statistics. Energy "
@@ -1454,27 +1494,198 @@ class MigrateStatisticsTool(WriteGatedTool):
         except _STATISTICS_ERRORS as exc:
             return _tool_error(exc)
 
-        async def commit() -> JsonObjectType:
-            backup = None
-            if plan["replaces"]:
-                backup = await _back_up_statistics(hass, [plan["to"]])
-                if backup is not None and not backup["mirrored"]:
-                    if not args.get("allow_no_backup"):
-                        return _backup_failed(backup)
-            try:
-                response = cast(
-                    JsonObjectType,
-                    await statistics_manager.migrate_statistics(hass, plan),
-                )
-            except statistics_manager.StatisticsTimeoutError as exc:
-                response = _tool_error(exc)
-            if backup is not None:
-                response["mirror"] = backup
-                response["restore"] = statistics_manager.RESTORE_HINT
-            return response
+        async def write() -> JsonObjectType:
+            return cast(
+                JsonObjectType,
+                await statistics_manager.migrate_statistics(hass, plan),
+            )
 
-        return await _run_to_completion(
-            hass, commit(), "ha_dev_tools migrate_statistics"
+        return await _guarded_statistics_write(
+            hass,
+            [plan["to"]] if plan["replaces"] else [],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+
+class MergeStatisticsTool(WriteGatedTool):
+    """Merge statistics series into one - see statistics_merge.py."""
+
+    name = "merge_statistics"
+    description = (
+        "Combine one or more source statistics into a target's series - "
+        "for several old meters that became one (their hours added), or a "
+        "replacement that ran in parallel before the old device was "
+        "retired; HA itself can't combine two series. Meters (sum): every "
+        "series' per-hour changes are combined and the target's sum is "
+        "rebuilt from them, continuous across seams; the target keeps its "
+        "own state, and a live target goes on recording from the merged "
+        "sum. Measurements (mean): rows are taken as they are. Hours in "
+        "more than one series follow overlap: refuse (default), "
+        "target_wins, source_wins (sources in the order given) or add "
+        "(meters only). start/end (ISO 8601) limit what's taken from the "
+        "sources. Units are converted within one class (Wh/kWh), kinds "
+        "must match. The preview shows each series, the overlaps and their "
+        "resolution, every seam (gap, state jump), and the inputs' total "
+        "change vs the result's. Sources stay as they are (clear_statistics "
+        "removes them). The target is backed up first, in the recorder "
+        "(restore_statistics) and to the mirror repo - refused if either "
+        "fails; with mirroring off it needs allow_no_backup=true, which "
+        "skips only the mirror copy."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("target_statistic_id"): str,
+            vol.Required("source_statistic_ids"): vol.All([str], vol.Length(min=1)),
+            vol.Optional("overlap"): vol.In(statistics_merge.OVERLAP_RULES),
+            vol.Optional("start"): str,
+            vol.Optional("end"): str,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> statistics_merge.MergePlan:
+        return await statistics_merge.plan_merge(
+            hass,
+            args["target_statistic_id"],
+            args["source_statistic_ids"],
+            overlap=args.get("overlap", "refuse"),
+            start=(
+                _parse_datetime(args["start"], field="start")
+                if args.get("start")
+                else None
+            ),
+            end=_parse_datetime(args["end"], field="end") if args.get("end") else None,
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The merge as it would be written, or why it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return {"problems": str(exc)}
+        return {"would_merge": cast(JsonValueType, plan.preview())}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up the target, then write the merge."""
+        args = tool_input.tool_args
+        try:
+            plan = await self._plan(hass, args)
+        except (*_STATISTICS_ERRORS, ValueError) as exc:
+            return _tool_error(exc)
+
+        async def write() -> JsonObjectType:
+            return cast(
+                JsonObjectType, await statistics_merge.merge_statistics(hass, plan)
+            )
+
+        return await _guarded_statistics_write(
+            hass,
+            [args["target_statistic_id"]],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+
+class RestoreStatisticsTool(WriteGatedTool):
+    """Restore a statistics backup - see statistics_backup.py."""
+
+    name = "restore_statistics"
+    description = (
+        "Put a statistics backup back: clear_statistics, "
+        "migrate_statistics, merge_statistics and this tool copy every "
+        "series they change into a backup statistic first "
+        "('ha_dev_tools:backup_<id>_<time>'; their results name it, "
+        "list_statistics source=ha_dev_tools lists them all with what "
+        "they're a backup of, when, and stale=true after 90 days - they're "
+        "never deleted automatically, clear_statistics removes them). "
+        "Restores onto the statistic it's a backup of, or "
+        "target_statistic_id: the target's current series is backed up "
+        "too (so a restore can be undone), cleared, and replaced by the "
+        "backup's hourly rows; a meter gets a 5-minute row with its last "
+        "sum, so a live entity continues from it. 5-minute statistics "
+        "themselves aren't restored (HA only imports hourly rows, and "
+        "keeps 5-minute ones about 10 days). The backup stays."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("backup_statistic_id"): str,
+            vol.Optional("target_statistic_id"): str,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(self, hass: HomeAssistant, args: dict[str, Any]) -> dict[str, Any]:
+        return await statistics_backup.plan_restore(
+            hass,
+            args["backup_statistic_id"],
+            args.get("target_statistic_id"),
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The backup and what it would overwrite, or why it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except _STATISTICS_ERRORS as exc:
+            return {"problems": str(exc)}
+        return {
+            "would_restore": cast(JsonValueType, plan["backup"]),
+            "onto": plan["target"],
+            "would_overwrite": cast(JsonValueType, plan["overwrites"]),
+        }
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up the target's current series, then restore."""
+        args = tool_input.tool_args
+        try:
+            plan = await self._plan(hass, args)
+        except _STATISTICS_ERRORS as exc:
+            return _tool_error(exc)
+
+        async def write() -> JsonObjectType:
+            return cast(
+                JsonObjectType,
+                await statistics_backup.restore_statistics(hass, plan),
+            )
+
+        return await _guarded_statistics_write(
+            hass,
+            [plan["target"]] if plan["overwrites"] else [],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
         )
 
 
@@ -3857,6 +4068,8 @@ class DevToolsAPI(llm.API):
                 GetStatisticsTool(),
                 ClearStatisticsTool(),
                 MigrateStatisticsTool(),
+                MergeStatisticsTool(),
+                RestoreStatisticsTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),
                 CheckConfigTool(),

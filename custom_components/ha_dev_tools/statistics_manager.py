@@ -28,7 +28,19 @@ recorder's queue, and HA refuses to move a series onto an id that already
 has one - it can't merge two series - which is why a rename onto a
 replacement entity silently leaves the history behind. A cleared series
 can be backed up first in `recorder/import_statistics`'s own shape, so it
-can be restored with one call. Importing and adjusting sums aren't offered.
+can be restored with one call.
+
+Issue #136 adds merging and in-recorder backups (statistics_merge.py,
+statistics_backup.py), built on the same queue: HA's own import task
+(`Recorder.async_import_statistics`, for long- and short-term rows) and
+sum adjustment (`Recorder.async_adjust_statistics`). One thing every write
+that changes a meter's sums has to respect: the sensor's 5-minute compile
+continues its `sum` from the latest *short-term* row only
+(`get_latest_short_term_statistics_with_session`, no fall-back to the
+hourly table) and starts again at 0 when there is none - so a series that
+gets a new sum basis, or loses its short-term rows, needs them to match.
+Editing single rows (`recorder/adjust_sum_statistics` by hand) isn't
+offered.
 """
 
 from __future__ import annotations
@@ -37,10 +49,16 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.components.recorder import get_instance, statistics
-from homeassistant.components.recorder.db_schema import Statistics, StatisticsMeta
+from homeassistant.components.recorder.db_schema import (
+    Statistics,
+    StatisticsBase,
+    StatisticsMeta,
+    StatisticsShortTerm,
+)
+from homeassistant.components.recorder.models import StatisticMetaData
 from homeassistant.components.recorder.util import session_scope
 from homeassistant.core import HomeAssistant, valid_entity_id
 from homeassistant.helpers import entity_registry as er
@@ -48,6 +66,7 @@ from homeassistant.util import dt as dt_util
 from sqlalchemy import func, select
 from sqlalchemy.sql import Select
 
+from .const import DOMAIN
 from .history_manager import RecorderNotAvailableError
 
 PERIODS = ("5minute", "hour", "day", "week", "month")
@@ -123,6 +142,8 @@ async def list_statistics(
     bounds = await instance.async_add_executor_job(_period_bounds, hass)
     issues = await instance.async_add_executor_job(statistics.validate_statistics, hass)
     wanted = search.casefold() if search else None
+    # statistics_backup builds on this module, so it's imported here.
+    from .statistics_backup import backup_info
 
     rows = []
     for item in sorted(listed, key=lambda item: item["statistic_id"]):
@@ -148,6 +169,9 @@ async def list_statistics(
             continue
         first, last, _ = bounds.get(statistic_id, (None, None, 0))
         mean_type = item.get("mean_type")
+        extra: dict[str, Any] = {}
+        if item["source"] == DOMAIN:
+            extra["backup"] = backup_info(item.get("name"))
         rows.append(
             {
                 "statistic_id": statistic_id,
@@ -162,6 +186,7 @@ async def list_statistics(
                 "first_period": _iso(first),
                 "last_period": _iso(last),
                 "issues": found,
+                **extra,
             }
         )
     return {
@@ -234,8 +259,10 @@ async def get_statistics(
 
 _VALUE_COLUMNS = ("mean", "min", "max", "state", "sum")
 RESTORE_HINT = (
-    "Restore an entry with WS recorder/import_statistics, passing its "
-    "metadata and stats unchanged."
+    "Undo with restore_statistics, passing the 'backups' entry for a "
+    "statistic as backup_statistic_id. The mirror file holds the same "
+    "series in WS recorder/import_statistics' shape (metadata and stats), "
+    "for restoring from outside Home Assistant."
 )
 
 
@@ -250,6 +277,10 @@ class StatisticsChangeRefusedError(Exception):
 
 class StatisticsTimeoutError(Exception):
     """The recorder didn't confirm queued work in time - it may still run."""
+
+
+class StatisticsBackupError(Exception):
+    """A backup couldn't be made, so nothing was changed."""
 
 
 async def energy_references(hass: HomeAssistant) -> dict[str, list[str]]:
@@ -364,37 +395,131 @@ async def plan_clear(
     return [described[statistic_id] for statistic_id in wanted]
 
 
-def _series_rows(
-    hass: HomeAssistant, statistic_ids: list[str]
+def _raw_rows(
+    hass: HomeAssistant,
+    statistic_ids: list[str],
+    table: type[StatisticsBase] = Statistics,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Every long-term row of `statistic_ids`, raw (no unit conversion),
-    oldest first, in recorder/import_statistics' row shape.
+    """Every row of `statistic_ids` in `table` (hourly by default), raw - no
+    unit conversion, timestamps as floats - oldest first.
 
     Blocking - run on the recorder's executor."""
     stmt = (
         select(
             StatisticsMeta.statistic_id,
-            Statistics.start_ts,
-            Statistics.last_reset_ts,
-            *(getattr(Statistics, column) for column in _VALUE_COLUMNS),
+            table.start_ts,
+            table.last_reset_ts,
+            *(getattr(table, column) for column in _VALUE_COLUMNS),
         )
-        .join(Statistics, Statistics.metadata_id == StatisticsMeta.id)
+        .join(table, table.metadata_id == StatisticsMeta.id)
         .where(StatisticsMeta.statistic_id.in_(statistic_ids))
-        .order_by(StatisticsMeta.statistic_id, Statistics.start_ts)
+        .order_by(StatisticsMeta.statistic_id, table.start_ts)
     )
     rows: dict[str, list[dict[str, Any]]] = {}
     with session_scope(hass=hass, read_only=True) as session:
         for statistic_id, start, last_reset, *values in session.execute(stmt):
-            row: dict[str, Any] = {"start": _iso(start)}
-            if last_reset is not None:
-                row["last_reset"] = _iso(last_reset)
-            row.update(
-                (column, value)
-                for column, value in zip(_VALUE_COLUMNS, values, strict=True)
-                if value is not None
+            rows.setdefault(statistic_id, []).append(
+                {
+                    "start_ts": start,
+                    "last_reset_ts": last_reset,
+                    **dict(zip(_VALUE_COLUMNS, values, strict=True)),
+                }
             )
-            rows.setdefault(statistic_id, []).append(row)
     return rows
+
+
+def _import_shape(row: dict[str, Any]) -> dict[str, Any]:
+    """A raw row in recorder/import_statistics' JSON row shape."""
+    shaped: dict[str, Any] = {"start": _iso(row["start_ts"])}
+    if row.get("last_reset_ts") is not None:
+        shaped["last_reset"] = _iso(row["last_reset_ts"])
+    shaped.update(
+        (column, row[column])
+        for column in _VALUE_COLUMNS
+        if row.get(column) is not None
+    )
+    return shaped
+
+
+def _series_rows(
+    hass: HomeAssistant, statistic_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Every long-term row of `statistic_ids`, in import_statistics' shape.
+
+    Blocking - run on the recorder's executor."""
+    return {
+        statistic_id: [_import_shape(row) for row in rows]
+        for statistic_id, rows in _raw_rows(hass, statistic_ids).items()
+    }
+
+
+async def read_rows(
+    hass: HomeAssistant,
+    statistic_ids: list[str],
+    table: type[StatisticsBase] = Statistics,
+) -> dict[str, list[dict[str, Any]]]:
+    """_raw_rows, on the recorder's executor."""
+    return cast(
+        dict[str, list[dict[str, Any]]],
+        await _instance(hass).async_add_executor_job(
+            _raw_rows, hass, statistic_ids, table
+        ),
+    )
+
+
+async def read_metadata(
+    hass: HomeAssistant, statistic_ids: list[str]
+) -> dict[str, StatisticMetaData]:
+    """{statistic_id: metadata} of the known ones among `statistic_ids`."""
+    found = await _instance(hass).async_add_executor_job(
+        partial(statistics.get_metadata, hass, statistic_ids=set(statistic_ids))
+    )
+    return {statistic_id: meta for statistic_id, (_, meta) in found.items()}
+
+
+def statistic_data(row: dict[str, Any]) -> dict[str, Any]:
+    """A raw row as the StatisticData the import functions take."""
+    data: dict[str, Any] = {"start": dt_util.utc_from_timestamp(row["start_ts"])}
+    if row.get("last_reset_ts") is not None:
+        data["last_reset"] = dt_util.utc_from_timestamp(row["last_reset_ts"])
+    data.update(
+        (column, row[column])
+        for column in _VALUE_COLUMNS
+        if row.get(column) is not None
+    )
+    return data
+
+
+def queue_import(
+    hass: HomeAssistant, metadata: StatisticMetaData, rows: list[dict[str, Any]]
+) -> None:
+    """Queue hourly rows (raw shape) for import into metadata's statistic,
+    through the same validation as WS recorder/import_statistics. Existing
+    rows with the same start are overwritten, others inserted."""
+    data = [statistic_data(row) for row in rows]
+    if metadata["source"] == "recorder":
+        importer = statistics.async_import_statistics
+    else:
+        importer = statistics.async_add_external_statistics
+    importer(hass, cast(StatisticMetaData, dict(metadata)), cast(Any, data))
+
+
+def queue_short_term_seed(
+    hass: HomeAssistant, metadata: StatisticMetaData, last_row: dict[str, Any]
+) -> None:
+    """Queue a 5-minute row carrying a meter series' last hourly sum/state,
+    so the sensor's next compile continues from it rather than from 0 (see
+    the module docstring). Placed in the last 5-minute slot of that hour,
+    where the compile that made the hourly row took them from - so it
+    rewrites that row with the same values when it still exists."""
+    seed = statistic_data(
+        {
+            **{column: last_row.get(column) for column in ("state", "sum")},
+            "last_reset_ts": last_row.get("last_reset_ts"),
+            "start_ts": last_row["start_ts"] + 55 * 60,
+        }
+    )
+    _instance(hass).async_import_statistics(dict(metadata), [seed], StatisticsShortTerm)
 
 
 async def backup_document(
@@ -439,16 +564,19 @@ def _resolve(done: Any) -> None:
         done.set_result(None)
 
 
-async def _on_recorder(
-    hass: HomeAssistant, queue: Callable[[Callable[[], None]], None]
-) -> None:
-    """Queue recorder work and wait until the recorder thread ran it."""
+async def on_recorder(hass: HomeAssistant, queue: Callable[[], None]) -> None:
+    """Run `queue` - which queues recorder tasks - and wait until the
+    recorder thread has run them all. The queue is FIFO and `queue` runs
+    without yielding, so nothing (not even a statistics compile) gets in
+    between its tasks; a no-op metadata update with on_done marks the end."""
+    instance = _instance(hass)
     done = hass.loop.create_future()
 
     def finished() -> None:
         hass.loop.call_soon_threadsafe(_resolve, done)
 
-    queue(finished)
+    queue()
+    instance.async_update_statistics_metadata(DOMAIN, on_done=finished)
     try:
         async with asyncio.timeout(RECORDER_TIMEOUT):
             await done
@@ -463,14 +591,12 @@ async def _on_recorder(
 async def clear_statistics(hass: HomeAssistant, statistic_ids: list[str]) -> None:
     """Delete `statistic_ids`' long- and short-term statistics and metadata."""
     instance = _instance(hass)
-    await _on_recorder(
-        hass, lambda done: instance.async_clear_statistics(statistic_ids, on_done=done)
-    )
+    await on_recorder(hass, lambda: instance.async_clear_statistics(statistic_ids))
 
 
 def _last_row(hass: HomeAssistant, statistic_id: str) -> dict[str, Any] | None:
-    """The newest long-term row of `statistic_id`. Blocking."""
-    rows = _series_rows(hass, [statistic_id]).get(statistic_id)
+    """The newest long-term row of `statistic_id`, raw. Blocking."""
+    rows = _raw_rows(hass, [statistic_id]).get(statistic_id)
     return rows[-1] if rows else None
 
 
@@ -543,7 +669,14 @@ async def plan_migrate(
         raise StatisticsChangeRefusedError("; ".join(problems))
     assert source is not None
     last = await _instance(hass).async_add_executor_job(_last_row, hass, from_id)
-    return {"from": source, "to": to_id, "replaces": target, "last_row": last}
+    metadata = (await read_metadata(hass, [from_id]))[from_id]
+    return {
+        "from": source,
+        "to": to_id,
+        "replaces": target,
+        "last_row": last,
+        "metadata": {**metadata, "statistic_id": to_id},
+    }
 
 
 async def migrate_statistics(
@@ -553,17 +686,22 @@ async def migrate_statistics(
     how it lines up with the entity's current state."""
     from_id, target = plan["from"]["statistic_id"], plan["to"]
     instance = _instance(hass)
+    last = plan["last_row"]
 
-    def queue(done: Callable[[], None]) -> None:
+    def queue() -> None:
         # Queued together so nothing - not even the 5-minute compile that
-        # would recreate the cleared series - runs between the two.
+        # would recreate the cleared series - runs between them.
         if plan["replaces"]:
             instance.async_clear_statistics([target])
-        instance.async_update_statistics_metadata(
-            from_id, new_statistic_id=target, on_done=done
-        )
+        instance.async_update_statistics_metadata(from_id, new_statistic_id=target)
+        if plan["from"]["has_sum"] and last is not None:
+            # The moved series' own 5-minute rows are gone once it's been
+            # dead for longer than the recorder keeps them (10 days by
+            # default) - without one, the entity's next compile would
+            # restart the sum at 0 (issue #136).
+            queue_short_term_seed(hass, plan["metadata"], last)
 
-    await _on_recorder(hass, queue)
+    await on_recorder(hass, queue)
     after = await describe_statistics(hass, [from_id, target])
     moved = target in after and from_id not in after
     result: dict[str, Any] = {"moved": moved, "statistic": after.get(target)}
@@ -572,16 +710,15 @@ async def migrate_statistics(
             f"HA didn't move the series - most likely {target} got a series "
             "of its own in the meantime; Home Assistant's log says why"
         )
-    last = plan["last_row"]
     if moved and last is not None:
-        since = dt_util.utcnow() - datetime.fromisoformat(last["start"])
+        since = dt_util.utcnow() - dt_util.utc_from_timestamp(last["start_ts"])
         continuity: dict[str, Any] = {
-            "last_period": last["start"],
+            "last_period": _iso(last["start_ts"]),
             "hours_since_last_period": round(since.total_seconds() / 3600, 1),
         }
         state = hass.states.get(target)
         current = _number(state.state) if state else None
-        if "state" in last and current is not None:
+        if last.get("state") is not None and current is not None:
             continuity.update(
                 last_state=last["state"],
                 current_state=current,
