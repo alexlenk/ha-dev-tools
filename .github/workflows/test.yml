@@ -52,6 +52,49 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  # The statistics writes against a MariaDB recorder (issue #148). Only
+  # there do HA's statistics import and sum adjustment retry a lock-wait
+  # timeout or a deadlock - re-queued at the end of the recorder's queue -
+  # which is what the write order and the checks after a write have to
+  # survive; the SQLite runs above can only simulate it.
+  # tests/test_statistics_mysql.py holds real row locks from a second
+  # connection, and every other statistics test runs on MariaDB too.
+  # 10.11 is what Home Assistant's MariaDB add-on ships.
+  test-mariadb:
+    name: test (MariaDB)
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: ha
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmariadb-dev pkg-config
+          python -m pip install --upgrade pip
+          pip install --retries 10 --timeout 60 -r requirements-test-mariadb.txt
+
+      - name: Run statistics tests on MariaDB
+        run: |
+          PYTHONPATH=. pytest tests/test_statistics_*.py -v -rs --dburl "mysql://root:ha@127.0.0.1:3306/ha_test?charset=utf8mb4" --drop-existing-db
+
   # The same checks as .pre-commit-config.yaml, at the same versions. Until
   # this job existed nothing enforced them, so mypy errors and formatting
   # drift piled up on main unnoticed (issue #93). mypy runs against the

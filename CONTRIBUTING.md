@@ -32,6 +32,7 @@ ha-dev-tools/
 ├── .github/workflows/         # test.yml, test-latest-ha.yml, hassfest.yml, validate.yml
 ├── requirements-test.txt      # current HA release (default)
 ├── requirements-test-ha-min.txt  # minimum HA from hacs.json
+├── requirements-test-mariadb.txt # + MariaDB driver, for the statistics tests
 └── requirements-test-common.txt  # shared by both
 ```
 
@@ -74,6 +75,22 @@ than checked.
 
 To test against the minimum HA locally, use a separate venv with
 `pip install -r requirements-test-ha-min.txt`.
+
+**Statistics writes on MariaDB** (issue #148): only there do HA's statistics
+import and sum adjustment retry a lock-wait timeout or a deadlock, so CI's
+`test (MariaDB)` job runs `tests/test_statistics_*.py` against a MariaDB
+10.11 recorder, and `tests/test_statistics_mysql.py` (skipped on SQLite)
+adds real row locks. Locally, with a MariaDB server and `libmariadb-dev`:
+
+```bash
+pip install -r requirements-test-mariadb.txt
+PYTHONPATH=. pytest tests/test_statistics_*.py \
+  --dburl "mysql://USER:PASSWORD@127.0.0.1:3306/ha_test?charset=utf8mb4" \
+  --drop-existing-db
+```
+
+The user needs to create and drop databases and to `SET GLOBAL
+innodb_lock_wait_timeout` (the lock tests shorten it to 1 s and restore it).
 
 **A note on local verification:** if your local Python isn't genuinely
 3.14.2+, you may not be able to install the real dependency graph at all

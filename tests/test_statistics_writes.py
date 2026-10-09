@@ -4,6 +4,7 @@ in order and succeed: an import or adjustment re-queued behind later work
 the rows as they were, an import HA would refuse, two writes on one
 statistic at once, and a merge the size of real meter history."""
 
+import time
 from datetime import timedelta
 
 import pytest
@@ -61,12 +62,14 @@ async def _sums(hass: HomeAssistant, statistic_id: str) -> list[float]:
 
 
 def _fail_once(monkeypatch, name: str, statistic_id: str, *, write: bool) -> list:
-    """Make recorder.statistics.<name> report failure once for
-    statistic_id, as it does on MySQL/MariaDB for a lock-wait timeout or a
-    deadlock - its task then re-queues itself at the end of the queue.
+    """Make the import (HA's recorder.statistics.import_statistics) or the
+    sum adjustment (statistics_manager._adjust_sums) report failure once for
+    statistic_id, as they do on MySQL/MariaDB for a lock-wait timeout or a
+    deadlock - the task then re-queues itself at the end of the queue.
     With write=False it reports success instead but changes nothing: a
     task that ran and left the rows as they were."""
-    real = getattr(recorder_statistics, name)
+    module = recorder_statistics if name == "import_statistics" else sm
+    real = getattr(module, name)
     calls: list = []
 
     def flaky(instance, *args):
@@ -76,7 +79,7 @@ def _fail_once(monkeypatch, name: str, statistic_id: str, *, write: bool) -> lis
             return not write
         return real(instance, *args)
 
-    monkeypatch.setattr(recorder_statistics, name, flaky)
+    monkeypatch.setattr(module, name, flaky)
     return calls
 
 
@@ -125,9 +128,7 @@ async def test_a_requeued_adjustment_is_waited_for(
         can_back_up=False,
         allow_no_backup=True,
     )
-    retried = _fail_once(
-        monkeypatch, "adjust_statistics", "sensor.new_meter", write=True
-    )
+    retried = _fail_once(monkeypatch, "_adjust_sums", "sensor.new_meter", write=True)
 
     result = await merge_statistics(hass, plan)
 
@@ -156,10 +157,7 @@ async def test_an_import_that_doesnt_land_stops_before_the_adjustment(
     )
     _fail_once(monkeypatch, "import_statistics", "sensor.new_meter", write=False)
     adjusted = []
-    instance = get_instance(hass)
-    monkeypatch.setattr(
-        instance, "async_adjust_statistics", lambda *args: adjusted.append(args)
-    )
+    monkeypatch.setattr(sm, "queue_adjust", lambda *args: adjusted.append(args))
 
     with pytest.raises(sm.StatisticsNotAppliedError, match="has no row for"):
         await merge_statistics(hass, plan)
@@ -402,7 +400,7 @@ async def test_migrate_checks_where_the_series_ended_up(
 
     monkeypatch.setattr(instance, "async_update_statistics_metadata", not_a_move)
     if outcome == "nowhere":  # not even the seed row created it
-        monkeypatch.setattr(sm, "queue_short_term_seed", lambda *_: None)
+        monkeypatch.setattr(sm, "queue_short_term_seed", lambda *_, **__: None)
     result = await sm.migrate_statistics(hass, plan)
     assert result["moved"] is False
 
@@ -478,3 +476,222 @@ async def test_the_guard_itself_refuses_a_busy_statistic(hass: HomeAssistant):
     )
     assert result["error_type"] == "StatisticsBusyError"
     write.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_failed_sum_adjustment_changes_nothing(
+    hass: HomeAssistant, freezer, monkeypatch
+):
+    """The adjustment's two UPDATEs - 5-minute rows, then hourly ones - are
+    one transaction: when the second fails, the first is undone too. (HA's
+    own adjustment logs a failed UPDATE, carries on and commits the
+    other.)"""
+    from homeassistant.components.recorder.db_schema import Statistics
+
+    await _live_target(hass, freezer)
+    plan = await plan_merge(
+        hass,
+        "sensor.new_meter",
+        ["sensor.old_meter"],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    real = sm.update
+
+    def broken(table):
+        # A statement the database can't run, for the hourly table only.
+        return (
+            real(table).values(no_such_column=1) if table is Statistics else real(table)
+        )
+
+    monkeypatch.setattr(sm, "update", broken)
+    with pytest.raises(sm.StatisticsNotAppliedError, match="sum adjustment"):
+        await merge_statistics(hass, plan)
+    await async_wait_recording_done(hass)
+
+    # The import landed (hours 0-2), the adjustment not at all: hourly and
+    # 5-minute rows still on the same basis.
+    assert await _sums(hass, "sensor.new_meter") == [0, 1.5, 3, 1, 2]
+    assert await _latest_short_term_sum(hass, "sensor.new_meter") == 2.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_merge_into_an_external_statistic_leaves_no_5_minute_row(
+    hass: HomeAssistant,
+):
+    """Only an entity's own statistics continue from a 5-minute row; an
+    external one (here Tibber's) is written by its integration and got a
+    stray one carrying the merged sum."""
+    await _seed(hass)  # tibber: hours 0-4; old_meter: hours 0-2, sums 0, 1.5, 3
+    plan = await plan_merge(
+        hass,
+        "tibber:energy_consumption_home1",
+        ["sensor.old_meter"],
+        overlap="add",
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    assert plan.seed is False
+    before = await _sums(hass, "tibber:energy_consumption_home1")
+    await merge_statistics(hass, plan)
+
+    after = await _sums(hass, "tibber:energy_consumption_home1")
+    assert after[-1] == pytest.approx(before[-1] + 3)
+    short_term = await sm.read_rows(
+        hass, ["tibber:energy_consumption_home1"], StatisticsShortTerm
+    )
+    assert short_term == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_failed_rename_leaves_no_seed_under_the_new_id(
+    hass: HomeAssistant, monkeypatch
+):
+    """The replaced series is cleared and the rename fails - as it does on
+    MySQL/MariaDB on a lock-wait timeout, which HA doesn't retry. The seed
+    row queued after it created the new id as a 5-minute-only statistic
+    with the old meter's sum, which its entity's next compile continued
+    from."""
+    from homeassistant.components.recorder import get_instance
+
+    await _seed(hass)
+    plan = await sm.plan_migrate(
+        hass, "sensor.old_meter", "sensor.live_meter", can_back_up=True
+    )
+    assert plan["replaces"]
+    instance = get_instance(hass)
+    update = instance.async_update_statistics_metadata
+
+    def failed_rename(statistic_id, **kwargs):
+        if statistic_id != "sensor.old_meter":  # on_recorder's barrier
+            update(statistic_id, **kwargs)
+
+    monkeypatch.setattr(instance, "async_update_statistics_metadata", failed_rename)
+    result = await sm.migrate_statistics(hass, plan)
+
+    assert result["moved"] is False
+    assert await _sums(hass, "sensor.old_meter") == [0, 1.5, 3]
+    assert await sm.read_metadata(hass, ["sensor.live_meter"]) == {}
+
+
+def _slow_retries(monkeypatch, failures: int, delay: float) -> list:
+    """Make the sum adjustment fail `failures` times, each retry taking
+    `delay` s on the recorder thread - as a lock-wait timeout does."""
+    real = sm._adjust_sums.__wrapped__
+    calls: list = []
+
+    def slow(instance, *args):
+        calls.append(args)
+        time.sleep(delay)
+        if len(calls) <= failures:
+            return False
+        return real(instance, *args)
+
+    monkeypatch.setattr(sm, "_adjust_sums", slow)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_waits_for_every_retry_before_checking(
+    hass: HomeAssistant, freezer, monkeypatch
+):
+    await _live_target(hass, freezer)
+    plan = await plan_merge(
+        hass,
+        "sensor.new_meter",
+        ["sensor.old_meter"],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    calls = _slow_retries(monkeypatch, failures=3, delay=0.2)
+
+    await merge_statistics(hass, plan)
+    assert len(calls) == 4
+    assert await _sums(hass, "sensor.new_meter") == [0, 1.5, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_still_retrying_at_the_deadline_is_reported_as_may_still_apply(
+    hass: HomeAssistant, monkeypatch
+):
+    # No frozen clock here: asyncio's timeout runs on it.
+    await _seed(hass)  # old_meter: sums 0, 1.5, 3
+    calls = _slow_retries(monkeypatch, failures=5, delay=0.2)
+    monkeypatch.setattr(sm, "RECORDER_TIMEOUT", 0.3)
+
+    with pytest.raises(sm.StatisticsTimeoutError, match="still retrying.*may still"):
+        await sm.on_recorder(
+            hass,
+            lambda: sm.queue_adjust(
+                hass, "sensor.old_meter", START + timedelta(hours=1), 3.0
+            ),
+            what="the sum adjustment",
+        )
+    monkeypatch.setattr(sm, "RECORDER_TIMEOUT", 30 * 60)
+    while len(calls) < 6:
+        await sm.on_recorder(hass, lambda: None)
+    await sm.on_recorder(hass, lambda: None)  # the last one has run
+    # Applied once, when the retries ran out.
+    assert await _sums(hass, "sensor.old_meter") == [0, 4.5, 6]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_queue_helpers_refuse_or_skip_what_ha_would_not_take(
+    hass: HomeAssistant,
+):
+    await _seed(hass)
+    meta = (await sm.read_metadata(hass, ["sensor.old_meter"]))["sensor.old_meter"]
+    with pytest.raises(sm.StatisticsChangeRefusedError, match="start of an hour"):
+        sm.queue_import(hass, meta, [{"start_ts": START.timestamp() + 1800, "sum": 1}])
+    # An adjustment of a statistic that's gone is a no-op, as in HA.
+    await sm.on_recorder(hass, lambda: sm.queue_adjust(hass, "sensor.gone", START, 1.0))
+    assert await _sums(hass, "sensor.old_meter") == [0, 1.5, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_failed_clear_stops_the_restore(hass: HomeAssistant, monkeypatch):
+    """HA doesn't retry a clear (on MySQL/MariaDB a lock-wait timeout just
+    fails it); the backup imported over the target's own series mixed
+    the two."""
+    from homeassistant.components.recorder import get_instance
+
+    await _seed(hass)  # old_meter: sums 0, 1.5, 3 at hours 0-2
+    made = await backups.create_backups(hass, ["sensor.old_meter"], "clear_statistics")
+    await _meter(hass, "sensor.wh_meter", 10, [1000, 2000], unit="Wh")
+    plan = await backups.plan_restore(
+        hass, made["sensor.old_meter"], "sensor.wh_meter", can_back_up=True
+    )
+    instance = get_instance(hass)
+    monkeypatch.setattr(instance, "async_clear_statistics", lambda *_: None)
+
+    with pytest.raises(sm.StatisticsNotAppliedError, match="restore"):
+        await backups.restore_statistics(hass, plan)
+    await async_wait_recording_done(hass)
+    assert await _sums(hass, "sensor.wh_meter") == [1000, 2000]
+    short_term = await sm.read_rows(hass, ["sensor.wh_meter"], StatisticsShortTerm)
+    assert short_term == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_restore_refused_when_the_target_started_recording_since_the_plan(
+    hass: HomeAssistant,
+):
+    await _seed(hass)
+    made = await backups.create_backups(hass, ["sensor.old_meter"], "clear_statistics")
+    plan = await backups.plan_restore(
+        hass, made["sensor.old_meter"], "sensor.brand_new", can_back_up=True
+    )
+    assert plan["overwrites"] is None
+    await _meter(hass, "sensor.brand_new", 40, [5, 6])
+
+    with pytest.raises(sm.StatisticsChangeRefusedError, match="preview again"):
+        await backups.restore_statistics(hass, plan)
+    assert await _sums(hass, "sensor.brand_new") == [5, 6]
