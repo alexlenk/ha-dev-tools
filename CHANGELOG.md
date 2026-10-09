@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.1] - 2026-10-09
+
 ### Fixed
 - `create_derived_sensor` / `update_derived_sensor` crashed on HA 2026.10 with "Object of type _Unsupported is not JSON serializable" on every flow's first step, for all derived-sensor domains, so none could be created (issue #137). The #80/#81 fix looked up probatio's `to_field_list` on HA's `config_validation`, which re-exported it on 2026.9. On 2026.10 it doesn't, so the lookup silently fell back to `voluptuous_serialize`, which doesn't recognize probatio's `UNSUPPORTED` sentinel. The converter is now imported from probatio itself, as HA's own config-flow HTTP view does. A regression test walks the first step of every domain with a real recorder (for `filter`), and passes on HA 2026.8, 2026.9 and 2026.10.
 - **`migrate_statistics` (2.25.0) could restart the migrated meter's sum at 0** (issue #136). A meter's 5-minute statistics compile continues its running `sum` from the newest *5-minute* row only, never from the hourly ones. Moving a series takes its 5-minute rows along, but HA deletes those after `purge_keep_days` (10 days by default). So if the old entity had stopped more than about that long before the migration, the replacement's next compile found no 5-minute row and started again at `sum` 0. From the following hour, the Energy dashboard shows one large negative value, and all later hours sit on a total that is too low by the old sum. Hourly rows from before the migration are unaffected. `migrate_statistics` now writes one 5-minute row carrying the moved series' last sum and state, and the entity continues from that. A regression test runs HA's own compile and fails (sum 0.0) without the fix.
@@ -29,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `list_statistics` shows backups (`source=ha_dev_tools`) with what they back up, the operation, when, their age and `stale: true` after 90 days. Backups are never deleted automatically; `clear_statistics` removes them, without making a backup of the backup.
+
+## [2.26.0] - 2026-10-09
+
+### Added
+- `list_traces` and `get_trace`: read automation and script traces, the automation editor's Traces view.
+  - `list_traces` lists the stored runs, newest first: trigger, start/finish, how each run ended (`script_execution`), last step and any error. Filter by automation/script (`entity_id`, or `domain` plus `item_id`), `errors_only`, and `include_not_triggered`.
+  - `get_trace` reads one run (the latest by default) step by step, in the order it ran: each trigger, condition and action with its result, error, template errors and changed variables (`include_variables`, on by default). A step that ran a script carries a `child_id` to read that script's run. `include_config` adds the config as it was at the time of the run.
+  - Both are read-only and use Home Assistant's own `trace/list` and `trace/get` commands, which are admin-only. The trace debugger (breakpoints, stepping) is not offered, since it pauses live runs.
 
 ## [2.25.0] - 2026-10-08
 
