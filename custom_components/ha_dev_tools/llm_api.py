@@ -817,6 +817,13 @@ class UpdateEntitiesTool(WriteGatedTool):
         }
         if renames := _renames(plans):
             try:
+                if conflicts := await statistics_manager.rename_conflicts(
+                    hass, renames
+                ):
+                    context["statistics"] = cast(JsonValueType, conflicts)
+            except RecorderNotAvailableError:
+                pass
+            try:
                 user = await helper_manager.resolve_user(hass, llm_context)
                 context["references"] = {
                     old: cast(
@@ -1240,6 +1247,235 @@ class GetStatisticsTool(GatedTool):
             )
         except (RecorderNotAvailableError, ValueError) as exc:
             return _tool_error(exc)
+
+
+_STATISTICS_ERRORS = (
+    RecorderNotAvailableError,
+    statistics_manager.StatisticsChangeRefusedError,
+)
+
+
+async def _back_up_statistics(
+    hass: HomeAssistant, statistic_ids: list[str]
+) -> JsonObjectType | None:
+    """Push the series about to be cleared to the mirror repo, in
+    recorder/import_statistics' shape (issue #134). None when mirroring is
+    off; otherwise the mirror payload - check its 'mirrored'."""
+    if not mirror.is_mirror_enabled(hass):
+        return None
+    document = await statistics_manager.backup_document(hass, statistic_ids)
+    stamp = dt_util.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    result = await mirror.mirror_write(
+        hass,
+        path=f"statistics/cleared-{stamp}.json",
+        content_before=None,
+        content_after=json.dumps(document, indent=1),
+        content_type="json",
+    )
+    return _mirror_result_payload(result)
+
+
+def _backup_failed(backup: JsonObjectType) -> JsonObjectType:
+    return {
+        "error": (
+            "the backup couldn't be pushed to the mirror repo, so nothing "
+            "was cleared - fix mirroring, or pass allow_no_backup=true"
+        ),
+        "error_type": "StatisticsBackupError",
+        "mirror": backup,
+    }
+
+
+class ClearStatisticsTool(WriteGatedTool):
+    """Delete long-term statistics - see statistics_manager.py."""
+
+    name = "clear_statistics"
+    description = (
+        "Delete one or more statistics (list_statistics finds the ids) - "
+        "their long-term and short-term rows and metadata, what Developer "
+        "Tools > Statistics' 'Fix issue' > Delete does. For orphaned or "
+        "stray series, e.g. the hours a replacement entity collected before "
+        "a history migration (or use migrate_statistics, which does that "
+        "for you). The preview shows each id's source, unit, has_entity, "
+        "first/last period and row count. Refused, for the whole batch: an "
+        "unknown id; an id that belongs to an existing entity (the series "
+        "it records into) unless allow_live=true; one the Energy dashboard "
+        "uses unless allow_energy=true. With mirroring on, the series are "
+        "pushed to the mirror repo first (statistics/cleared-<time>.json, "
+        "in recorder/import_statistics' shape, so a mistake can be "
+        "imported back) and nothing is cleared if that fails; with "
+        "mirroring off it's refused unless allow_no_backup=true."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("statistic_ids"): vol.All([str], vol.Length(min=1)),
+            vol.Optional("allow_live"): bool,
+            vol.Optional("allow_energy"): bool,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        return await statistics_manager.plan_clear(
+            hass,
+            args["statistic_ids"],
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_live=bool(args.get("allow_live")),
+            allow_energy=bool(args.get("allow_energy")),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """What would be deleted, or why it's refused."""
+        try:
+            planned = await self._plan(hass, tool_input.tool_args)
+        except _STATISTICS_ERRORS as exc:
+            return {"problems": str(exc)}
+        return {"would_clear": cast(JsonValueType, planned)}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up, then clear - to the end even if the client gives up."""
+        args = tool_input.tool_args
+        try:
+            planned = await self._plan(hass, args)
+        except _STATISTICS_ERRORS as exc:
+            return _tool_error(exc)
+        ids = [info["statistic_id"] for info in planned]
+
+        async def commit() -> JsonObjectType:
+            backup = await _back_up_statistics(hass, ids)
+            if backup is not None and not backup["mirrored"]:
+                if not args.get("allow_no_backup"):
+                    return _backup_failed(backup)
+            response: JsonObjectType
+            try:
+                await statistics_manager.clear_statistics(hass, ids)
+                response = {
+                    "cleared": cast(JsonValueType, planned),
+                    "restore": statistics_manager.RESTORE_HINT,
+                }
+            except statistics_manager.StatisticsTimeoutError as exc:
+                response = _tool_error(exc)
+            if backup is not None:
+                response["mirror"] = backup
+            return response
+
+        return await _run_to_completion(hass, commit(), "ha_dev_tools clear_statistics")
+
+
+class MigrateStatisticsTool(WriteGatedTool):
+    """Move a statistics series onto another statistic_id - see statistics_manager.py."""
+
+    name = "migrate_statistics"
+    description = (
+        "Move one entity's statistics history onto another entity_id, e.g. "
+        "onto the replacement after a device or firmware change renamed "
+        "its entities - the new entity keeps its name and continues the "
+        "old series. from_statistic_id must be an entity's own statistic "
+        "whose entity is gone (delete the dead entity first with "
+        "delete_entity). A series already under to_statistic_id (the hours "
+        "the replacement collected so far) is cleared and replaced, since "
+        "HA can't merge two series - with mirroring on it's backed up "
+        "first, like clear_statistics; with mirroring off that's refused "
+        "unless allow_no_backup=true. Units and sum/mean kind must match. "
+        "The result has the moved series and its continuity: the gap since "
+        "its last period and the jump from its last state to the entity's "
+        "current state; check the next hours with get_statistics. Energy "
+        "dashboard entries naming from_statistic_id need updating "
+        "afterwards (write_energy_config)."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("from_statistic_id"): str,
+            vol.Required("to_statistic_id"): str,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _plan(self, hass: HomeAssistant, args: dict[str, Any]) -> dict[str, Any]:
+        return await statistics_manager.plan_migrate(
+            hass,
+            args["from_statistic_id"],
+            args["to_statistic_id"],
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The series that moves and the one it replaces, or why it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except _STATISTICS_ERRORS as exc:
+            return {"problems": str(exc)}
+        context: JsonObjectType = {
+            "would_move": cast(JsonValueType, plan["from"]),
+            "would_replace": cast(JsonValueType, plan["replaces"]),
+        }
+        if plan["from"]["energy"]:
+            context["energy_note"] = (
+                "The Energy dashboard uses "
+                f"{plan['from']['statistic_id']} "
+                f"({', '.join(plan['from']['energy'])}); point it at "
+                f"{plan['to']} afterwards with write_energy_config."
+            )
+        return context
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up what's replaced, then move - to the end even if the client gives up."""
+        args = tool_input.tool_args
+        try:
+            plan = await self._plan(hass, args)
+        except _STATISTICS_ERRORS as exc:
+            return _tool_error(exc)
+
+        async def commit() -> JsonObjectType:
+            backup = None
+            if plan["replaces"]:
+                backup = await _back_up_statistics(hass, [plan["to"]])
+                if backup is not None and not backup["mirrored"]:
+                    if not args.get("allow_no_backup"):
+                        return _backup_failed(backup)
+            try:
+                response = cast(
+                    JsonObjectType,
+                    await statistics_manager.migrate_statistics(hass, plan),
+                )
+            except statistics_manager.StatisticsTimeoutError as exc:
+                response = _tool_error(exc)
+            if backup is not None:
+                response["mirror"] = backup
+                response["restore"] = statistics_manager.RESTORE_HINT
+            return response
+
+        return await _run_to_completion(
+            hass, commit(), "ha_dev_tools migrate_statistics"
+        )
 
 
 class GetLogbookTool(GatedTool):
@@ -3619,6 +3855,8 @@ class DevToolsAPI(llm.API):
                 GetLogbookTool(),
                 ListStatisticsTool(),
                 GetStatisticsTool(),
+                ClearStatisticsTool(),
+                MigrateStatisticsTool(),
                 ListAddonsTool(),
                 GetAddonLogsTool(),
                 CheckConfigTool(),

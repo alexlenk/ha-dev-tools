@@ -247,3 +247,44 @@ async def test_trace_tools(hass: HomeAssistant, admin_user):
         _llm_context("not-a-user"),
     )
     assert no_user["error_type"] == "UnresolvedUserError"
+
+
+@pytest.mark.asyncio
+async def test_unregistered_script_and_trace_payload_variants(
+    hass: HomeAssistant, admin_user, monkeypatch
+):
+    """A script id with no registry entry is taken as given; a check that
+    didn't fire is listed only on request, and a blueprint automation's
+    inputs come along."""
+    from custom_components.ha_dev_tools import trace_manager
+
+    await _setup(hass)
+    assert resolve_item(hass, entity_id="script.not_registered") == (
+        "script",
+        "not_registered",
+    )
+
+    fired = {"run_id": "1", "timestamp": {"start": "2026-10-09T08:00:00+00:00"}}
+    skipped = {
+        "run_id": "2",
+        "timestamp": {"start": "2026-10-09T09:00:00+00:00"},
+        "not_triggered": True,
+    }
+
+    async def fake_ws(hass, user, command, **kwargs):
+        if command == "trace/list":
+            return [fired, skipped]
+        return {**fired, "blueprint_inputs": {"use_blueprint": {"path": "x.yaml"}}}
+
+    monkeypatch.setattr(trace_manager, "call_ws_command", fake_ws)
+    listed = await list_traces(hass, admin_user, domain="automation")
+    assert [row["run_id"] for row in listed["traces"]] == ["1"]
+    everything = await list_traces(
+        hass, admin_user, domain="automation", include_not_triggered=True
+    )
+    assert everything["traces"][0]["not_triggered"] is True
+
+    trace = await get_trace(
+        hass, admin_user, domain="automation", item_id="porch_light", run_id="1"
+    )
+    assert trace["blueprint_inputs"] == {"use_blueprint": {"path": "x.yaml"}}

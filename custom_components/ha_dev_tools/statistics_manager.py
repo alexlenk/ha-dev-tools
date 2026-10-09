@@ -18,22 +18,35 @@ grouped MIN/MAX query over the long-term statistics table - HA has no
 public function for it, and it's what tells an orphaned or no-longer-fed
 statistic apart.
 
-Read-only on purpose: importing, adjusting or clearing statistics is
-destructive and hard to undo, so it isn't offered here.
+Writes (issue #134) are limited to what a history migration needs:
+clearing statistics (`Recorder.async_clear_statistics`, what WS
+`recorder/clear_statistics` and the "Fix issue" dialog's Delete call) and
+moving a series onto another statistic_id
+(`Recorder.async_update_statistics_metadata(new_statistic_id=...)`, what
+the recorder itself does when an entity is renamed). Both work on the
+recorder's queue, and HA refuses to move a series onto an id that already
+has one - it can't merge two series - which is why a rename onto a
+replacement entity silently leaves the history behind. A cleared series
+can be backed up first in `recorder/import_statistics`'s own shape, so it
+can be restored with one call. Importing and adjusting sums aren't offered.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from homeassistant.components.recorder import get_instance, statistics
 from homeassistant.components.recorder.db_schema import Statistics, StatisticsMeta
 from homeassistant.components.recorder.util import session_scope
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, valid_entity_id
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from sqlalchemy import func, select
+from sqlalchemy.sql import Select
 
 from .history_manager import RecorderNotAvailableError
 
@@ -56,21 +69,27 @@ def _iso(timestamp: float | None) -> str | None:
     return dt_util.utc_from_timestamp(timestamp).isoformat()
 
 
-def _period_bounds(hass: HomeAssistant) -> dict[str, tuple[float, float]]:
-    """{statistic_id: (first, last) period start} of the long-term table.
+def _period_bounds(
+    hass: HomeAssistant, statistic_ids: list[str] | None = None
+) -> dict[str, tuple[float, float, int]]:
+    """{statistic_id: (first, last period start, row count)} of the
+    long-term table, for every statistic or just `statistic_ids`.
 
     Blocking - run on the recorder's executor."""
-    stmt = (
+    stmt: Select[Any] = (
         select(
             StatisticsMeta.statistic_id,
             func.min(Statistics.start_ts),
             func.max(Statistics.start_ts),
+            func.count(Statistics.id),
         )
         .join(Statistics, Statistics.metadata_id == StatisticsMeta.id)
         .group_by(StatisticsMeta.statistic_id)
     )
+    if statistic_ids is not None:
+        stmt = stmt.where(StatisticsMeta.statistic_id.in_(statistic_ids))
     with session_scope(hass=hass, read_only=True) as session:
-        return {row[0]: (row[1], row[2]) for row in session.execute(stmt)}
+        return {row[0]: (row[1], row[2], row[3]) for row in session.execute(stmt)}
 
 
 def _has_entity(hass: HomeAssistant, statistic_id: str) -> bool | None:
@@ -127,7 +146,7 @@ async def list_statistics(
         found = [issue.as_dict() for issue in issues.get(statistic_id, [])]
         if issues_only and not found:
             continue
-        first, last = bounds.get(statistic_id, (None, None))
+        first, last, _ = bounds.get(statistic_id, (None, None, 0))
         mean_type = item.get("mean_type")
         rows.append(
             {
@@ -209,3 +228,392 @@ async def get_statistics(
             series["next_start_time"] = _iso(rows[limit]["start"])
         result[statistic_id] = series
     return {"period": period, "statistics": result}
+
+
+# --- clearing and moving statistics (issue #134) ------------------------------
+
+_VALUE_COLUMNS = ("mean", "min", "max", "state", "sum")
+RESTORE_HINT = (
+    "Restore an entry with WS recorder/import_statistics, passing its "
+    "metadata and stats unchanged."
+)
+
+
+# HA's own recorder/clear_statistics waits 10 s; a big clear on SQLite can
+# take longer, and the work stays queued either way.
+RECORDER_TIMEOUT = 60
+
+
+class StatisticsChangeRefusedError(Exception):
+    """A clear or move was refused before anything changed."""
+
+
+class StatisticsTimeoutError(Exception):
+    """The recorder didn't confirm queued work in time - it may still run."""
+
+
+async def energy_references(hass: HomeAssistant) -> dict[str, list[str]]:
+    """{statistic_id: [where the Energy dashboard uses it]}.
+
+    Every statistic the Energy prefs (`.storage/energy`) point at is under a
+    `stat_*` key (stat_energy_from/_to, stat_cost, stat_compensation,
+    stat_consumption, stat_rate, stat_soc, ...), at any depth, so walk them
+    rather than list every source type's fields."""
+    from homeassistant.components.energy.data import async_get_manager
+
+    refs: dict[str, list[str]] = {}
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                where = f"{path}.{key}" if path else key
+                if key.startswith("stat_") and isinstance(value, str):
+                    refs.setdefault(value, []).append(where)
+                else:
+                    walk(value, where)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+
+    walk((await async_get_manager(hass)).data or {}, "")
+    return refs
+
+
+async def describe_statistics(
+    hass: HomeAssistant, statistic_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """What each known id holds - source, unit, whether its entity exists,
+    first/last period, long-term row count, Energy dashboard use. Unknown
+    ids are left out."""
+    instance = _instance(hass)
+    metadata = await instance.async_add_executor_job(
+        partial(statistics.get_metadata, hass, statistic_ids=set(statistic_ids))
+    )
+    bounds = await instance.async_add_executor_job(_period_bounds, hass, statistic_ids)
+    energy = await energy_references(hass)
+    described: dict[str, dict[str, Any]] = {}
+    for statistic_id in statistic_ids:
+        if statistic_id not in metadata:
+            continue
+        meta = metadata[statistic_id][1]
+        first, last, rows = bounds.get(statistic_id, (None, None, 0))
+        described[statistic_id] = {
+            "statistic_id": statistic_id,
+            "name": meta.get("name"),
+            "source": meta["source"],
+            "unit_of_measurement": meta.get("unit_of_measurement"),
+            "has_sum": meta["has_sum"],
+            "has_entity": _has_entity(hass, statistic_id),
+            "first_period": _iso(first),
+            "last_period": _iso(last),
+            "rows": rows,
+            "energy": energy.get(statistic_id, []),
+        }
+    return described
+
+
+def _unknown(statistic_id: str) -> str:
+    return f"no statistic '{statistic_id}' (list_statistics shows what exists)"
+
+
+def _no_backup() -> str:
+    return (
+        "mirroring is off, so the series can't be backed up first and "
+        "clearing it can't be undone - enable mirroring, or pass "
+        "allow_no_backup=true"
+    )
+
+
+async def plan_clear(
+    hass: HomeAssistant,
+    statistic_ids: list[str],
+    *,
+    can_back_up: bool,
+    allow_live: bool = False,
+    allow_energy: bool = False,
+    allow_no_backup: bool = False,
+) -> list[dict[str, Any]]:
+    """What clearing `statistic_ids` would delete; refuses the whole batch
+    if any id is unknown, still belongs to an entity (unless allow_live),
+    feeds the Energy dashboard (unless allow_energy), or can't be backed up
+    (unless allow_no_backup)."""
+    wanted = list(dict.fromkeys(statistic_ids))
+    described = await describe_statistics(hass, wanted)
+    problems: list[str] = []
+    for statistic_id in wanted:
+        info = described.get(statistic_id)
+        if info is None:
+            problems.append(_unknown(statistic_id))
+            continue
+        if info["has_entity"] and not allow_live:
+            problems.append(
+                f"'{statistic_id}' belongs to an existing entity - it's the "
+                "series that entity records into; pass allow_live=true to "
+                "clear it anyway"
+            )
+        if info["energy"] and not allow_energy:
+            problems.append(
+                f"'{statistic_id}' is used by the Energy dashboard "
+                f"({', '.join(info['energy'])}); pass allow_energy=true to "
+                "clear it anyway"
+            )
+    if not can_back_up and not allow_no_backup:
+        problems.append(_no_backup())
+    if problems:
+        raise StatisticsChangeRefusedError("; ".join(problems))
+    return [described[statistic_id] for statistic_id in wanted]
+
+
+def _series_rows(
+    hass: HomeAssistant, statistic_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Every long-term row of `statistic_ids`, raw (no unit conversion),
+    oldest first, in recorder/import_statistics' row shape.
+
+    Blocking - run on the recorder's executor."""
+    stmt = (
+        select(
+            StatisticsMeta.statistic_id,
+            Statistics.start_ts,
+            Statistics.last_reset_ts,
+            *(getattr(Statistics, column) for column in _VALUE_COLUMNS),
+        )
+        .join(Statistics, Statistics.metadata_id == StatisticsMeta.id)
+        .where(StatisticsMeta.statistic_id.in_(statistic_ids))
+        .order_by(StatisticsMeta.statistic_id, Statistics.start_ts)
+    )
+    rows: dict[str, list[dict[str, Any]]] = {}
+    with session_scope(hass=hass, read_only=True) as session:
+        for statistic_id, start, last_reset, *values in session.execute(stmt):
+            row: dict[str, Any] = {"start": _iso(start)}
+            if last_reset is not None:
+                row["last_reset"] = _iso(last_reset)
+            row.update(
+                (column, value)
+                for column, value in zip(_VALUE_COLUMNS, values, strict=True)
+                if value is not None
+            )
+            rows.setdefault(statistic_id, []).append(row)
+    return rows
+
+
+async def backup_document(
+    hass: HomeAssistant, statistic_ids: list[str]
+) -> dict[str, Any]:
+    """The series of `statistic_ids` as recorder/import_statistics payloads -
+    metadata plus every hourly row - so a mistaken clear is one import call
+    per entry to undo."""
+    instance = _instance(hass)
+    metadata = await instance.async_add_executor_job(
+        partial(statistics.get_metadata, hass, statistic_ids=set(statistic_ids))
+    )
+    rows = await instance.async_add_executor_job(_series_rows, hass, statistic_ids)
+    entries = []
+    for statistic_id in statistic_ids:
+        if statistic_id not in metadata:
+            continue
+        meta = metadata[statistic_id][1]
+        entries.append(
+            {
+                "metadata": {
+                    "has_sum": meta["has_sum"],
+                    "mean_type": int(meta.get("mean_type") or 0),
+                    "name": meta.get("name"),
+                    "source": meta["source"],
+                    "statistic_id": statistic_id,
+                    "unit_class": meta.get("unit_class"),
+                    "unit_of_measurement": meta.get("unit_of_measurement"),
+                },
+                "stats": rows.get(statistic_id, []),
+            }
+        )
+    return {
+        "backed_up_at": dt_util.utcnow().isoformat(),
+        "restore": RESTORE_HINT,
+        "statistics": entries,
+    }
+
+
+def _resolve(done: Any) -> None:
+    if not done.done():
+        done.set_result(None)
+
+
+async def _on_recorder(
+    hass: HomeAssistant, queue: Callable[[Callable[[], None]], None]
+) -> None:
+    """Queue recorder work and wait until the recorder thread ran it."""
+    done = hass.loop.create_future()
+
+    def finished() -> None:
+        hass.loop.call_soon_threadsafe(_resolve, done)
+
+    queue(finished)
+    try:
+        async with asyncio.timeout(RECORDER_TIMEOUT):
+            await done
+    except TimeoutError as exc:
+        raise StatisticsTimeoutError(
+            f"the recorder hasn't confirmed the change within {RECORDER_TIMEOUT} "
+            "s - it's still queued and will most likely still happen; check "
+            "with list_statistics"
+        ) from exc
+
+
+async def clear_statistics(hass: HomeAssistant, statistic_ids: list[str]) -> None:
+    """Delete `statistic_ids`' long- and short-term statistics and metadata."""
+    instance = _instance(hass)
+    await _on_recorder(
+        hass, lambda done: instance.async_clear_statistics(statistic_ids, on_done=done)
+    )
+
+
+def _last_row(hass: HomeAssistant, statistic_id: str) -> dict[str, Any] | None:
+    """The newest long-term row of `statistic_id`. Blocking."""
+    rows = _series_rows(hass, [statistic_id]).get(statistic_id)
+    return rows[-1] if rows else None
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def plan_migrate(
+    hass: HomeAssistant,
+    from_id: str,
+    to_id: str,
+    *,
+    can_back_up: bool,
+    allow_no_backup: bool = False,
+) -> dict[str, Any]:
+    """What moving `from_id`'s series onto `to_id` would do.
+
+    `from_id` must be an entity's own statistic (source recorder) whose
+    entity is gone - otherwise it would keep recording into it. A series
+    already under `to_id` - e.g. the hours a replacement entity collected
+    since it appeared - is cleared first, as HA can't merge two series;
+    the units and sum/mean kind must match."""
+    if from_id == to_id:
+        raise StatisticsChangeRefusedError("from and to are the same statistic")
+    described = await describe_statistics(hass, [from_id, to_id])
+    source, target = described.get(from_id), described.get(to_id)
+    problems: list[str] = []
+    if source is None:
+        problems.append(_unknown(from_id))
+    elif source["source"] != "recorder":
+        problems.append(
+            f"'{from_id}' is an external statistic (source "
+            f"'{source['source']}') - only an entity's own statistics can be "
+            "moved"
+        )
+    elif source["has_entity"]:
+        problems.append(
+            f"'{from_id}' still belongs to an existing entity, which would "
+            "keep recording into it - delete it (delete_entity) or rename it "
+            "first"
+        )
+    if not valid_entity_id(to_id):
+        # External statistics ('source:id') never are.
+        problems.append(f"'{to_id}' isn't an entity id")
+    if source is not None:
+        state = hass.states.get(to_id)
+        to_unit = (
+            target["unit_of_measurement"]
+            if target is not None
+            else state.attributes.get("unit_of_measurement") if state else None
+        )
+        if (target is not None or state is not None) and to_unit != source[
+            "unit_of_measurement"
+        ]:
+            problems.append(
+                f"units differ: '{from_id}' is in "
+                f"{source['unit_of_measurement']!r}, '{to_id}' in {to_unit!r}"
+            )
+        if target is not None and target["has_sum"] != source["has_sum"]:
+            problems.append(
+                "one is a sum (meter) statistic and the other a mean "
+                "(measurement) one"
+            )
+    if target is not None and not can_back_up and not allow_no_backup:
+        problems.append(_no_backup())
+    if problems:
+        raise StatisticsChangeRefusedError("; ".join(problems))
+    assert source is not None
+    last = await _instance(hass).async_add_executor_job(_last_row, hass, from_id)
+    return {"from": source, "to": to_id, "replaces": target, "last_row": last}
+
+
+async def migrate_statistics(
+    hass: HomeAssistant, plan: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply plan_migrate's plan, then report where the series ended up and
+    how it lines up with the entity's current state."""
+    from_id, target = plan["from"]["statistic_id"], plan["to"]
+    instance = _instance(hass)
+
+    def queue(done: Callable[[], None]) -> None:
+        # Queued together so nothing - not even the 5-minute compile that
+        # would recreate the cleared series - runs between the two.
+        if plan["replaces"]:
+            instance.async_clear_statistics([target])
+        instance.async_update_statistics_metadata(
+            from_id, new_statistic_id=target, on_done=done
+        )
+
+    await _on_recorder(hass, queue)
+    after = await describe_statistics(hass, [from_id, target])
+    moved = target in after and from_id not in after
+    result: dict[str, Any] = {"moved": moved, "statistic": after.get(target)}
+    if not moved:
+        result["note"] = (
+            f"HA didn't move the series - most likely {target} got a series "
+            "of its own in the meantime; Home Assistant's log says why"
+        )
+    last = plan["last_row"]
+    if moved and last is not None:
+        since = dt_util.utcnow() - datetime.fromisoformat(last["start"])
+        continuity: dict[str, Any] = {
+            "last_period": last["start"],
+            "hours_since_last_period": round(since.total_seconds() / 3600, 1),
+        }
+        state = hass.states.get(target)
+        current = _number(state.state) if state else None
+        if "state" in last and current is not None:
+            continuity.update(
+                last_state=last["state"],
+                current_state=current,
+                state_jump=round(current - last["state"], 6),
+            )
+        result["continuity"] = continuity
+    return result
+
+
+async def rename_conflicts(
+    hass: HomeAssistant, renames: list[tuple[str, str]]
+) -> dict[str, str]:
+    """{old entity_id: warning} for renames whose new id already has
+    statistics - HA won't move the entity's statistics onto it."""
+    ids = [entity_id for rename in renames for entity_id in rename]
+    described = await describe_statistics(hass, ids)
+    warnings = {}
+    for old, new in renames:
+        existing = described.get(new)
+        if existing is None:
+            continue
+        warning = (
+            f"{new} already has statistics {existing['first_period']} -> "
+            f"{existing['last_period']}; HA can't move this entity's "
+            "statistics onto it, so the entity continues that existing series"
+        )
+        if own := described.get(old):
+            warning += (
+                f" and its own history ({own['first_period']} -> "
+                f"{own['last_period']}) stays under {old} as an orphan. To "
+                f"keep it, rename, then migrate_statistics from={old} "
+                f"to={new} (replaces the series under {new})"
+            )
+        warnings[old] = warning + "."
+    return warnings

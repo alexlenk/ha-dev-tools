@@ -7,13 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.25.0] - 2026-10-07
+## [2.26.0] - 2026-10-09
 
 ### Added
 - `list_traces` and `get_trace`: read automation and script traces, the automation editor's Traces view.
   - `list_traces` lists the stored runs, newest first: trigger, start/finish, how each run ended (`script_execution`), last step and any error. Filter by automation/script (`entity_id`, or `domain` plus `item_id`), `errors_only`, and `include_not_triggered`.
   - `get_trace` reads one run (the latest by default) step by step, in the order it ran: each trigger, condition and action with its result, error, template errors and changed variables (`include_variables`, on by default). A step that ran a script carries a `child_id` to read that script's run. `include_config` adds the config as it was at the time of the run.
   - Both are read-only and use Home Assistant's own `trace/list` and `trace/get` commands, which are admin-only. The trace debugger (breakpoints, stepping) is not offered, since it pauses live runs.
+
+## [2.25.0] - 2026-10-08
+
+### Added
+- `clear_statistics` deletes long-term statistics, as Developer Tools > Statistics' "Fix issue" > Delete does (issue #134). The preview shows each series' source, unit, whether its entity exists, first/last period and row count.
+  - It refuses series that an existing entity still records into (`allow_live`) or that the Energy dashboard uses (`allow_energy`).
+  - The series is first pushed to the mirror repo, in `recorder/import_statistics` shape, so a mistake can be imported back. Nothing is cleared if that push fails, and with mirroring off it needs `allow_no_backup`.
+- `migrate_statistics` moves a dead entity's statistics onto its replacement, so the replacement keeps its new name and continues the old series (issue #134).
+  - The hours the replacement had collected are backed up and replaced, since HA can't merge two series.
+  - Units and sum/mean kind must match.
+  - The result reports the gap since the last period and the jump to the entity's current state.
+
+### Changed
+- The `update_entities` preview warns when a rename's new entity_id already has statistics (issue #134). HA won't move the entity's history onto it, so the entity silently continues the other series. The warning names `migrate_statistics` as the fix.
 
 ## [2.24.1] - 2026-10-07
 

@@ -1,7 +1,7 @@
 {
   "domain": "ha_dev_tools",
   "name": "HA Dev Tools MCP",
-  "after_dependencies": ["hassio", "http", "logbook", "mqtt", "recorder"],
+  "after_dependencies": ["energy", "hassio", "http", "logbook", "mqtt", "recorder"],
   "codeowners": ["@alexlenk"],
   "config_flow": true,
   "dependencies": [],
@@ -15,5 +15,5 @@
     "voluptuous-serialize>=2.6.0"
   ],
   "single_config_entry": true,
-  "version": "2.25.0"
+  "version": "2.26.0"
 }
