@@ -1600,7 +1600,11 @@ class MergeStatisticsTool(WriteGatedTool):
         "removes them). The target is backed up first, in the recorder "
         "(restore_statistics) and to the mirror repo - refused if either "
         "fails; with mirroring off it needs allow_no_backup=true, which "
-        "skips only the mirror copy."
+        "skips only the mirror copy. The result's next_compile checks the "
+        "target's newest 5-minute sum - what its next compile continues "
+        "from - against its last hourly one (ok=false: the next hour would "
+        "drop). A long merge answers still_running after 40 s and finishes "
+        "in the background - don't call it again."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
