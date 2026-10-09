@@ -33,9 +33,11 @@ async def test_trigger_automation_calls_service_with_resolved_entity_id(
     only reliable way (see audit_manager.find_automation_state)."""
     hass.states.async_set("automation.kitchen_lights", "on", {"id": "kitchen_id"})
 
-    entity_id = await trigger_automation(hass, "kitchen_id")
+    run = await trigger_automation(hass, "kitchen_id", wait_seconds=5)
 
-    assert entity_id == "automation.kitchen_lights"
+    assert run["entity_id"] == "automation.kitchen_lights"
+    assert run["finished"] is True
+    assert "error" not in run
     mock_automation_trigger.assert_called_once()
     call_data = mock_automation_trigger.call_args.args[0].data
     assert call_data["entity_id"] == "automation.kitchen_lights"
@@ -49,9 +51,75 @@ async def test_trigger_automation_respects_skip_condition_false(
     hass.states.async_set("automation.kitchen_lights", "on", {"id": "kitchen_id"})
 
     await trigger_automation(hass, "kitchen_id", skip_condition=False)
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     call_data = mock_automation_trigger.call_args.args[0].data
     assert call_data["skip_condition"] is False
+
+
+@pytest.mark.asyncio
+async def test_trigger_automation_returns_at_once_and_reports_errors(
+    hass: HomeAssistant,
+):
+    import asyncio
+
+    hass.states.async_set("automation.kitchen_lights", "on", {"id": "kitchen_id"})
+    release = asyncio.Event()
+
+    async def slow(_call):
+        await release.wait()
+
+    hass.services.async_register("automation", "trigger", slow)
+    started = await trigger_automation(hass, "kitchen_id")
+    assert started["finished"] is False
+    assert started["context_id"]
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    hass.services.async_register(
+        "automation", "trigger", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    waited = await trigger_automation(hass, "kitchen_id", wait_seconds=5)
+    assert (waited["finished"], waited["error"]) == (True, "boom")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_request_doesnt_cut_the_run_off(hass: HomeAssistant):
+    """Issue #131: the run was awaited (blocking=True), so the MCP client
+    giving up cancelled the automation - and the scripts it waited on -
+    part-way through. Now the run is detached, like the UI's button."""
+    import asyncio
+
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": {
+                "id": "slow",
+                "alias": "Slow",
+                "triggers": [{"trigger": "event", "event_type": "never"}],
+                "actions": [
+                    {"wait_for_trigger": [{"trigger": "event", "event_type": "go"}]},
+                    {"event": "done"},
+                ],
+            }
+        },
+    )
+    await hass.async_block_till_done()
+    done = []
+    hass.bus.async_listen("done", done.append)
+
+    request = asyncio.ensure_future(trigger_automation(hass, "slow", wait_seconds=30))
+    await asyncio.sleep(0.05)
+    request.cancel()  # the client's timeout
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    hass.bus.async_fire("go")
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(done) == 1
 
 
 @pytest.mark.asyncio

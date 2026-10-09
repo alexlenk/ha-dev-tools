@@ -3725,14 +3725,23 @@ class TriggerAutomationTool(WriteGatedTool):
         "never accepts an arbitrary entity_id or service. Useful for "
         "one-shot testing without a throwaway automation edit cycle (see "
         "issue #76). skip_condition defaults to true (conditions in the "
-        "automation are not evaluated, matching the UI default). Fails "
-        "clearly if no live automation.* entity exists yet for this id "
-        "(e.g. never reloaded since being added)."
+        "automation are not evaluated, matching the UI default). The run "
+        "is started and left to finish on its own, like the UI button - a "
+        "client timeout never cuts it off. It returns right away with "
+        "finished=false and the run's context_id; wait_seconds (up to 50) "
+        "waits that long for a short run to end and reports finished and "
+        "any error. Follow a longer run with list_traces / get_trace or "
+        "get_logbook. Fails clearly if no live automation.* entity exists "
+        "yet for this id (e.g. never reloaded since being added)."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
             vol.Required("automation_id"): str,
             vol.Optional("skip_condition", default=True): bool,
+            vol.Optional("wait_seconds", default=0): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0, max=service_call_manager.MAX_WAIT_SECONDS),
+            ),
         }
     )
 
@@ -3746,14 +3755,15 @@ class TriggerAutomationTool(WriteGatedTool):
         """Resolve the automation's live entity and trigger it."""
         args = tool_input.tool_args
         try:
-            entity_id = await service_call_manager.trigger_automation(
+            run = await service_call_manager.trigger_automation(
                 hass,
                 args["automation_id"],
                 skip_condition=args.get("skip_condition", True),
+                wait_seconds=args.get("wait_seconds", 0),
             )
         except service_call_manager.AutomationNotRunningError as exc:
             return _tool_error(exc)
-        return {"triggered": True, "entity_id": entity_id}
+        return {"triggered": True, **run}
 
 
 class SetNumberValueTool(WriteGatedTool):
