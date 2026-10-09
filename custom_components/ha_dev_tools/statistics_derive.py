@@ -10,8 +10,8 @@ the source meter times a factor -
 - a fixed number (a feed-in rate),
 - rate periods, `[{from, value}, ...]` (tariff changes), or
 - a measurement statistic's hourly mean (a dynamic price) - a missing
-  hour takes the last known price; the result says how many and the
-  longest gap.
+  hour takes the last known price (the result says how many and the
+  longest gap), or with missing_price="refuse" stops the write.
 
 The derived hours go into `target_statistic_id`: a new statistic under
 this integration's own `ha_dev_tools:` prefix, or an existing meter
@@ -86,8 +86,11 @@ def _periods_factor(
     )
 
 
+MISSING_PRICE = ("carry", "refuse")
+
+
 async def _price_factor(
-    hass: HomeAssistant, price_id: str, hours: list[float]
+    hass: HomeAssistant, price_id: str, hours: list[float], missing: str = "carry"
 ) -> tuple[_Factor | None, str | None]:
     meta = (await sm.read_metadata(hass, [price_id])).get(price_id)
     if meta is None:
@@ -102,6 +105,13 @@ async def _price_factor(
         for row in (await sm.read_rows(hass, [price_id])).get(price_id, [])
         if row.get("mean") is not None
     }
+    if missing == "refuse" and (gaps := [hour for hour in hours if hour not in means]):
+        return None, (
+            f"'{price_id}' has no price for {len(gaps)} hour(s), "
+            f"{merge._iso(gaps[0])} -> {merge._iso(gaps[-1])} - fill them, pass "
+            "start/end around them, or missing_price='carry' to take the last "
+            "known price"
+        )
     values: dict[float, float] = {}
     last: float | None = None
     filled = longest = run = 0
@@ -124,6 +134,7 @@ async def _price_factor(
                 "kind": "price",
                 "statistic_id": price_id,
                 "unit_of_measurement": meta.get("unit_of_measurement"),
+                "missing_price": missing,
                 "hours_without_price": filled,
                 "longest_gap_hours": longest,
             },
@@ -159,12 +170,15 @@ async def plan_derive(
     name: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    missing_price: str = "carry",
     can_back_up: bool,
     allow_no_backup: bool = False,
 ) -> merge.MergePlan:
     """Compute a derived series and how it goes into the target, without
     writing anything."""
     problems: list[str] = []
+    if missing_price not in MISSING_PRICE:
+        problems.append(f"missing_price is one of {MISSING_PRICE}")
     metadata = await sm.read_metadata(hass, [source_id, target_id])
     source_meta = metadata.get(source_id)
     target_meta = metadata.get(target_id)
@@ -222,7 +236,7 @@ async def plan_derive(
     elif isinstance(factor, list):
         built, problem = _periods_factor(factor, hours)
     else:
-        built, problem = await _price_factor(hass, str(factor), hours)
+        built, problem = await _price_factor(hass, str(factor), hours, missing_price)
     if built is None:
         raise sm.StatisticsChangeRefusedError(str(problem))
 
@@ -289,10 +303,23 @@ async def plan_derive(
     replaced = {
         hour: change for hour, change in target.changes.items() if low <= hour < high
     }
+    old_months, new_months = _month_totals(replaced), _month_totals(derived)
     report["replaces"] = {
         "hours": len(replaced),
         "total": round(sum(replaced.values()), 6),
         "difference": round(sum(derived.values()) - sum(replaced.values()), 6),
+        # What each month holds now, what it would, and the change.
+        "by_month": [
+            {
+                "month": month,
+                "before": old_months.get(month, 0.0),
+                "after": new_months.get(month, 0.0),
+                "difference": round(
+                    new_months.get(month, 0.0) - old_months.get(month, 0.0), 6
+                ),
+            }
+            for month in sorted(set(old_months) | set(new_months))
+        ],
     }
     total = 0.0
     rows = []

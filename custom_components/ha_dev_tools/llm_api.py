@@ -1797,7 +1797,8 @@ class DeriveStatisticsTool(WriteGatedTool):
         "hour's change of source_statistic_id times factor - a number (a "
         "feed-in rate), rate periods [{from, value}, ...] (tariff changes), "
         "or a measurement statistic's id whose hourly mean is the factor (a "
-        "dynamic price; a missing hour takes the last known price). For the "
+        "dynamic price; a missing hour takes the last known price, or with "
+        "missing_price='refuse' stops the write naming the hours). For the "
         "Energy dashboard's cost/compensation series, which HA only fills "
         "from the moment a source is configured: rebuild the EUR history of "
         "a meter, corrections included. A price in e.g. 'EUR/kWh' converts "
@@ -1809,7 +1810,8 @@ class DeriveStatisticsTool(WriteGatedTool):
         "row count 0), outside it the target keeps its own changes, and a "
         "live target goes on recording from the new sum (next_compile "
         "checks it). The preview shows hours, total, totals by month and, "
-        "for an existing target, what the range held before. An existing "
+        "for an existing target, what the range held before, by month too "
+        "(before, after, difference). An existing "
         "target is backed up first, like merge_statistics. Point the "
         "dashboard at a new statistic with write_energy_config (stat_cost / "
         "stat_compensation)."
@@ -1824,6 +1826,7 @@ class DeriveStatisticsTool(WriteGatedTool):
             vol.Optional("name"): str,
             vol.Optional("start"): str,
             vol.Optional("end"): str,
+            vol.Optional("missing_price"): vol.In(statistics_derive.MISSING_PRICE),
             vol.Optional("allow_no_backup"): bool,
         }
     )
@@ -1845,6 +1848,7 @@ class DeriveStatisticsTool(WriteGatedTool):
                 else None
             ),
             end=_parse_datetime(args["end"], field="end") if args.get("end") else None,
+            missing_price=args.get("missing_price", "carry"),
             can_back_up=mirror.is_mirror_enabled(hass),
             allow_no_backup=bool(args.get("allow_no_backup")),
         )

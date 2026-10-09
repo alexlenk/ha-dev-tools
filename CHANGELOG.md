@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.1] - 2026-10-09
+
+Both additions come from [@attilayener](https://github.com/attilayener)'s `derive_statistics` work in PR #147: refusing hours without a rate rather than guessing, and showing the old per-month totals next to the new ones. Thank you!
+
+### Added
+- **`derive_statistics` `missing_price`:** with a price statistic as the factor, `missing_price: "refuse"` stops the write when any hour in the range has no price, naming how many hours and the first and last. The default, `"carry"`, still takes the last known price for such an hour; the preview's `factor` now says which was used. Idea and original design by @attilayener (#147).
+- **`derive_statistics` month-by-month comparison:** when replacing a range of an existing target, the preview's `replaces` adds `by_month`: for each month, what the target holds now (`before`), what it would hold (`after`), and the `difference`. Idea and original design by @attilayener (#147).
+
 ## [2.27.0] - 2026-10-09
 
 ### Added
