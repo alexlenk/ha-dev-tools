@@ -231,6 +231,8 @@ async def test_dev_tools_real_tools_registered(
         "get_statistics",
         "clear_statistics",
         "migrate_statistics",
+        "merge_statistics",
+        "restore_statistics",
         "list_addons",
         "get_addon_logs",
         "check_config",

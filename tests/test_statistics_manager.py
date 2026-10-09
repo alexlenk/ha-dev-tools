@@ -412,7 +412,7 @@ async def test_migrate_moves_the_series_over_the_replacements_own(
     )
     assert plan["from"]["rows"] == 3
     assert plan["replaces"]["rows"] == 1
-    assert plan["last_row"]["start"] == "2024-12-01T02:00:00+00:00"
+    assert plan["last_row"]["start_ts"] == (START + timedelta(hours=2)).timestamp()
 
     result = await migrate_statistics(hass, plan)
     await async_wait_recording_done(hass)
@@ -785,12 +785,80 @@ async def test_migrate_reports_a_move_ha_declined(hass: HomeAssistant, monkeypat
         hass, "sensor.old_meter", "sensor.brand_new", can_back_up=False
     )
     # The recorder runs the task but leaves the series where it is.
+    instance = get_instance(hass)
+    update = instance.async_update_statistics_metadata
     monkeypatch.setattr(
-        get_instance(hass),
+        instance,
         "async_update_statistics_metadata",
-        lambda *_, on_done, **__: on_done(),
+        lambda statistic_id, on_done=None, **_: update(statistic_id, on_done=on_done),
     )
     result = await migrate_statistics(hass, plan)
     assert result["moved"] is False
     assert "didn't move the series" in result["note"]
     assert "continuity" not in result
+
+
+async def _compile_now(hass: HomeAssistant) -> float | None:
+    """Run the sensor's 5-minute compile for the period now falls in, as
+    the recorder would, and return the newest short-term sum."""
+    from homeassistant.components.recorder.db_schema import StatisticsShortTerm
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        do_adhoc_statistics,
+    )
+
+    from custom_components.ha_dev_tools.statistics_manager import read_rows
+
+    now = dt_util.utcnow()
+    period = now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
+    do_adhoc_statistics(hass, start=period)
+    await async_wait_recording_done(hass)
+    rows = (await read_rows(hass, ["sensor.new_meter"], StatisticsShortTerm)).get(
+        "sensor.new_meter", []
+    )
+    return rows[-1]["sum"] if rows else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_migrated_meter_continues_its_sum_without_short_term_rows(
+    hass: HomeAssistant, freezer
+):
+    """Issue #136: a dead entity's 5-minute rows are purged after 10 days;
+    without one, the replacement's next compile restarted the sum at 0."""
+    from custom_components.ha_dev_tools.statistics_manager import (
+        migrate_statistics,
+        plan_migrate,
+    )
+
+    freezer.move_to(START + timedelta(days=60, minutes=2))
+    await _seed(hass)  # old_meter: 3 hourly rows, no short-term ones
+    hass.states.async_set(
+        "sensor.new_meter",
+        "7.5",
+        {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+        },
+    )
+    await async_wait_recording_done(hass)
+    plan = await plan_migrate(
+        hass, "sensor.old_meter", "sensor.new_meter", can_back_up=False
+    )
+    await migrate_statistics(hass, plan)
+    await async_wait_recording_done(hass)
+
+    freezer.tick(timedelta(minutes=5))
+    hass.states.async_set(
+        "sensor.new_meter",
+        "8.5",
+        {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+        },
+    )
+    freezer.tick(timedelta(minutes=5))
+    await async_wait_recording_done(hass)
+    # The old meter ended at sum 3.0 with state 2; the new one reads 8.5.
+    assert await _compile_now(hass) == pytest.approx(3.0 + 8.5 - 2)
