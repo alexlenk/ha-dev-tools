@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
 
+from homeassistant.components.recorder.db_schema import StatisticsShortTerm
 from homeassistant.components.recorder.models import StatisticMetaData
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -175,23 +176,37 @@ def _seam(
 
 
 def rebase_point(
-    target: Series, merged: list[dict[str, Any]]
+    target: Series,
+    merged: list[dict[str, Any]],
+    *,
+    first_short_term: float | None,
+    now: float,
 ) -> tuple[float | None, float]:
-    """(start, offset): from `start` on, every target row's merged sum is
-    its old sum plus the same `offset` - where HA's sum adjustment takes
-    over (see the module docstring). (None, 0) when the target has no
-    hourly rows yet."""
-    if not target.rows:
+    """(start, offset): from `start` on, every target row - hourly and
+    5-minute - gets `offset` added by HA's sum adjustment (see the module
+    docstring); merged rows from `start` on are written `offset` lower, so
+    the adjustment lands them where they belong.
+
+    With hourly rows, `start` is where the target's offset to its old sums
+    becomes constant. Without - a target only minutes old, with at most a
+    few 5-minute rows (issue #141) - its own sums are all newer than the
+    merged hours and count from 0, so the offset is the merged total, from
+    its first 5-minute row's hour, or the current hour if it has none yet.
+    (None, 0) when nothing needs shifting."""
+    if target.rows:
+        new_sums = {row["start_ts"]: row["sum"] for row in merged}
+        starts = [row["start_ts"] for row in target.rows if row.get("sum") is not None]
+        offset = new_sums[starts[-1]] - target.by_start[starts[-1]]["sum"]
+        start = starts[-1]
+        for hour in reversed(starts):
+            if abs(new_sums[hour] - target.by_start[hour]["sum"] - offset) > _EPSILON:
+                break
+            start = hour
+        return start, offset
+    if not merged:
         return None, 0.0
-    new_sums = {row["start_ts"]: row["sum"] for row in merged}
-    starts = [row["start_ts"] for row in target.rows if row.get("sum") is not None]
-    offset = new_sums[starts[-1]] - target.by_start[starts[-1]]["sum"]
-    start = starts[-1]
-    for hour in reversed(starts):
-        if abs(new_sums[hour] - target.by_start[hour]["sum"] - offset) > _EPSILON:
-            break
-        start = hour
-    return start, offset
+    since = first_short_term if first_short_term is not None else now
+    return since - since % _HOUR, merged[-1]["sum"]
 
 
 @dataclass(slots=True)
@@ -205,6 +220,9 @@ class MergePlan:
     rows: list[dict[str, Any]]
     report: dict[str, Any]
     rebase: tuple[float | None, float]
+    # A target without any 5-minute row yet gets one carrying the merged
+    # sum, or its first compile would start again at 0 (issue #141).
+    seed: bool = False
 
     def preview(self) -> dict[str, Any]:
         """JSON-safe summary for the tool's preview and result."""
@@ -316,7 +334,19 @@ async def plan_merge(
             + " - pass overlap=target_wins, source_wins or add (meters) to "
             "resolve them, or start/end to leave them out"
         )
-    rebase = rebase_point(target, rows) if has_sum else (None, 0.0)
+    short_term = (await sm.read_rows(hass, [target_id], StatisticsShortTerm)).get(
+        target_id, []
+    )
+    rebase = (
+        rebase_point(
+            target,
+            rows,
+            first_short_term=short_term[0]["start_ts"] if short_term else None,
+            now=dt_util.utcnow().timestamp(),
+        )
+        if has_sum
+        else (None, 0.0)
+    )
     return MergePlan(
         target=described[target_id],
         sources=[described[source_id] for source_id in sources_wanted],
@@ -325,6 +355,7 @@ async def plan_merge(
         rows=rows,
         report=report,
         rebase=rebase,
+        seed=has_sum and not short_term and bool(rows),
     )
 
 
@@ -347,9 +378,16 @@ async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, An
     ]
     instance = sm._instance(hass)
     metadata = cast(StatisticMetaData, plan.metadata)
+    # The compile measures from this row's state, so it's the target
+    # meter's own reading - the merged rows' state may be a source's.
+    state = hass.states.get(target_id)
+    reading = sm._number(state.state) if state else None
+    seed = rows[-1] if reading is None else {**rows[-1], "state": reading}
 
     def queue() -> None:
         sm.queue_import(hass, metadata, rows)
+        if plan.seed:
+            sm.queue_short_term_seed(hass, metadata, seed)
         if shift_from is not None:
             instance.async_adjust_statistics(
                 target_id,
@@ -360,4 +398,7 @@ async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, An
 
     await sm.on_recorder(hass, queue)
     after = (await sm.describe_statistics(hass, [target_id]))[target_id]
-    return {"merged": {**plan.preview(), "target": after}}
+    result: dict[str, Any] = {"merged": {**plan.preview(), "target": after}}
+    if plan.metadata["has_sum"]:
+        result["next_compile"] = await sm.continuity_check(hass, target_id)
+    return result

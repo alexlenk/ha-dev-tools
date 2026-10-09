@@ -87,7 +87,7 @@ def test_sequential_meters_become_one_continuous_series():
     assert report["totals"] == {"inputs": 10, "result": 10, "dropped_by_overlap": 0}
     # The target's rows moved up by a constant 6 - where HA's adjustment
     # takes over, so its 5-minute rows follow.
-    assert rebase_point(new, rows) == (T0 + 5 * H, 6)
+    assert rebase_point(new, rows, first_short_term=None, now=0) == (T0 + 5 * H, 6)
 
 
 def test_overlap_rules_for_meters():
@@ -112,7 +112,27 @@ def test_overlap_rules_for_meters():
     assert report["overlaps"][0]["series"] == ["sensor.source", "sensor.target"]
 
     # The rebase point is where the offset stops changing: the last hour.
-    assert rebase_point(target, source_wins) == (T0 + 2 * H, 18)
+    assert rebase_point(target, source_wins, first_short_term=None, now=0) == (
+        T0 + 2 * H,
+        18,
+    )
+
+
+def test_rebase_for_a_target_without_hourly_rows():
+    """Issue #141: a target minutes old has no hourly rows, only its own
+    5-minute ones counting from 0 - they move up by the whole merged total,
+    from their first hour (or the current one, when there are none yet)."""
+    empty = Series("sensor.new", [], is_target=True)
+    merged = [{"start_ts": T0, "sum": 2.0}, {"start_ts": T0 + H, "sum": 5.0}]
+
+    assert rebase_point(
+        empty, merged, first_short_term=T0 + 30 * H + 50 * 60, now=0
+    ) == (T0 + 30 * H, 5.0)
+    assert rebase_point(empty, merged, first_short_term=None, now=T0 + 40 * H + 7) == (
+        T0 + 40 * H,
+        5.0,
+    )
+    assert rebase_point(empty, [], first_short_term=None, now=0) == (None, 0.0)
 
 
 def test_several_sources_are_added_like_the_tibber_case():
@@ -150,7 +170,6 @@ def test_measurements_are_taken_not_added():
     assert [(row["mean"], row["min"]) for row in rows] == [(10, 9), (20, 19), (21, 20)]
     assert "totals" not in report
     assert "state_jump" not in report["seams"][0]
-    assert rebase_point(Series("sensor.empty", [], is_target=True), rows) == (None, 0.0)
 
 
 # --- planning and writing against the recorder ---------------------------------
@@ -577,3 +596,155 @@ def test_unit_conversion_without_a_stored_unit_class():
     )
     assert convert is None
     assert "can't be converted" in problem
+
+
+async def _compile(hass):
+    now = dt_util.utcnow()
+    do_adhoc_statistics(
+        hass, start=now.replace(minute=now.minute - now.minute % 5, second=0)
+    )
+    await async_wait_recording_done(hass)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+@pytest.mark.parametrize("own_5min_row", [True, False])
+async def test_fresh_live_meter_continues_from_the_merged_sum(
+    hass: HomeAssistant, freezer, own_5min_row
+):
+    """Issue #141's dress rehearsal: a target minutes old - one 5-minute
+    row at sum 0 and no hourly rows yet, or none at all - got the merged
+    hourly rows, but its next compile continued from 0."""
+    freezer.move_to(START + timedelta(days=30, hours=12, minutes=52))
+    await _seed(hass)  # old_meter: hours 0-2 a month ago, sums 0, 1.5, 3
+    hass.states.async_set("sensor.new_meter", "0", METER)
+    await async_wait_recording_done(hass)
+    if own_5min_row:
+        await _meter(hass, "sensor.new_meter", 0, [])  # metadata only
+        meta = (await sm.read_metadata(hass, ["sensor.new_meter"]))["sensor.new_meter"]
+        get_instance(hass).async_import_statistics(
+            dict(meta),
+            [
+                {
+                    "start": START + timedelta(days=30, hours=12, minutes=45),
+                    "state": 0.0,
+                    "sum": 0.0,
+                }
+            ],
+            StatisticsShortTerm,
+        )
+        await async_wait_recording_done(hass)
+    else:
+        await _meter(hass, "sensor.new_meter", 0, [])
+
+    plan = await plan_merge(
+        hass,
+        "sensor.new_meter",
+        ["sensor.old_meter"],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    result = await merge_statistics(hass, plan)
+    await async_wait_recording_done(hass)
+
+    check = result["next_compile"]
+    assert check["ok"] is True, check
+    assert check["latest_5min"]["sum"] == 3.0
+
+    freezer.tick(timedelta(minutes=5))
+    hass.states.async_set("sensor.new_meter", "2", METER)
+    freezer.tick(timedelta(minutes=5))
+    await async_wait_recording_done(hass)
+    await _compile(hass)
+    # 3 merged + the 2 the meter has counted since - not 2 alone.
+    assert await _latest_short_term_sum(hass, "sensor.new_meter") == pytest.approx(5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_continuity_check_reports_a_drop(hass: HomeAssistant):
+    await _seed(hass)
+    meta = (await sm.read_metadata(hass, ["sensor.old_meter"]))["sensor.old_meter"]
+    assert (await sm.continuity_check(hass, "sensor.old_meter")) == {
+        "applies": True,
+        "last_hourly": {"start": (START + timedelta(hours=2)).isoformat(), "sum": 3},
+        "ok": False,
+        "note": "no 5-minute row - the entity's next compile would start its "
+        "sum again at 0",
+    }
+    get_instance(hass).async_import_statistics(
+        dict(meta),
+        [{"start": START + timedelta(hours=3), "state": 0.0, "sum": 1.0}],
+        StatisticsShortTerm,
+    )
+    await async_wait_recording_done(hass)
+    check = await sm.continuity_check(hass, "sensor.old_meter")
+    assert check["ok"] is False
+    assert "drop by 2.0" in check["note"]
+    assert (await sm.continuity_check(hass, "tibber:energy_consumption_home1")) == {
+        "applies": False
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_a_long_write_answers_still_running_and_notifies(
+    hass: HomeAssistant, monkeypatch
+):
+    """Issue #141: a merge that outlasts the client's timeout used to come
+    back as an error while it was still happening."""
+    from custom_components.ha_dev_tools import llm_api
+    from custom_components.ha_dev_tools.llm_api import MergeStatisticsTool
+
+    await _seed(hass)
+    await _meter(hass, "sensor.wh_meter", 10, [1000, 2000], unit="Wh")
+    monkeypatch.setattr(llm_api, "_STATISTICS_DEADLINE", 0)
+    result = await MergeStatisticsTool()._write(
+        hass,
+        _input(
+            "merge_statistics",
+            target_statistic_id="sensor.old_meter",
+            source_statistic_ids=["sensor.wh_meter"],
+            allow_no_backup=True,
+        ),
+        _llm_context(),
+    )
+    assert result["still_running"] is True
+    assert "Don't call it again" in result["note"]
+
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await async_wait_recording_done(hass)
+    notifications = hass.data["persistent_notification"]
+    [notice] = [n for n in notifications.values() if "merge_statistics" in n["title"]]
+    assert "finished" in notice["message"]
+    rows = (await sm.read_rows(hass, ["sensor.old_meter"]))["sensor.old_meter"]
+    assert len(rows) == 5
+
+
+def test_notification_for_failed_and_cancelled_writes(hass: HomeAssistant):
+    from unittest.mock import MagicMock, patch
+
+    from custom_components.ha_dev_tools.llm_api import _notify_statistics_result
+
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.persistent_notification.async_create"
+    ) as create:
+        for task, expected in (
+            (MagicMock(cancelled=lambda: True), "was cancelled"),
+            (
+                MagicMock(
+                    cancelled=lambda: False, exception=lambda: RuntimeError("boom")
+                ),
+                "failed: boom",
+            ),
+            (
+                MagicMock(
+                    cancelled=lambda: False,
+                    exception=lambda: None,
+                    result=lambda: {"error": "refused"},
+                ),
+                "failed: refused",
+            ),
+        ):
+            _notify_statistics_result(hass, "clear_statistics", task)
+            assert expected in create.call_args.args[1]

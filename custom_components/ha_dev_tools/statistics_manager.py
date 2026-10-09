@@ -600,6 +600,43 @@ def _last_row(hass: HomeAssistant, statistic_id: str) -> dict[str, Any] | None:
     return rows[-1] if rows else None
 
 
+async def continuity_check(hass: HomeAssistant, statistic_id: str) -> dict[str, Any]:
+    """Whether a meter's next 5-minute compile will continue its sum: the
+    compile starts from the newest 5-minute row (see the module docstring),
+    so that row's sum must not be below the last hourly one - or the next
+    hour drops (issue #141). Only an entity's own statistics are compiled;
+    external ones are written by their integration."""
+    metadata = (await read_metadata(hass, [statistic_id])).get(statistic_id)
+    if metadata is None or metadata["source"] != "recorder":
+        return {"applies": False}
+    instance = _instance(hass)
+    hourly = await instance.async_add_executor_job(_last_row, hass, statistic_id)
+    short = (await read_rows(hass, [statistic_id], StatisticsShortTerm)).get(
+        statistic_id, []
+    )
+    check: dict[str, Any] = {"applies": True}
+    if hourly is not None:
+        check["last_hourly"] = {"start": _iso(hourly["start_ts"]), "sum": hourly["sum"]}
+    if not short:
+        check["ok"] = hourly is None
+        if hourly is not None:
+            check["note"] = (
+                "no 5-minute row - the entity's next compile would start its "
+                "sum again at 0"
+            )
+        return check
+    latest = short[-1]
+    check["latest_5min"] = {"start": _iso(latest["start_ts"]), "sum": latest["sum"]}
+    drop = (hourly or {}).get("sum", 0.0) - (latest["sum"] or 0.0)
+    check["ok"] = drop <= 1e-6
+    if not check["ok"]:
+        check["note"] = (
+            f"the next compile continues from the 5-minute sum, so the next "
+            f"hour would drop by {round(drop, 6)}"
+        )
+    return check
+
+
 def _number(value: Any) -> float | None:
     try:
         return float(value)
@@ -725,6 +762,8 @@ async def migrate_statistics(
                 state_jump=round(current - last["state"], 6),
             )
         result["continuity"] = continuity
+    if moved and plan["from"]["has_sum"]:
+        result["next_compile"] = await continuity_check(hass, target)
     return result
 
 

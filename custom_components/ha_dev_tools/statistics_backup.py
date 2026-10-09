@@ -260,7 +260,10 @@ async def restore_statistics(
 
     await sm.on_recorder(hass, queue)
     restored = (await sm.describe_statistics(hass, [target])).get(target)
-    return {
+    result: dict[str, Any] = {
         "restored": restored,
         "complete": (restored or {}).get("rows") == len(rows),
     }
+    if metadata["has_sum"]:
+        result["next_compile"] = await sm.continuity_check(hass, target)
+    return result

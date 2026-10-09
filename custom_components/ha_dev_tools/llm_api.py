@@ -15,10 +15,12 @@ import asyncio
 import json
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, cast, override
 
 import voluptuous as vol
 from homeassistant.auth.models import User
+from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
@@ -1303,13 +1305,22 @@ async def _guarded_statistics_write(
     """Every destructive statistics write (issue #136): copy the series it
     changes to the mirror repo (refused if that fails, unless
     allow_no_backup) and into backup statistics in the recorder (always -
-    refused if that fails), then write. Run to the end even if the client
-    gives up."""
+    refused if that fails), then write.
+
+    Runs as a background task, so it finishes even if the client gives up.
+    A big one (a merge of a year or two of hourly rows) can outlast the
+    client's timeout, which then reported an error for a write that was in
+    fact still happening (issue #141): after _STATISTICS_DEADLINE seconds
+    this answers `still_running` with the backups already made, and the
+    task posts a Home Assistant notification with its result when done."""
+    progress: JsonObjectType = {}
 
     async def commit() -> JsonObjectType:
         mirrored = (
             await _back_up_statistics(hass, statistic_ids) if statistic_ids else None
         )
+        if mirrored is not None:
+            progress["mirror"] = mirrored
         if mirrored is not None and not mirrored["mirrored"] and not allow_no_backup:
             return _backup_failed(mirrored)
         response: JsonObjectType
@@ -1317,6 +1328,8 @@ async def _guarded_statistics_write(
             made = await statistics_backup.create_backups(
                 hass, statistic_ids, operation
             )
+            if made:
+                progress["backups"] = cast(JsonValueType, made)
             response = await write()
             if made:
                 response["backups"] = cast(JsonValueType, made)
@@ -1327,7 +1340,55 @@ async def _guarded_statistics_write(
             response["mirror"] = mirrored
         return response
 
-    return await _run_to_completion(hass, commit(), f"ha_dev_tools {operation}")
+    task: asyncio.Task[JsonObjectType] = hass.async_create_background_task(
+        commit(), f"ha_dev_tools {operation}"
+    )
+    # asyncio.wait doesn't cancel the task, on timeout or when this request
+    # is cancelled.
+    await asyncio.wait({task}, timeout=_STATISTICS_DEADLINE)
+    if task.done():
+        return task.result()
+    task.add_done_callback(partial(_notify_statistics_result, hass, operation))
+    return {
+        "still_running": True,
+        "operation": operation,
+        **progress,
+        "note": (
+            f"Still writing after {_STATISTICS_DEADLINE:.0f} s - it carries on "
+            "in Home Assistant and posts a notification with its result when "
+            "done. Don't call it again; check the result with get_statistics "
+            "or list_statistics in a minute."
+        ),
+    }
+
+
+_STATISTICS_DEADLINE = 40.0
+
+
+def _notify_statistics_result(
+    hass: HomeAssistant, operation: str, task: asyncio.Task[JsonObjectType]
+) -> None:
+    """Tell the owner how a statistics write the tool stopped waiting for
+    ended."""
+    if task.cancelled():
+        outcome = "was cancelled"
+    elif (exc := task.exception()) is not None:
+        outcome = f"failed: {exc}"
+    else:
+        result = task.result()
+        outcome = (
+            f"failed: {result['error']}"
+            if "error" in result
+            else "finished:\n\n```json\n"
+            + json.dumps(result, indent=1, default=str)[:4000]
+            + "\n```"
+        )
+    persistent_notification.async_create(
+        hass,
+        f"`{operation}` {outcome}",
+        title=f"HA Dev Tools: {operation}",
+        notification_id=f"{DOMAIN}_{operation}",
+    )
 
 
 class ClearStatisticsTool(WriteGatedTool):
