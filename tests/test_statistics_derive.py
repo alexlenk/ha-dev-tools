@@ -5,11 +5,13 @@ import json
 from datetime import timedelta
 
 import pytest
+import voluptuous as vol
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.db_schema import StatisticsShortTerm
 from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.recorder.statistics import async_import_statistics
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.components.recorder.common import (
     async_wait_recording_done,
 )
@@ -175,6 +177,7 @@ async def test_hourly_price_with_a_gap_and_unit_conversion(hass: HomeAssistant):
         "kind": "price",
         "statistic_id": "sensor.price",
         "unit_of_measurement": "EUR/kWh",
+        "missing_price": "carry",
         "hours_without_price": 2,
         "longest_gap_hours": 2,
     }
@@ -203,6 +206,87 @@ async def test_hourly_price_with_a_gap_and_unit_conversion(hass: HomeAssistant):
                 unit="EUR",
                 can_back_up=False,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_missing_price_refuse(hass: HomeAssistant):
+    """missing_price='refuse' stops at the first hour without a price,
+    naming how many and where, instead of carrying the last one."""
+    await _seed(hass)
+    await _meter(hass, "sensor.wh_meter", 0, [0, 1000, 3000, 6000], unit="Wh")
+    await _price(hass, {0: 0.2, 1: 0.3})
+
+    with pytest.raises(
+        sm.StatisticsChangeRefusedError,
+        match=(
+            r"no price for 2 hour\(s\), 2024-12-01T02:00:00\+00:00 -> "
+            r"2024-12-01T03:00:00\+00:00"
+        ),
+    ):
+        await plan_derive(
+            hass,
+            "sensor.wh_meter",
+            "sensor.price",
+            "ha_dev_tools:cost",
+            missing_price="refuse",
+            can_back_up=False,
+        )
+    # Around the gap, or with every hour priced, it goes through.
+    plan = await plan_derive(
+        hass,
+        "sensor.wh_meter",
+        "sensor.price",
+        "ha_dev_tools:cost",
+        end=START + timedelta(hours=2),
+        missing_price="refuse",
+        can_back_up=False,
+    )
+    assert [round(row["sum"], 6) for row in plan.rows] == [0, 0.3]
+    await _price(hass, {2: 0.4, 3: 0.5})
+    plan = await plan_derive(
+        hass,
+        "sensor.wh_meter",
+        "sensor.price",
+        "ha_dev_tools:cost",
+        missing_price="refuse",
+        can_back_up=False,
+    )
+    assert [round(row["sum"], 6) for row in plan.rows] == [0, 0.3, 1.1, 2.6]
+    assert plan.preview()["factor"]["missing_price"] == "refuse"
+    assert plan.preview()["factor"]["hours_without_price"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_replacing_shows_each_month_before_and_after(hass: HomeAssistant):
+    await hass.config.async_set_time_zone("UTC")
+    # Hours Nov 30 22:00 -> Dec 1 01:00 UTC: changes 0, 1, 2, 3.
+    await _meter(hass, "sensor.m", -2, [0, 1, 3, 6])
+    plan = await plan_derive(
+        hass, "sensor.m", 1, "ha_dev_tools:x", unit="EUR", can_back_up=False
+    )
+    await merge_statistics(hass, plan)
+    await async_wait_recording_done(hass)
+
+    plan = await plan_derive(
+        hass,
+        "sensor.m",
+        2,
+        "ha_dev_tools:x",
+        start=START - timedelta(hours=1),
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    assert plan.preview()["replaces"] == {
+        "hours": 3,
+        "total": 6.0,
+        "difference": 6.0,
+        "by_month": [
+            {"month": "2024-11", "before": 1.0, "after": 2.0, "difference": 1.0},
+            {"month": "2024-12", "before": 5.0, "after": 10.0, "difference": 5.0},
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -248,7 +332,20 @@ async def test_replacing_a_range_of_a_live_cost_sensor(hass: HomeAssistant, free
         allow_no_backup=True,
     )
     preview = plan.preview()
-    assert preview["replaces"] == {"hours": 1, "total": 5.0, "difference": 1.0}
+    assert preview["replaces"] == {
+        "hours": 1,
+        "total": 5.0,
+        "difference": 1.0,
+        "by_month": [
+            # HA's test time zone isn't UTC: START is still November locally.
+            {
+                "month": dt_util.as_local(START).strftime("%Y-%m"),
+                "before": 5.0,
+                "after": 6.0,
+                "difference": 1.0,
+            }
+        ],
+    }
     result = await merge_statistics(hass, plan)
     await async_wait_recording_done(hass)
 
@@ -306,6 +403,13 @@ async def test_replacing_a_range_of_a_live_cost_sensor(hass: HomeAssistant, free
             "no hourly rows in that range",
         ),
         ("sensor.old_meter", 1, "ha_dev_tools:x", {}, "pass unit"),
+        (
+            "sensor.old_meter",
+            "sensor.price",
+            "ha_dev_tools:x",
+            {"missing_price": "skip"},
+            "missing_price is one of",
+        ),
         ("sensor.old_meter", True, "ha_dev_tools:x", {"unit": "EUR"}, "factor is"),
         (
             "sensor.old_meter",
@@ -352,6 +456,9 @@ async def test_derive_statistics_tool(hass: HomeAssistant):
     tool.parameters(new)
     tool.parameters({**new, "factor": [{"from": "2024-01-01", "value": 0.08}]})
     tool.parameters({**new, "factor": "sensor.price"})
+    tool.parameters({**new, "factor": "sensor.price", "missing_price": "refuse"})
+    with pytest.raises(vol.Invalid):
+        tool.parameters({**new, "missing_price": "skip"})
     preview = await tool._preview_context(
         hass, _input(tool.name, **new), _llm_context()
     )
