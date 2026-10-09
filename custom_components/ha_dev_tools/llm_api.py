@@ -87,6 +87,7 @@ from .script_manager import (
 )
 from .supervisor_manager import SupervisorNotAvailableError
 from .template_yaml_manager import (
+    BLOCK_FIELDS,
     DuplicateTemplateUniqueIdError,
     TemplateBatchError,
     TemplateEntityNotFoundError,
@@ -3118,9 +3119,17 @@ class UpdateTemplateEntityTool(WriteGatedTool):
     name = "update_template_entity"
     description = (
         "Update an existing YAML `template:` entity's config by its "
-        "unique_id (from list_template_entities). Only that entity's own "
-        "dict is replaced - sibling entities and the block's triggers/"
-        "conditions/variables are left untouched. To change an entity's "
+        "unique_id (from list_template_entities). config replaces only that "
+        "entity's own dict - sibling entities and the block's triggers/"
+        "conditions/variables are left untouched. To change the block "
+        "itself - a trigger-based block's triggers, conditions, variables or "
+        "actions - pass those instead of (or with) config: each replaces "
+        "the block's key in place (null removes conditions/variables/"
+        "actions), checked with HA's own validation, then reloaded. That "
+        "changes every entity in the block - the preview lists them all - "
+        "and keeps their state (accumulators, counters, attributes), unlike "
+        "delete + create. Turning a state-based block into a trigger-based "
+        "one (or back) is refused. To change an entity's "
         "unique_id, use delete_template_entity + create_template_entity "
         "instead (a rename is really two operations, not supported "
         "directly here). Fails with a permission error if the entity "
@@ -3129,12 +3138,48 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         "package-defined entities can be updated this way."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
-        {vol.Required("unique_id"): str, vol.Required("config"): dict}
+        {
+            vol.Required("unique_id"): str,
+            vol.Optional("config"): dict,
+            vol.Optional("triggers"): [dict],
+            vol.Optional("conditions"): vol.Any([dict], None),
+            vol.Optional("variables"): vol.Any(dict, None),
+            vol.Optional("actions"): vol.Any([dict], None),
+        }
     )
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
         """Init with the TemplateYamlManager backing this tool."""
         self._manager = template_yaml_manager
+
+    @staticmethod
+    def _block(args: dict[str, Any]) -> dict[str, Any] | None:
+        return {field: args[field] for field in BLOCK_FIELDS if field in args} or None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """For a block edit: every entity it changes, and the keys before
+        and after - or why it's refused."""
+        args = tool_input.tool_args
+        block = self._block(args)
+        if not block:
+            return {}
+        try:
+            result = await self._manager.update_entity(
+                args["unique_id"], args.get("config"), block=block, dry_run=True
+            )
+        except (
+            ValueError,
+            TemplateEntityNotFoundError,
+            DuplicateTemplateUniqueIdError,
+        ) as exc:
+            return {"problems": str(exc)}
+        return {"block": cast(JsonValueType, result.block)}
 
     @override
     async def _write(
@@ -3143,11 +3188,11 @@ class UpdateTemplateEntityTool(WriteGatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Update the template entity."""
+        """Update the template entity and/or its block."""
         args = tool_input.tool_args
         try:
             result = await self._manager.update_entity(
-                args["unique_id"], args["config"]
+                args["unique_id"], args.get("config"), block=self._block(args)
             )
         except (
             ValueError,
@@ -3160,6 +3205,8 @@ class UpdateTemplateEntityTool(WriteGatedTool):
             "platform": result.location.platform,
             "reloaded": result.reloaded,
         }
+        if result.block is not None:
+            response["block"] = cast(JsonValueType, result.block)
         # An edit HA rejects on reload drops the entity just as silently.
         response.update(
             await _template_entity_status(
