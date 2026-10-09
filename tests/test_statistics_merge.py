@@ -563,3 +563,17 @@ async def test_restore_statistics_tool(hass: HomeAssistant):
             hass, _input(tool.name, backup_statistic_id="sensor.x"), _llm_context()
         )
     )["error_type"] == "StatisticsChangeRefusedError"
+
+
+def test_unit_conversion_without_a_stored_unit_class():
+    """Statistics imported by older HA versions can lack unit_class."""
+    convert, problem = backups.unit_converter(
+        {"statistic_id": "sensor.x", "unit_of_measurement": "Wh", "unit_class": None},
+        "kWh",
+    )
+    assert (convert(1500), problem) == (1.5, None)
+    convert, problem = backups.unit_converter(
+        {"statistic_id": "sensor.x", "unit_of_measurement": "apples"}, "kWh"
+    )
+    assert convert is None
+    assert "can't be converted" in problem

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `create_derived_sensor` / `update_derived_sensor` crashed on HA 2026.10 with "Object of type _Unsupported is not JSON serializable" on every flow's first step, for all derived-sensor domains, so none could be created (issue #137). The #80/#81 fix looked up probatio's `to_field_list` on HA's `config_validation`, which re-exported it on 2026.9. On 2026.10 it doesn't, so the lookup silently fell back to `voluptuous_serialize`, which doesn't recognize probatio's `UNSUPPORTED` sentinel. The converter is now imported from probatio itself, as HA's own config-flow HTTP view does. A regression test walks the first step of every domain with a real recorder (for `filter`), and passes on HA 2026.8, 2026.9 and 2026.10.
+- **`migrate_statistics` (2.25.0) could restart the migrated meter's sum at 0** (issue #136). A meter's 5-minute statistics compile continues its running `sum` from the newest *5-minute* row only, never from the hourly ones. Moving a series takes its 5-minute rows along, but HA deletes those after `purge_keep_days` (10 days by default). So if the old entity had stopped more than about that long before the migration, the replacement's next compile found no 5-minute row and started again at `sum` 0. From the following hour, the Energy dashboard shows one large negative value, and all later hours sit on a total that is too low by the old sum. Hourly rows from before the migration are unaffected. `migrate_statistics` now writes one 5-minute row carrying the moved series' last sum and state, and the entity continues from that. A regression test runs HA's own compile and fails (sum 0.0) without the fix.
+  - **Who can be affected:** only 2.25.0 migrations onto a meter (`has_sum`) statistic whose old entity had stopped more than about 10 days (your `purge_keep_days`) before the migration ran. A same-day replacement still had its 5-minute rows and wasn't affected.
+  - **How an agent checks a migration:** call `get_statistics` with `statistic_ids=[<to_statistic_id>]`, `start_time` an hour or two before the migration, `period="hour"` and `types=["sum", "change"]`. It was hit if the first hour or two after the migration show a negative `change` of about the whole previous `sum`, with `sum` dropping to near 0 and then growing again from there. A meter's `change` is otherwise never strongly negative. HA's own statistics validation (`list_statistics` `issues`) doesn't flag this.
+  - **How to repair it:** in Developer Tools > Statistics, use "Adjust sum" on that statistic, pick the hour with the negative `change`, and adjust it by that drop as a positive number. That shifts it and every later hour back up, and `get_statistics` should then show a continuous `sum`. 2.25.0 made no in-recorder backup, only a mirror-repo copy of the series it replaced, so this is the way to repair it.
+
+### Added
+- `merge_statistics` combines one or more source statistics into a target's series (issue #136). HA itself keeps one series per id and can't combine two. Typical uses: several old meters that became one, or a replacement that ran in parallel before the old device was retired.
+  - Meters are rebuilt from every series' per-hour changes, so the sum is continuous across seams. The target keeps its own `state`.
+  - A live target goes on recording from the merged sum. The rows from the point where its offset to the old sums becomes constant are written on the old basis, then shifted with HA's own sum adjustment. That moves the hourly and 5-minute rows together, in one recorder transaction, including any row a compile wrote meanwhile.
+  - Overlapping hours follow `overlap`: `refuse` (the default), `target_wins`, `source_wins` (sources in the order given) or `add` (meters only). `start`/`end` limit what's taken from the sources.
+  - Units are converted within one class (Wh/kWh), and sum/mean kinds must match.
+  - The preview shows each series, the overlaps and their resolution, every seam (gap hours, state jump), the inputs' total change vs the result's, and the sum shift. Sources are left as they are.
+- In-recorder backups and `restore_statistics` (issue #136). Before `clear_statistics`, `migrate_statistics` (onto an existing series), `merge_statistics` or `restore_statistics` change a series, it is copied into a backup statistic of this integration's own: `ha_dev_tools:backup_<id>_<UTC time>`, source `ha_dev_tools`, named "Backup of <id> before <operation> <time>".
+  - It isn't an entity, so it shows up neither in entity pickers nor the Energy dashboard. It is visible in Developer Tools > Statistics and in statistics-graph cards, and it's included in every regular HA backup.
+  - The copy is checked row by row count before the write goes ahead. A failed copy refuses the write, as does a failed mirror push. `allow_no_backup` skips only the mirror copy, never the in-recorder one.
+  - Results name each backup. `restore_statistics` puts one back onto the statistic it backs up, or onto `target_statistic_id`, after backing up what it overwrites, so a restore can be undone too. A restored meter gets a 5-minute row with its last sum.
+  - Only hourly rows are copied and restored. HA imports only hourly rows, and keeps 5-minute ones for about 10 days.
+
+### Changed
+- `list_statistics` shows backups (`source=ha_dev_tools`) with what they back up, the operation, when, their age and `stale: true` after 90 days. Backups are never deleted automatically; `clear_statistics` removes them, without making a backup of the backup.
+
 ## [2.25.0] - 2026-10-08
 
 ### Added
