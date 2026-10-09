@@ -46,7 +46,7 @@ offered.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from functools import partial
 from typing import Any, cast
@@ -287,6 +287,16 @@ class StatisticsBackupError(Exception):
     """A backup couldn't be made, so nothing was changed."""
 
 
+class StatisticsNotAppliedError(Exception):
+    """The recorder ran the queued work, but the statistics don't hold what
+    was written - a task failed inside the recorder (logged there) or was
+    re-queued and still hadn't run."""
+
+
+class StatisticsBusyError(Exception):
+    """Another statistics write on the same statistic is still running."""
+
+
 async def energy_references(hass: HomeAssistant) -> dict[str, list[str]]:
     """{statistic_id: [where the Energy dashboard uses it]}.
 
@@ -494,12 +504,47 @@ def statistic_data(row: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def check_importable(metadata: StatisticMetaData | dict[str, Any]) -> None:
+    """Refuse what HA's import would reject while it's being queued -
+    checked before anything is queued, so a write never stops half-way (a
+    restore must not clear its target and then fail to import). Mirrors
+    recorder.statistics.async_import_statistics / async_add_external_
+    statistics / _async_import_statistics."""
+    statistic_id = metadata["statistic_id"]
+    source = metadata["source"]
+    if source == "recorder":
+        if not valid_entity_id(statistic_id):
+            raise StatisticsChangeRefusedError(
+                f"'{statistic_id}' isn't an entity id, as an entity's own "
+                "statistics need"
+            )
+    elif not (
+        statistics.valid_statistic_id(statistic_id)
+        and statistic_id.split(":", 1)[0] == source
+    ):
+        raise StatisticsChangeRefusedError(
+            f"'{statistic_id}' isn't a valid external statistic id for "
+            f"source '{source}'"
+        )
+    unit_class = metadata.get("unit_class")
+    if unit_class is not None:
+        converter = statistics.UNIT_CLASS_TO_UNIT_CONVERTER.get(unit_class)
+        if converter is None or (
+            metadata.get("unit_of_measurement") not in converter.VALID_UNITS
+        ):
+            raise StatisticsChangeRefusedError(
+                f"'{statistic_id}' has unit {metadata.get('unit_of_measurement')!r} "
+                f"in unit class {unit_class!r}, which HA's import refuses"
+            )
+
+
 def queue_import(
     hass: HomeAssistant, metadata: StatisticMetaData, rows: list[dict[str, Any]]
 ) -> None:
     """Queue hourly rows (raw shape) for import into metadata's statistic,
     through the same validation as WS recorder/import_statistics. Existing
     rows with the same start are overwritten, others inserted."""
+    check_importable(metadata)
     data = [statistic_data(row) for row in rows]
     if metadata["source"] == "recorder":
         importer = statistics.async_import_statistics
@@ -593,10 +638,96 @@ async def on_recorder(
         ) from exc
 
 
+# Extra barrier rounds after a write that doesn't verify yet: on
+# MySQL/MariaDB, an import or adjust task that hits a lock-wait timeout or a
+# deadlock re-queues itself at the end of the queue - behind the barrier
+# (recorder.tasks.ImportStatisticsTask / AdjustStatisticsTask) - and one
+# more round lets it run. On SQLite a failing task is dropped (and logged),
+# so the check fails for good.
+VERIFY_ROUNDS = 3
+
+
+async def on_recorder_verified(
+    hass: HomeAssistant,
+    queue: Callable[[], None],
+    verify: Callable[[], Awaitable[list[str]]],
+    *,
+    what: str,
+) -> None:
+    """on_recorder, then check the statistics hold what was written:
+    `verify` returns the problems (empty when it landed). Raises
+    StatisticsNotAppliedError naming them if it still hasn't after
+    VERIFY_ROUNDS rounds - never reports a write as done that isn't
+    (issue #145)."""
+    await on_recorder(hass, queue, what=what)
+    for _ in range(VERIFY_ROUNDS):
+        if not (problems := await verify()):
+            return
+        await on_recorder(hass, lambda: None, what=what)
+    if problems := await verify():
+        raise StatisticsNotAppliedError(
+            f"{what} didn't land as planned - {'; '.join(problems[:5])}"
+            + (f" (and {len(problems) - 5} more)" if len(problems) > 5 else "")
+            + ". Home Assistant's log names the recorder error"
+        )
+
+
+def _close(a: Any, b: Any) -> bool:
+    """Equal as stored - all value columns are doubles; the margin only
+    absorbs float rounding (a rebased sum is sum - offset + offset)."""
+    if a is None or b is None:
+        return a is b
+    return abs(float(a) - float(b)) <= 1e-6 + 1e-12 * abs(float(b))
+
+
+async def row_mismatches(
+    hass: HomeAssistant, statistic_id: str, expected: list[dict[str, Any]]
+) -> list[str]:
+    """Where `statistic_id`'s hourly rows differ from `expected` (raw
+    shape; only the values `expected` sets are compared)."""
+    actual = {
+        row["start_ts"]: row
+        for row in (await read_rows(hass, [statistic_id])).get(statistic_id, [])
+    }
+    problems = []
+    for row in expected:
+        got = actual.get(row["start_ts"])
+        if got is None:
+            problems.append(f"{statistic_id} has no row for {_iso(row['start_ts'])}")
+            continue
+        for column in _VALUE_COLUMNS:
+            if row.get(column) is not None and not _close(got[column], row[column]):
+                problems.append(
+                    f"{statistic_id} {_iso(row['start_ts'])}: {column} is "
+                    f"{got[column]}, not {row[column]}"
+                )
+    return problems
+
+
 async def clear_statistics(hass: HomeAssistant, statistic_ids: list[str]) -> None:
-    """Delete `statistic_ids`' long- and short-term statistics and metadata."""
+    """Delete `statistic_ids`' long- and short-term statistics and metadata,
+    and check they're gone. A live entity may start a new series right
+    after - only hourly rows from before the clear count as left over."""
     instance = _instance(hass)
-    await on_recorder(hass, lambda: instance.async_clear_statistics(statistic_ids))
+    # The first compile after the clear writes the hour before the one it
+    # runs in - anything older is left over.
+    now = dt_util.utcnow().timestamp()
+    before = now - now % 3600 - 3600
+
+    async def verify() -> list[str]:
+        left = await read_rows(hass, statistic_ids)
+        return [
+            f"{statistic_id} still has its rows"
+            for statistic_id, rows in left.items()
+            if any(row["start_ts"] < before for row in rows)
+        ]
+
+    await on_recorder_verified(
+        hass,
+        lambda: instance.async_clear_statistics(statistic_ids),
+        verify,
+        what="the clear",
+    )
 
 
 def _last_row(hass: HomeAssistant, statistic_id: str) -> dict[str, Any] | None:
@@ -729,6 +860,15 @@ async def migrate_statistics(
     from_id, target = plan["from"]["statistic_id"], plan["to"]
     instance = _instance(hass)
     last = plan["last_row"]
+    # HA refuses to rename onto an id in use, but the seed below would still
+    # land - in that series' 5-minute rows, which its next compile then
+    # continues from. A target that got a series since the plan (an entity
+    # recording for the first time) is refused here instead.
+    if not plan["replaces"] and target in await read_metadata(hass, [target]):
+        raise StatisticsChangeRefusedError(
+            f"'{target}' has statistics of its own since this was planned - "
+            "preview again (they're replaced, after a backup)"
+        )
 
     def queue() -> None:
         # Queued together so nothing - not even the 5-minute compile that
@@ -743,14 +883,27 @@ async def migrate_statistics(
             # restart the sum at 0 (issue #136).
             queue_short_term_seed(hass, plan["metadata"], last)
 
-    await on_recorder(hass, queue)
+    async def verify() -> list[str]:
+        after = await describe_statistics(hass, [from_id, target])
+        if from_id in after:
+            return [f"{from_id} is still there"]
+        if target not in after:
+            return [f"{target} isn't there"]
+        if after[target].get("first_period") != plan["from"]["first_period"]:
+            return [f"{target} doesn't start where {from_id} did"]
+        return []
+
+    try:
+        await on_recorder_verified(hass, queue, verify, what="the move")
+        moved = True
+    except StatisticsNotAppliedError:
+        moved = False
     after = await describe_statistics(hass, [from_id, target])
-    moved = target in after and from_id not in after
     result: dict[str, Any] = {"moved": moved, "statistic": after.get(target)}
     if not moved:
         result["note"] = (
-            f"HA didn't move the series - most likely {target} got a series "
-            "of its own in the meantime; Home Assistant's log says why"
+            "HA didn't move the series - Home Assistant's log says why; "
+            "'statistic' is what's under the new id now"
         )
     if moved and last is not None:
         since = dt_util.utcnow() - dt_util.utc_from_timestamp(last["start_ts"])

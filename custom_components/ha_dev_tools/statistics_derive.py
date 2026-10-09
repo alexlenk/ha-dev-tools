@@ -328,6 +328,7 @@ async def plan_derive(
             else (None, 0.0)
         ),
         seed=live and not short_term and bool(rows),
+        existing=target.by_start,
     )
 
 

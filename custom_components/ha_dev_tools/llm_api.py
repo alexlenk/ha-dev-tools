@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, cast, override
@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - HA before 2026.9
 from homeassistant.auth.models import User
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
@@ -1266,9 +1267,17 @@ _STATISTICS_ERRORS = (
     statistics_manager.StatisticsChangeRefusedError,
 )
 _STATISTICS_WRITE_ERRORS = (
-    statistics_manager.StatisticsTimeoutError,
+    *_STATISTICS_ERRORS,
     statistics_manager.StatisticsBackupError,
 )
+# The write was queued, but whether - or how far - it changed the
+# statistics isn't known from the error alone.
+_STATISTICS_UNCONFIRMED = (
+    statistics_manager.StatisticsTimeoutError,
+    statistics_manager.StatisticsNotAppliedError,
+    HomeAssistantError,
+)
+_STATISTICS_WRITES_RUNNING = f"{DOMAIN}_statistics_writes"
 
 
 async def _back_up_statistics(
@@ -1302,6 +1311,24 @@ def _backup_failed(backup: JsonObjectType) -> JsonObjectType:
     }
 
 
+def _statistics_busy(
+    hass: HomeAssistant, statistic_ids: Iterable[str | None]
+) -> JsonObjectType | None:
+    """The error for a write on a statistic another write is still changing
+    - checked before planning too, so nothing is planned against rows that
+    are about to change. None when they're all free."""
+    running: set[str] = hass.data.get(_STATISTICS_WRITES_RUNNING, set())
+    if busy := sorted(running.intersection(statistic_ids)):
+        return _tool_error(
+            statistics_manager.StatisticsBusyError(
+                f"another statistics write on {', '.join(busy)} is still "
+                "running - wait for its notification, then check the "
+                "statistics before trying again"
+            )
+        )
+    return None
+
+
 async def _guarded_statistics_write(
     hass: HomeAssistant,
     statistic_ids: list[str],
@@ -1309,6 +1336,7 @@ async def _guarded_statistics_write(
     write: Callable[[], Coroutine[Any, Any, JsonObjectType]],
     *,
     allow_no_backup: bool,
+    touches: list[str] | None = None,
 ) -> JsonObjectType:
     """Every destructive statistics write (issue #136): copy the series it
     changes to the mirror repo (refused if that fails, unless
@@ -1320,7 +1348,17 @@ async def _guarded_statistics_write(
     client's timeout, which then reported an error for a write that was in
     fact still happening (issue #141): after _STATISTICS_DEADLINE seconds
     this answers `still_running` with the backups already made, and the
-    task posts a Home Assistant notification with its result when done."""
+    task posts a Home Assistant notification with its result when done.
+
+    One write at a time per statistic (`touches`, default statistic_ids):
+    a second one - a retry after `still_running` - would plan against rows
+    the first is still changing, and a sum adjustment applied twice
+    doesn't undo itself."""
+    locked = set(touches if touches is not None else statistic_ids)
+    if busy := _statistics_busy(hass, locked):
+        return busy
+    running: set[str] = hass.data.setdefault(_STATISTICS_WRITES_RUNNING, set())
+    running |= locked
     progress: JsonObjectType = {}
 
     async def commit() -> JsonObjectType:
@@ -1342,24 +1380,31 @@ async def _guarded_statistics_write(
             if made:
                 response["backups"] = cast(JsonValueType, made)
                 response["restore"] = statistics_manager.RESTORE_HINT
-        except statistics_manager.StatisticsTimeoutError as exc:
+        except _STATISTICS_UNCONFIRMED as exc:
             # Queued but unconfirmed: report what the statistics hold now,
             # not a guess (issue #145).
             response = _tool_error(exc)
             response["now"] = cast(
                 JsonValueType,
-                await statistics_manager.describe_statistics(hass, statistic_ids),
+                await statistics_manager.describe_statistics(hass, sorted(locked)),
             )
-            if progress.get("backups"):
-                response["backups"] = progress["backups"]
         except _STATISTICS_WRITE_ERRORS as exc:
             response = _tool_error(exc)
+        if "error" in response and progress.get("backups"):
+            response["backups"] = progress["backups"]
+            response["restore"] = statistics_manager.RESTORE_HINT
         if mirrored is not None:
             response["mirror"] = mirrored
         return response
 
+    async def commit_once() -> JsonObjectType:
+        try:
+            return await commit()
+        finally:
+            running.difference_update(locked)
+
     task: asyncio.Task[JsonObjectType] = hass.async_create_background_task(
-        commit(), f"ha_dev_tools {operation}"
+        commit_once(), f"ha_dev_tools {operation}"
     )
     # asyncio.wait doesn't cancel the task, on timeout or when this request
     # is cancelled.
@@ -1475,6 +1520,8 @@ class ClearStatisticsTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Back up, then clear - to the end even if the client gives up."""
         args = tool_input.tool_args
+        if busy := _statistics_busy(hass, args["statistic_ids"]):
+            return busy
         try:
             planned = await self._plan(hass, args)
         except _STATISTICS_ERRORS as exc:
@@ -1568,6 +1615,10 @@ class MigrateStatisticsTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Back up what's replaced, then move - to the end even if the client gives up."""
         args = tool_input.tool_args
+        if busy := _statistics_busy(
+            hass, [args["from_statistic_id"], args["to_statistic_id"]]
+        ):
+            return busy
         try:
             plan = await self._plan(hass, args)
         except _STATISTICS_ERRORS as exc:
@@ -1585,6 +1636,7 @@ class MigrateStatisticsTool(WriteGatedTool):
             self.name,
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
+            touches=[args["from_statistic_id"], plan["to"]],
         )
 
 
@@ -1669,6 +1721,10 @@ class MergeStatisticsTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Back up the target, then write the merge."""
         args = tool_input.tool_args
+        if busy := _statistics_busy(
+            hass, [args["target_statistic_id"], *args["source_statistic_ids"]]
+        ):
+            return busy
         try:
             plan = await self._plan(hass, args)
         except (*_STATISTICS_ERRORS, ValueError) as exc:
@@ -1685,6 +1741,7 @@ class MergeStatisticsTool(WriteGatedTool):
             self.name,
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
+            touches=[args["target_statistic_id"], *args["source_statistic_ids"]],
         )
 
 
@@ -1772,6 +1829,10 @@ class DeriveStatisticsTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Back up an existing target, then write the derived series."""
         args = tool_input.tool_args
+        if busy := _statistics_busy(
+            hass, [args["target_statistic_id"], args["source_statistic_id"]]
+        ):
+            return busy
         try:
             plan = await self._plan(hass, args)
         except (*_STATISTICS_ERRORS, ValueError) as exc:
@@ -1788,6 +1849,7 @@ class DeriveStatisticsTool(WriteGatedTool):
             self.name,
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
+            touches=[args["target_statistic_id"], args["source_statistic_id"]],
         )
 
 
@@ -1855,6 +1917,10 @@ class RestoreStatisticsTool(WriteGatedTool):
     ) -> JsonObjectType:
         """Back up the target's current series, then restore."""
         args = tool_input.tool_args
+        if busy := _statistics_busy(
+            hass, [args["backup_statistic_id"], args.get("target_statistic_id")]
+        ):
+            return busy
         try:
             plan = await self._plan(hass, args)
         except _STATISTICS_ERRORS as exc:
@@ -1872,6 +1938,7 @@ class RestoreStatisticsTool(WriteGatedTool):
             self.name,
             write,
             allow_no_backup=bool(args.get("allow_no_backup")),
+            touches=[plan["target"], args["backup_statistic_id"]],
         )
 
 

@@ -223,6 +223,9 @@ class MergePlan:
     # A target without any 5-minute row yet gets one carrying the merged
     # sum, or its first compile would start again at 0 (issue #141).
     seed: bool = False
+    # The target's own hourly rows by start, as they were planned against:
+    # rows the merge leaves as they are aren't written again.
+    existing: dict[float, dict[str, Any]] = field(default_factory=dict)
 
     def preview(self) -> dict[str, Any]:
         """JSON-safe summary for the tool's preview and result."""
@@ -356,13 +359,37 @@ async def plan_merge(
         report=report,
         rebase=rebase,
         seed=has_sum and not short_term and bool(rows),
+        existing=target.by_start,
+    )
+
+
+def _unchanged(row: dict[str, Any], existing: dict[str, Any] | None) -> bool:
+    """Whether importing `row` would leave the target's row as it is."""
+    if existing is None:
+        return False
+    written, held = sm.statistic_data(row), sm.statistic_data(existing)
+    return written.keys() == held.keys() and all(
+        (
+            written[key] == held[key]
+            if key in ("start", "last_reset")
+            else sm._close(written[key], held[key])
+        )
+        for key in written
     )
 
 
 async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, Any]:
     """Write the merged rows - from the rebase point on with the old sum
     basis, then HA's sum adjustment for the offset (see the module
-    docstring). The caller backs the target up first."""
+    docstring). The caller backs the target up first.
+
+    Two phases, each checked against the statistics before the next is
+    queued: the import (and seed), then the adjustment. The adjustment adds
+    to whatever the rows hold when it runs, so it must never run before
+    the import - and on MySQL/MariaDB an import that hits a lock timeout
+    re-queues itself behind anything queued after it. Rows the target
+    already holds as planned aren't written again: from the rebase point
+    on, that's all of a live meter's own hours."""
     target_id = plan.metadata["statistic_id"]
     start, offset = plan.rebase
     shift_from = start if start is not None and abs(offset) > _EPSILON else None
@@ -376,19 +403,37 @@ async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, An
         )
         for row in plan.rows
     ]
+    written = [
+        row for row in rows if not _unchanged(row, plan.existing.get(row["start_ts"]))
+    ]
     instance = sm._instance(hass)
     metadata = cast(StatisticMetaData, plan.metadata)
+    sm.check_importable(metadata)
     # The compile measures from this row's state, so it's the target
     # meter's own reading - the merged rows' state may be a source's.
     state = hass.states.get(target_id)
     reading = sm._number(state.state) if state else None
-    seed = rows[-1] if reading is None else {**rows[-1], "state": reading}
+    seed = (
+        None
+        if not plan.seed
+        else rows[-1] if reading is None else {**rows[-1], "state": reading}
+    )
 
-    def queue() -> None:
-        sm.queue_import(hass, metadata, rows)
-        if plan.seed:
+    def queue_import() -> None:
+        if written:
+            sm.queue_import(hass, metadata, written)
+        if seed is not None:
             sm.queue_short_term_seed(hass, metadata, seed)
-        if shift_from is not None:
+
+    async def imported() -> list[str]:
+        return await sm.row_mismatches(hass, target_id, written)
+
+    await sm.on_recorder_verified(
+        hass, queue_import, imported, what="the merged rows' import"
+    )
+    if shift_from is not None:
+
+        def queue_adjust() -> None:
             instance.async_adjust_statistics(
                 target_id,
                 dt_util.utc_from_timestamp(shift_from),
@@ -396,9 +441,20 @@ async def merge_statistics(hass: HomeAssistant, plan: MergePlan) -> dict[str, An
                 plan.metadata["unit_of_measurement"],
             )
 
-    await sm.on_recorder(hass, queue)
+        async def adjusted() -> list[str]:
+            return await sm.row_mismatches(
+                hass,
+                target_id,
+                [row for row in plan.rows if row["start_ts"] >= shift_from],
+            )
+
+        await sm.on_recorder_verified(
+            hass, queue_adjust, adjusted, what="the sum adjustment"
+        )
     after = (await sm.describe_statistics(hass, [target_id]))[target_id]
-    result: dict[str, Any] = {"merged": {**plan.preview(), "target": after}}
+    result: dict[str, Any] = {
+        "merged": {**plan.preview(), "target": after, "rows_changed": len(written)}
+    }
     if plan.metadata["has_sum"]:
         result["next_compile"] = await sm.continuity_check(hass, target_id)
     return result
