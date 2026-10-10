@@ -391,3 +391,61 @@ async def test_patch_dashboard_tool(
         context,
     )
     assert "no view 'nope'" in bad["error"]
+
+
+def test_replace_a_section_and_malformed_configs():
+    config = _dashboard()
+    result = apply_ops(
+        config,
+        [
+            {
+                "op": "replace_section",
+                "view": "dev",
+                "section": "Battery",
+                "section_config": NEW_SECTION,
+            }
+        ],
+    )
+    assert result.config["views"][1]["sections"][1] == NEW_SECTION
+    assert result.changes[0]["before"] == config["views"][1]["sections"][1]
+
+    broken = {"views": ["not a view", {"type": "sections", "sections": ["x"]}]}
+    with pytest.raises(DashboardPatchError, match="view 0 isn't an object"):
+        apply_ops(broken, [{"op": "remove_section", "view": 0, "section": 0}])
+    with pytest.raises(DashboardPatchError, match="section 0 isn't an object"):
+        apply_ops(broken, [{"op": "remove_section", "view": 1, "section": 0}])
+    # A name lookup skips what isn't an object.
+    with pytest.raises(DashboardPatchError, match="no section 'x'"):
+        apply_ops(broken, [{"op": "remove_section", "view": 1, "section": "x"}])
+    with pytest.raises(DashboardPatchError, match="its parent is a value"):
+        apply_ops(config, [{"op": "set", "pointer": "/title/x/y", "value": 1}])
+
+
+@pytest.mark.asyncio
+async def test_patch_dashboard_saved_even_if_the_re_read_fails(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, lovelace
+):
+    """The save went through; a failing re-read afterwards isn't an error -
+    the hash is the saved config's."""
+    from unittest.mock import patch
+
+    from custom_components.ha_dev_tools import dashboard_manager
+    from custom_components.ha_dev_tools.llm_api import PatchDashboardTool
+    from custom_components.ha_dev_tools.ws_call import WebSocketCommandError
+
+    context = _llm_context(admin_user.id)
+    original = _dashboard()
+    await dashboard_manager.write_dashboard(hass, admin_user, original)
+    ops = [{"op": "set", "pointer": "/title", "value": "Sun"}]
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.dashboard_manager.get_dashboard",
+        side_effect=[original, WebSocketCommandError("unknown_error", "gone")],
+    ):
+        result = await PatchDashboardTool()._write(
+            hass,
+            _input("patch_dashboard", ops=ops, expected_hash=config_hash(original)),
+            context,
+        )
+    assert result["saved"] is True
+    assert result["config_hash"] == config_hash({**original, "title": "Sun"})
+    assert (await dashboard_manager.get_dashboard(hass, admin_user))["title"] == "Sun"
