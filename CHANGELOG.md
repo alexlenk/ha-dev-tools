@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.2] - 2026-10-10
+
+### Added
+- **`redistribute_statistics` takes values for several windows in one call** (issue #159). Each window carries its own `values`: `windows: [{start, catchup_hour, values: [...]}, ...]`. They are checked per window exactly as a single window's are: the count matches the window's periods, the sum matches the window total (`normalize` optional), none is negative, none is above `max_per_hour`, there is no reset or negative hour inside, and no windows overlap. Before, values went with exactly one window, so a history cleanup with 25 windows meant 25 calls and 25 full backups of the same series.
+  - **One backup and one write** cover all the windows, followed by one `next_compile` check.
+  - **All or nothing:** if any window fails, nothing is written, and the refusal names every failing window with its reason, not just the first.
+  - **Every window or none:** values are given for every window or for none. Top-level `values` still works for a single window; giving both forms is refused.
+  - **Compact preview with several windows:** each window shows hours, moved, methods, reference ratios and fit, the largest hour before/after, and by-month before/after, without `by_hour` and `by_day`. `detail: true` adds those back. This also applies to several detected windows. A single window's preview is unchanged.
+
 ## [2.27.1] - 2026-10-09
 
 Both additions come from [@attilayener](https://github.com/attilayener)'s `derive_statistics` work in PR #147: refusing hours without a rate rather than guessing, and showing the old per-month totals next to the new ones. Thank you!

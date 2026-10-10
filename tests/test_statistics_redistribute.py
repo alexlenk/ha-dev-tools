@@ -359,6 +359,181 @@ async def test_values_sparse_and_normalized(hass: HomeAssistant, freezer):
     assert changes[8] == 1  # the hour after: untouched
 
 
+# --- values for several windows (issue #159) ----------------------------------
+
+
+async def _two_outages(hass):
+    """Windows 2 -> 5 and 7 -> 10, each holding 5; 1 an hour elsewhere."""
+    await _hourly(hass, "sensor.m", {0: 0, 1: 1, 5: 6, 6: 7, 10: 12, 11: 13})
+    return [
+        {"start": _at(2), "catchup_hour": _at(5), "values": [1, 2, 1, 1]},
+        {"start": _at(7), "catchup_hour": _at(10), "values": [2, 1, 1, 1]},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_values_for_several_windows_in_one_write(hass: HomeAssistant, freezer):
+    freezer.move_to(_at(30))
+    windows = await _two_outages(hass)
+
+    plan = await plan_redistribute(
+        hass, "sensor.m", windows=windows, can_back_up=False, allow_no_backup=True
+    )
+    reports = plan.report["windows"]
+    assert [report["moved"] for report in reports] == [5, 5]
+    assert [report["methods"] for report in reports] == [{"values": 4}] * 2
+    # Compact: several windows, no detail.
+    assert not any("by_hour" in report or "by_day" in report for report in reports)
+    assert reports[0]["by_month"] and reports[0]["max_hour_after"] == 2
+    assert "detail: true" in plan.report["detail"]
+    detailed = await plan_redistribute(
+        hass,
+        "sensor.m",
+        windows=windows,
+        detail=True,
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    assert [len(report["by_hour"]) for report in detailed.report["windows"]] == [4, 4]
+    assert "by_day" in detailed.report["windows"][1]
+    assert "detail" not in detailed.report
+
+    await redistribute_statistics(hass, plan)
+    assert await _changes(hass, "sensor.m", range(2, 12)) == pytest.approx(
+        [1, 2, 1, 1, 1, 2, 1, 1, 1, 1]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_one_window_in_its_own_values_is_as_before(hass: HomeAssistant, freezer):
+    """A single window with its own values: the full report, as with the
+    top-level values."""
+    freezer.move_to(_at(30))
+    windows = await _two_outages(hass)
+    plan = await plan_redistribute(
+        hass, "sensor.m", windows=windows[:1], can_back_up=False, allow_no_backup=True
+    )
+    assert len(plan.report["windows"][0]["by_hour"]) == 4
+    assert "detail" not in plan.report
+    top = await plan_redistribute(
+        hass,
+        "sensor.m",
+        windows=[{key: windows[0][key] for key in ("start", "catchup_hour")}],
+        values=windows[0]["values"],
+        can_back_up=False,
+        allow_no_backup=True,
+    )
+    assert top.rows == plan.rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_every_failing_window_is_named_and_nothing_is_written(
+    hass: HomeAssistant, freezer
+):
+    freezer.move_to(_at(30))
+    windows = await _two_outages(hass)
+    await _hourly(hass, "sensor.m", {13: 14, 16: 18, 17: 19})  # 14 -> 16 holds 4
+    windows[0]["values"] = [1, 1, 1, 1.5]  # adds up to 4.5, not 5
+    windows[1]["values"] = [-1, 3, 2, 1]
+    windows.append({"start": _at(14), "catchup_hour": _at(16), "values": [1, 2, 1]})
+    before = await sm.read_rows(hass, ["sensor.m"])
+
+    with pytest.raises(sm.StatisticsChangeRefusedError) as refused:
+        await plan_redistribute(
+            hass, "sensor.m", windows=windows, can_back_up=False, allow_no_backup=True
+        )
+    message = str(refused.value)
+    assert f"window {_at(2).isoformat()}: the values add up to 4.5" in message
+    assert f"window {_at(7).isoformat()}: values can't be negative" in message
+    assert _at(14).isoformat() not in message
+    assert await sm.read_rows(hass, ["sensor.m"]) == before
+
+    # A window refused on its own rows is named too, the others still checked.
+    windows[2] = {"start": _at(12), "catchup_hour": _at(16), "values": [1] * 5}
+    with pytest.raises(sm.StatisticsChangeRefusedError) as refused:
+        await plan_redistribute(
+            hass, "sensor.m", windows=windows, can_back_up=False, allow_no_backup=True
+        )
+    assert "goes down" not in str(refused.value)
+    assert "values can't be negative" in str(refused.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({"drop_values": 1}, "1 of 2 windows have values"),
+        ({"top_values": [1]}, "at the top or in each window, not both"),
+        ({"profile_weeks": 1}, "no profile with them"),
+    ],
+)
+async def test_values_in_windows_refusals(
+    hass: HomeAssistant, freezer, change, expected
+):
+    freezer.move_to(_at(30))
+    windows = await _two_outages(hass)
+    if "drop_values" in change:
+        del windows[change["drop_values"]]["values"]
+    kwargs = {}
+    if "top_values" in change:
+        kwargs["values"] = change["top_values"]
+    if "profile_weeks" in change:
+        kwargs["profile_weeks"] = change["profile_weeks"]
+    with pytest.raises(sm.StatisticsChangeRefusedError, match=expected):
+        await plan_redistribute(
+            hass,
+            "sensor.m",
+            windows=windows,
+            can_back_up=False,
+            allow_no_backup=True,
+            **kwargs,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recorder_mock")
+async def test_redistribute_tool_several_windows_one_backup(
+    hass: HomeAssistant, freezer
+):
+    from custom_components.ha_dev_tools.llm_api import RedistributeStatisticsTool
+
+    freezer.move_to(_at(30))
+    windows = await _two_outages(hass)
+    args = {
+        "statistic_id": "sensor.m",
+        "windows": [
+            {
+                "start": item["start"].isoformat(),
+                "catchup_hour": item["catchup_hour"].isoformat(),
+                "values": item["values"],
+            }
+            for item in windows
+        ],
+    }
+    tool = RedistributeStatisticsTool()
+    tool.parameters({**args, "detail": True})
+    preview = await tool._preview_context(
+        hass,
+        _input(tool.name, **args, detail=True, allow_no_backup=True),
+        _llm_context(),
+    )
+    assert "by_hour" in preview["would_redistribute"]["windows"][0]
+
+    write, (enabled, pushed) = _mirror()
+    with enabled, pushed:
+        result = await tool._write(hass, _input(tool.name, **args), _llm_context())
+    assert list(result["backups"]) == ["sensor.m"]
+    assert result["redistributed"]["rows_written"] == 8
+    assert "by_hour" not in result["redistributed"]["windows"][0]
+    assert await _changes(hass, "sensor.m", range(2, 12)) == pytest.approx(
+        [1, 2, 1, 1, 1, 2, 1, 1, 1, 1]
+    )
+
+
 # --- refusals -------------------------------------------------------------------
 
 
