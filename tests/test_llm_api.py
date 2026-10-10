@@ -49,6 +49,7 @@ from pytest_homeassistant_custom_component.common import MockUser
 from custom_components.ha_dev_tools import (
     access_control,
     config_snapshot,
+    dashboard_patch,
     helper_manager,
 )
 from custom_components.ha_dev_tools.access_control import NotAdminError, NotArmedError
@@ -270,6 +271,7 @@ async def test_dev_tools_real_tools_registered(
         "list_dashboards",
         "get_dashboard",
         "write_dashboard",
+        "patch_dashboard",
         "get_energy_config",
         "write_energy_config",
         "list_rest_commands",
@@ -2895,7 +2897,10 @@ async def test_get_dashboard_tool_calls_manager(hass: HomeAssistant, admin_user)
             _llm_context(admin_user.id),
         )
 
-    assert result == {"views": []}
+    assert result == {
+        "views": [],
+        "config_hash": dashboard_patch.config_hash({"views": []}),
+    }
     mock_get.assert_called_once_with(hass, admin_user, url_path="x")
 
 

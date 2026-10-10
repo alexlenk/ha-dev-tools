@@ -93,7 +93,7 @@ That's it - ask it something.
 
 Every write tool (`write_automation`, `delete_automation`, `write_script`,
 the helper/derived-sensor/template-entity CRUD tools, `delete_entity`/
-`delete_entities`, `write_dashboard`, `write_energy_config`) always requires
+`delete_entities`, `write_dashboard`/`patch_dashboard`, `write_energy_config`) always requires
 two calls: **propose**
 (no arguments changed, no side effects - returns a preview of what would be
 applied plus a short-lived `confirm_token`) and **confirm** (the identical
@@ -213,7 +213,8 @@ matters for setup, covered below.
 | `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) plus the general-purpose Template helper (any entity domain - light, switch, sensor, ...) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create); `update_derived_sensor` also takes a flat `options` patch of just the fields to change, and leaves every other field as it was |
 | `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. `update_template_entity` can also change a trigger-based block's `triggers` / `conditions` / `variables` / `actions` in place - the preview lists every entity in the block, and a reload keeps their state (unlike delete + create). For the config-entry Template *helper* instead, see the row above |
 | `list_dashboards` | List every configured Lovelace dashboard (title, url_path, icon, mode, require_admin, show_in_sidebar) - storage- and YAML-mode alike. Use before `get_dashboard` when checking every dashboard for something, since a non-default dashboard's url_path otherwise has to already be known |
-| `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction) |
+| `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction). `get_dashboard` also returns the config's `config_hash` |
+| `patch_dashboard` | Changes part of a dashboard without re-sending the whole config: add/replace/remove a view, section or card, or `set` a value at a JSON pointer. Everything else is saved exactly as read. Ops are planned against `get_dashboard`'s `config_hash` (required), and a dashboard changed since is refused. Ambiguous selectors (e.g. two sections with the same heading) are refused. The preview lists each touched node before/after; the result has the new hash for the next patch |
 | `get_energy_config` / `write_energy_config` | Read/write the Energy dashboard's own source config (grid/solar/battery/gas/water entities, cost settings) - a separate HA subsystem from Lovelace dashboards, not reachable through `get_dashboard`. Each field in a write wholesale-replaces that section; omitting a field leaves it untouched |
 
 **Act**
@@ -281,8 +282,8 @@ than re-read from disk, to dodge Home Assistant's own storage-save debounce;
 `delete_entity`/`delete_entities` also back up the entity's full registry
 data first, since HA's own registry-purge safety net only lasts 30 days
 either way. Supported today: `write_automation`, `delete_automation`,
-`write_script`, the template-entity tools, `write_dashboard` and
-`write_energy_config` (live mode only for both - neither has a
+`write_script`, the template-entity tools, `write_dashboard`/`patch_dashboard` and
+`write_energy_config` (live mode only for these - neither has a
 compute-without-writing path to mirror in dry-run), the helper tools, the
 derived-sensor tools, and `delete_entity`/`delete_entities`.
 

@@ -42,6 +42,7 @@ from . import (
     config_snapshot,
     config_tools,
     dashboard_manager,
+    dashboard_patch,
     derived_sensor_manager,
     energy_manager,
     entity_manager,
@@ -70,6 +71,7 @@ from .automation_manager import (
 )
 from .const import DOMAIN
 from .dashboard_manager import YamlModeDashboardError
+from .dashboard_patch import DashboardPatchError
 from .derived_sensor_manager import (
     DERIVED_SENSOR_DOMAINS,
     DerivedSensorNotFoundError,
@@ -3834,7 +3836,8 @@ class GetDashboardTool(GatedTool):
         "Read a Lovelace dashboard's config (views/cards). Omit url_path "
         "for the default dashboard, or pass an additional dashboard's "
         "url_path. Works whether the dashboard is UI/storage-managed or "
-        "YAML-mode."
+        "YAML-mode. config_hash (not part of the config) is what "
+        "patch_dashboard's expected_hash takes."
     )
     parameters = vol.Schema({vol.Optional("url_path"): str})
 
@@ -3853,7 +3856,40 @@ class GetDashboardTool(GatedTool):
             )
         except (UnresolvedUserError, WebSocketCommandError) as exc:
             return _tool_error(exc)
-        return config
+        return {**config, dashboard_patch.HASH_KEY: dashboard_patch.config_hash(config)}
+
+
+def _dashboard_storage_path(url_path: str | None) -> str:
+    # Storage key convention confirmed directly against home-assistant/
+    # core's lovelace/dashboard.py: CONFIG_STORAGE_KEY_DEFAULT = "lovelace"
+    # for the default dashboard, CONFIG_STORAGE_KEY = "lovelace.{}" (the
+    # dashboard's id, which is its url_path for storage-mode dashboards)
+    # for any other.
+    return f".storage/lovelace{f'.{url_path}' if url_path else ''}"
+
+
+async def _save_dashboard(
+    hass: HomeAssistant,
+    user: Any,
+    config: dict[str, Any],
+    url_path: str | None,
+    response: JsonObjectType,
+) -> JsonObjectType:
+    """Save a dashboard config and mirror the storage file's before/after."""
+    storage_path = _dashboard_storage_path(url_path)
+    content_before = await _read_storage_file(hass, storage_path)
+    await dashboard_manager.write_dashboard(hass, user, config, url_path=url_path)
+    content_after = await _read_storage_file(hass, storage_path)
+    if content_after is None:
+        return response
+    return await _mirror_file_write(
+        hass,
+        response,
+        file_path=storage_path,
+        content_before=content_before,
+        content_after=content_after,
+        content_type="json",
+    )
 
 
 class WriteDashboardTool(WriteGatedTool):
@@ -3864,7 +3900,8 @@ class WriteDashboardTool(WriteGatedTool):
         "Save a Lovelace dashboard's config (views/cards). Storage-mode "
         "dashboards only - HA hard-rejects saving YAML-mode dashboards "
         "through this path (get_dashboard still works for those, just "
-        "not this). Omit url_path for the default dashboard."
+        "not this). Omit url_path for the default dashboard. To change one "
+        "view, section or card, patch_dashboard sends only that."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("config"): dict, vol.Optional("url_path"): str}
@@ -3880,17 +3917,17 @@ class WriteDashboardTool(WriteGatedTool):
         """Write the dashboard config."""
         args = tool_input.tool_args
         url_path = args.get("url_path")
-        # Storage key convention confirmed directly against home-assistant/
-        # core's lovelace/dashboard.py: CONFIG_STORAGE_KEY_DEFAULT = "lovelace"
-        # for the default dashboard, CONFIG_STORAGE_KEY = "lovelace.{}" (the
-        # dashboard's id, which is its url_path for storage-mode dashboards)
-        # for any other.
-        storage_path = f".storage/lovelace{f'.{url_path}' if url_path else ''}"
+        # get_dashboard's config_hash, sent back with the config, isn't
+        # part of it.
+        config = {
+            key: value
+            for key, value in args["config"].items()
+            if key != dashboard_patch.HASH_KEY
+        }
         try:
-            content_before = await _read_storage_file(hass, storage_path)
             user = await helper_manager.resolve_user(hass, llm_context)
-            await dashboard_manager.write_dashboard(
-                hass, user, args["config"], url_path=url_path
+            return await _save_dashboard(
+                hass, user, config, url_path, {"saved": True, "url_path": url_path}
             )
         except (
             UnresolvedUserError,
@@ -3898,18 +3935,126 @@ class WriteDashboardTool(WriteGatedTool):
             WebSocketCommandError,
         ) as exc:
             return _tool_error(exc)
-        content_after = await _read_storage_file(hass, storage_path)
-        response: JsonObjectType = {"saved": True, "url_path": url_path}
-        if content_after is not None:
-            response = await _mirror_file_write(
-                hass,
-                response,
-                file_path=storage_path,
-                content_before=content_before,
-                content_after=content_after,
-                content_type="json",
+
+
+class PatchDashboardTool(WriteGatedTool):
+    """Change part of a dashboard's config - see dashboard_patch.py."""
+
+    name = "patch_dashboard"
+    description = (
+        "Change part of a storage-mode Lovelace dashboard without re-sending "
+        "the whole config: ops applied in order to the config as it is now, "
+        "everything else saved exactly as read. expected_hash (required) is "
+        "get_dashboard's config_hash - a dashboard changed since is refused, "
+        "read it again. Ops: add_view {view_config, position?}, remove_view "
+        "{view}; add_section {view, section_config, position?}, "
+        "replace_section {view, section, section_config}, remove_section "
+        "{view, section}; add_card {view, section?, card_config, position?}, "
+        "replace_card {view, section?, card, card_config}, remove_card "
+        "{view, section?, card} - without section, a masonry/panel view's "
+        "own cards; set {pointer, value} at a JSON pointer, e.g. "
+        "'/views/2/sections/0/cards/1/days_to_show' (an object key added or "
+        "replaced, a list index replaced, '-' appends). view: index, or its "
+        "path, else its title; section: index, or its title or a heading "
+        "card's text; card: index - a name matching more than one is "
+        "refused. position: index to insert before (default: the end). "
+        "Indices count from 0, after the ops before. The preview lists each "
+        "touched node (pointer, before, after) and the hashes; the result "
+        "has the new config_hash for the next patch. Omit url_path for the "
+        "default dashboard."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("ops"): vol.All(
+                [
+                    vol.Schema(
+                        {vol.Required("op"): vol.In(dashboard_patch.OPS)},
+                        extra=vol.ALLOW_EXTRA,
+                    )
+                ],
+                vol.Length(min=1),
+            ),
+            vol.Required("expected_hash"): str,
+            vol.Optional("url_path"): str,
+        }
+    )
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any], user: Any
+    ) -> tuple[dict[str, Any], dashboard_patch.PatchResult]:
+        config = await dashboard_manager.get_dashboard(
+            hass, user, url_path=args.get("url_path")
+        )
+        if dashboard_patch.config_hash(config) != args["expected_hash"]:
+            raise DashboardPatchError(
+                "the dashboard changed since expected_hash - read it again "
+                "(get_dashboard) and plan the ops against what it holds now"
             )
-        return response
+        return config, dashboard_patch.apply_ops(config, args["ops"])
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Each touched node before and after, or why the ops are refused."""
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            config, result = await self._plan(hass, tool_input.tool_args, user)
+        except (UnresolvedUserError, WebSocketCommandError, ValueError) as exc:
+            return {"problems": str(exc)}
+        return {
+            "would_change": cast(
+                JsonValueType,
+                {
+                    "changes": result.changes,
+                    "untouched": "everything outside these pointers is saved "
+                    "exactly as read",
+                    "config_hash_before": dashboard_patch.config_hash(config),
+                    "config_hash_after": dashboard_patch.config_hash(result.config),
+                },
+            )
+        }
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Re-read the dashboard, check the hash, apply the ops and save."""
+        args = tool_input.tool_args
+        url_path = args.get("url_path")
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            _, result = await self._plan(hass, args, user)
+            response = await _save_dashboard(
+                hass,
+                user,
+                result.config,
+                url_path,
+                {"saved": True, "url_path": url_path},
+            )
+        except (
+            UnresolvedUserError,
+            YamlModeDashboardError,
+            WebSocketCommandError,
+            ValueError,
+        ) as exc:
+            return _tool_error(exc)
+        try:
+            # The hash of what HA now holds, for the next patch.
+            saved = await dashboard_manager.get_dashboard(hass, user, url_path=url_path)
+        except WebSocketCommandError:
+            saved = result.config
+        return {
+            **response,
+            "changes": cast(JsonValueType, result.changes),
+            dashboard_patch.HASH_KEY: dashboard_patch.config_hash(saved),
+        }
 
 
 class GetEnergyConfigTool(GatedTool):
@@ -4644,6 +4789,7 @@ class DevToolsAPI(llm.API):
                 ListDashboardsTool(),
                 GetDashboardTool(),
                 WriteDashboardTool(),
+                PatchDashboardTool(),
                 GetEnergyConfigTool(),
                 WriteEnergyConfigTool(),
                 ListRestCommandsTool(self.rest_command_manager),

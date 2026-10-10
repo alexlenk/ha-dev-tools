@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.0] - 2026-10-10
+
+### Added
+- **`patch_dashboard`** changes part of a dashboard without re-sending the whole config (issue #158). The tool takes a list of ops, applied in order to the config as it is now; everything they don't touch is saved exactly as read. Before, adding one section meant sending the full ~57 KB config twice (preview and confirm), embedded JavaScript included, where one escaping slip could silently break an unrelated card.
+  - **Ops:**
+    - `add_view` / `remove_view`;
+    - `add_section` / `replace_section` / `remove_section`;
+    - `add_card` / `replace_card` / `remove_card`, in a section or, for masonry/panel views, in the view's own cards;
+    - `set` a value at a JSON pointer, for small tweaks such as `days_to_show`.
+  - **Selectors:** a view is its index, its `path` or its `title`. A section is its index, its `title` or a heading card's text. A card is its index. A name matching more than one is refused.
+  - **Optimistic concurrency:** `expected_hash` is required, and is `get_dashboard`'s new `config_hash`. A dashboard changed since then is refused, at preview and again at write.
+  - **Preview and result:** the preview lists each touched node (JSON pointer, before, after) with the hashes before and after. The result carries the new `config_hash` for the next patch. The storage file is mirrored before and after, like `write_dashboard`.
+
+### Changed
+- `get_dashboard` also returns `config_hash` next to the config. `write_dashboard` drops that key if it's sent back with a config, so it never gets saved into the dashboard.
+
 ## [2.27.2] - 2026-10-10
 
 ### Added
