@@ -30,7 +30,9 @@ per hour, the first source that has it:
 
 Or `values`: the caller's own numbers, one per hour - and, for the part of
 the window the meter still has 5-minute rows for, one per 5-minute slot
-(12 per hour) - checked, never shaped: their sum must be the window total
+(12 per hour) - for one window, or each window's own for several (issue
+#159: one backup and one write for all, all or nothing) - checked, never
+shaped: their sum must be the window total
 (or within 2 % with `normalize`), none negative or non-finite, none
 above `max_per_hour`. References given with values only compare: their
 ratio and fit, and their hours next to the values', hour by hour.
@@ -46,6 +48,8 @@ each reference's total to the catch-up (a warning beyond ±15 %), a
 reference that looks like a flat estimate rather than a measurement, the
 fit of each reference to the meter on clean hours around the window,
 before/after by day and month, and which source shaped how many hours.
+With several windows each one's report is compact - no by_hour or by_day
+- unless `detail`.
 """
 
 from __future__ import annotations
@@ -54,7 +58,6 @@ import bisect
 import math
 import statistics as stats_lib
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, cast
 
 from homeassistant.components.recorder import statistics as recorder_statistics
@@ -451,7 +454,7 @@ async def plan_redistribute(
     hass: HomeAssistant,
     statistic_id: str,
     *,
-    windows: list[dict[str, datetime]] | None = None,
+    windows: list[dict[str, Any]] | None = None,
     detect: dict[str, Any] | None = None,
     detect_on: str | None = None,
     reference_ids: list[str] | None = None,
@@ -459,10 +462,13 @@ async def plan_redistribute(
     values: list[Any] | None = None,
     normalize: bool = False,
     max_per_hour: float | None = None,
+    detail: bool = False,
     can_back_up: bool,
     allow_no_backup: bool = False,
 ) -> RedistributePlan:
-    """Work out a redistribution without writing anything."""
+    """Work out a redistribution without writing anything. Values come as
+    `values` with exactly one window, or as each window's own `values` -
+    for every window or none (issue #159)."""
     component_id = detect_on or statistic_id
     reference_ids = list(dict.fromkeys(reference_ids or []))
     ids = list(dict.fromkeys([statistic_id, component_id, *reference_ids]))
@@ -470,9 +476,22 @@ async def plan_redistribute(
     problems = [sm._unknown(each) for each in ids if each not in metadata]
     if (windows is None) == (detect is None):
         problems.append("pass exactly one of windows or detect")
-    if values is not None and (windows is None or len(windows) != 1):
-        problems.append("values go with exactly one explicit window")
-    if values is not None and profile_weeks:
+    with_values = sum(1 for item in windows or [] if item.get("values") is not None)
+    if values is not None and with_values:
+        problems.append("pass values at the top or in each window, not both")
+    elif values is not None and (windows is None or len(windows) != 1):
+        problems.append(
+            "top-level values go with exactly one explicit window - for several, "
+            "give each window its own values"
+        )
+    elif with_values and with_values != len(windows or []):
+        problems.append(
+            f"{with_values} of {len(windows or [])} windows have values - give "
+            "values for every window, or for none"
+        )
+    if with_values and windows is not None and values is None and len(windows) == 1:
+        values = windows[0]["values"]
+    if (values is not None or with_values) and profile_weeks:
         problems.append("values replace the shape - no profile with them")
     if overlap := {statistic_id, component_id} & set(reference_ids):
         problems.append(
@@ -531,6 +550,8 @@ async def plan_redistribute(
     now = dt_util.utcnow().timestamp()
     current_hour = now - now % HOUR
     found: list[Window]
+    # Each window's own values, by its start.
+    window_values: dict[float, list[Any]] = {}
     if detect is not None:
         low = detect.get("start")
         high = detect.get("end")
@@ -571,6 +592,10 @@ async def plan_redistribute(
                 )
             else:
                 found.append(Window(start, catchup))
+                if item.get("values") is not None:
+                    window_values[start] = item["values"]
+                elif values is not None:
+                    window_values[start] = values
     found.sort(key=lambda window: window.start)
     for earlier, later in zip(found, found[1:]):
         if later.start <= earlier.catchup:
@@ -578,29 +603,44 @@ async def plan_redistribute(
                 f"windows overlap: {_iso(earlier.start)} -> {_iso(earlier.catchup)} "
                 f"and {_iso(later.start)} -> {_iso(later.catchup)}"
             )
+    checked = []
     for window in found:
-        problems += _check_window(target, window, f"'{statistic_id}'")
+        window_problems = _check_window(target, window, f"'{statistic_id}'")
         if component_id != statistic_id:
-            problems += _check_window(component, window, f"'{component_id}'")
-    if problems:
-        raise sm.StatisticsChangeRefusedError("; ".join(dict.fromkeys(problems)))
+            window_problems += _check_window(component, window, f"'{component_id}'")
+        problems += window_problems
+        if not window_problems:
+            checked.append(window)
 
+    # All or nothing: every window is worked out, and any window's problem
+    # refuses the whole call - all of them named at once.
     rows: list[dict[str, Any]] = []
     short_rows: list[dict[str, Any]] = []
     reports = []
-    for window in found:
-        report, window_rows, window_short = _redistribute(
-            inputs,
-            found,
-            window,
-            profile_weeks=profile_weeks,
-            values=values,
-            normalize=normalize,
-            max_per_hour=max_per_hour,
-        )
+    for window in checked:
+        try:
+            report, window_rows, window_short = _redistribute(
+                inputs,
+                found,
+                window,
+                profile_weeks=profile_weeks,
+                values=window_values.get(window.start),
+                normalize=normalize,
+                max_per_hour=max_per_hour,
+            )
+        except sm.StatisticsChangeRefusedError as exc:
+            problems.append(f"window {_iso(window.start)}: {exc}")
+            continue
         reports.append(report)
         rows += window_rows
         short_rows += window_short
+    if problems:
+        raise sm.StatisticsChangeRefusedError("; ".join(dict.fromkeys(problems)))
+    compact = len(reports) > 1 and not detail
+    if compact:
+        for report in reports:
+            for key in _DETAIL_KEYS:
+                report.pop(key, None)
 
     report_all: dict[str, Any] = {
         "statistic_id": statistic_id,
@@ -609,6 +649,11 @@ async def plan_redistribute(
         "rows_written": len(rows),
         "five_minute_rows_written": len(short_rows),
     }
+    if compact:
+        report_all["detail"] = (
+            f"compact - {len(reports)} windows; pass detail: true for "
+            "by_hour and by_day per window"
+        )
     if component_id != statistic_id:
         report_all["detect_on"] = component_id
     if derived := await _derived_from(hass, statistic_id):
@@ -624,6 +669,10 @@ async def plan_redistribute(
         short_term_rows=short_rows,
         report=report_all,
     )
+
+
+# Left out of each window's report when there are several (unless detail).
+_DETAIL_KEYS = ("by_hour", "reference_by_hour", "by_day")
 
 
 def _redistribute(

@@ -1932,14 +1932,19 @@ class RedistributeStatisticsTool(WriteGatedTool):
         "0. They must add up to the window total (normalize scales a miss "
         "within 2 %); none negative, none above max_per_hour; references "
         "given with values are only compared (ratio, fit, hour by hour next "
-        "to the values' before/after by_hour). 5-minute rows "
+        "to the values' before/after by_hour). For several windows, give "
+        "each its own: windows=[{start, catchup_hour, values}] - every window "
+        "or none; one backup and one write for all, and any window's problem "
+        "refuses the call, every failing window named. 5-minute rows "
         "inside the window are rewritten to match. Refused: a negative hour "
         "or a meter reset in a window, overlapping windows, an incomplete "
         "catch-up hour. The preview shows per window the moved amount, which "
         "source shaped how many hours, each reference's total vs the moved "
         "amount (warning beyond 15 %, or when it looks like a flat "
         "estimate), its fit to the meter on clean hours around the window, "
-        "before/after by day and month and the largest hour. Amounts are in "
+        "before/after by day and month and the largest hour - with several "
+        "windows compact (no by_hour/by_day; detail: true for them). "
+        "Amounts are in "
         "the statistic's unit. Backed up first, like merge_statistics; "
         "series derive_statistics built from it are named, to rerun."
     ) + _CONFIRM_TOKEN_NOTE
@@ -1947,7 +1952,15 @@ class RedistributeStatisticsTool(WriteGatedTool):
         {
             vol.Required("statistic_id"): str,
             vol.Optional("windows"): vol.All(
-                [{vol.Required("start"): str, vol.Required("catchup_hour"): str}],
+                [
+                    {
+                        vol.Required("start"): str,
+                        vol.Required("catchup_hour"): str,
+                        vol.Optional("values"): vol.All(
+                            [vol.Any(int, float, dict)], vol.Length(min=1)
+                        ),
+                    }
+                ],
                 vol.Length(min=1),
             ),
             vol.Optional("detect"): {
@@ -1968,6 +1981,7 @@ class RedistributeStatisticsTool(WriteGatedTool):
             vol.Optional("max_per_hour"): vol.All(
                 vol.Coerce(float), vol.Range(min=0, min_included=False)
             ),
+            vol.Optional("detail"): bool,
             vol.Optional("allow_no_backup"): bool,
         }
     )
@@ -1986,6 +2000,7 @@ class RedistributeStatisticsTool(WriteGatedTool):
                         "catchup_hour": _parse_datetime(
                             item["catchup_hour"], field="catchup_hour"
                         ),
+                        **({"values": item["values"]} if "values" in item else {}),
                     }
                     for item in args["windows"]
                 ]
@@ -2007,6 +2022,7 @@ class RedistributeStatisticsTool(WriteGatedTool):
             values=args.get("values"),
             normalize=bool(args.get("normalize")),
             max_per_hour=args.get("max_per_hour"),
+            detail=bool(args.get("detail")),
             can_back_up=mirror.is_mirror_enabled(hass),
             allow_no_backup=bool(args.get("allow_no_backup")),
         )
