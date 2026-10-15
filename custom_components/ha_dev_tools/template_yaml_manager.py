@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
@@ -167,6 +167,21 @@ def _block_key(block: Any, field: str) -> str | None:
     return next((name for name in BLOCK_FIELDS[field] if name in block), None)
 
 
+def _platform_entities(block: Any, platform: str) -> list[Any] | None:
+    """`block[platform]` as a list, or None. HA also takes the short form
+    - one mapping instead of a list of them (issue #163) - which comes back
+    as a one-item list: the mapping itself, so an in-place edit of it is an
+    edit of the document."""
+    value = block.get(platform) if isinstance(block, dict) else None
+    if isinstance(value, dict):
+        return [value]
+    return value if isinstance(value, list) else None
+
+
+def _is_short_form(block: Any, platform: str) -> bool:
+    return isinstance(block, dict) and isinstance(block.get(platform), dict)
+
+
 def block_members(block: Any) -> list[dict[str, Any]]:
     """Every entity a template block defines - all of them change when its
     triggers do."""
@@ -177,8 +192,7 @@ def block_members(block: Any) -> list[dict[str, Any]]:
             "name": entity.get("name"),
         }
         for platform in TEMPLATE_PLATFORMS
-        if isinstance(block.get(platform), list)
-        for entity in block[platform]
+        for entity in _platform_entities(block, platform) or []
         if isinstance(entity, dict)
     ]
 
@@ -403,8 +417,8 @@ class TemplateYamlManager:
                 if not isinstance(block, dict):
                     continue
                 for platform in TEMPLATE_PLATFORMS:
-                    entities = block.get(platform)
-                    if not isinstance(entities, list):
+                    entities = _platform_entities(block, platform)
+                    if entities is None:
                         continue
                     for entity_index, entity_conf in enumerate(entities):
                         if not isinstance(entity_conf, dict):
@@ -434,8 +448,8 @@ class TemplateYamlManager:
                 if not isinstance(block, dict):
                     continue
                 for platform in TEMPLATE_PLATFORMS:
-                    entities = block.get(platform)
-                    if not isinstance(entities, list):
+                    entities = _platform_entities(block, platform)
+                    if entities is None:
                         continue
                     for entity_index, entity_conf in enumerate(entities):
                         if (
@@ -476,9 +490,10 @@ class TemplateYamlManager:
         location = await self.find_entity(unique_id)
         document = await self._load_document(location.file_path)
         blocks = self._template_blocks(document)
-        entity_conf = blocks[location.block_index][location.platform][
-            location.entity_index
-        ]
+        entity_conf = cast(
+            list[Any],
+            _platform_entities(blocks[location.block_index], location.platform),
+        )[location.entity_index]
         return location, to_json_safe(dict(entity_conf))
 
     async def create_entity(
@@ -773,11 +788,16 @@ class TemplateYamlManager:
         """
         yaml = _new_yaml()
         blocks = self._template_blocks(document)
-        entities = blocks[location.block_index][location.platform]
+        owner = blocks[location.block_index]
+        entities = cast(list[Any], _platform_entities(owner, location.platform))
         index = location.entity_index
+        # The short form (one mapping, issue #163) stays a mapping.
+        short = _is_short_form(owner, location.platform)
+        container: Any = owner if short else entities
+        key: Any = location.platform if short else index
 
         def _replace() -> None:
-            entities[index] = merge_preserving_style(entities[index], config)
+            container[key] = merge_preserving_style(container[key], config)
 
         def _patch_block() -> None:
             current = blocks[location.block_index]
@@ -804,9 +824,7 @@ class TemplateYamlManager:
                 original, blocks, location.block_index, "replace", yaml, _patch_block
             )
         else:
-            spliced = surgical_edit(
-                original, entities, index, "replace", yaml, _replace
-            )
+            spliced = surgical_edit(original, container, key, "replace", yaml, _replace)
 
         from io import StringIO
 
@@ -875,7 +893,7 @@ class TemplateYamlManager:
         (find_entity already made sure it's there exactly once)."""
         for block_index, block in enumerate(self._template_blocks(document)):
             for platform in TEMPLATE_PLATFORMS:
-                entities = block.get(platform) if isinstance(block, dict) else None
+                entities = _platform_entities(block, platform)
                 for entity_index, conf in enumerate(entities or []):
                     if isinstance(conf, dict) and conf.get("unique_id") == unique_id:
                         return TemplateEntityLocation(
@@ -972,7 +990,9 @@ class TemplateYamlManager:
         yaml = _new_yaml()
         blocks = self._template_blocks(document)
         block = blocks[location.block_index]
-        entities = block[location.platform]
+        # A short-form entity (issue #163) is the only one under its key:
+        # removing it removes the key, or the block, as for a list of one.
+        entities = cast(list[Any], _platform_entities(block, location.platform))
 
         def _delete() -> None:
             del entities[location.entity_index]
