@@ -32,12 +32,16 @@ def _b64(text: str) -> str:
 class _FakeResponse:
     """Stands in for aiohttp.ClientResponse - just enough of its API for mirror.py."""
 
-    def __init__(self, status: int, payload: object = None):
+    def __init__(self, status: int, payload: object = None, text: str = ""):
         self.status = status
         self._payload = payload
+        self._text = text
 
     async def json(self):
         return self._payload
+
+    async def text(self):
+        return self._text
 
     def raise_for_status(self):
         if self.status >= 400:
@@ -774,3 +778,56 @@ async def test_credential_scans_run_off_the_event_loop(
         )
     assert len(threads) == 2
     assert loop_thread not in threads
+
+
+# --- files over 1 MB (issue #169) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_file_over_1_mb_is_read_through_the_raw_media_type(
+    hass: HomeAssistant, mirror_entry
+):
+    """GitHub's JSON response for a 1-100 MB file has its sha but an empty
+    content with encoding "none" - read as that, it was an empty file."""
+    big = "x" * (1024 * 1024 + 1)
+    session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "main"}),
+            _FakeResponse(200, {"content": "", "encoding": "none", "sha": "big-sha"}),
+            _FakeResponse(200, text=big),
+        ]
+    )
+    with _patched(session):
+        content = await mirror.read_mirrored(hass, "packages/big.yaml")
+    assert content == big
+    raw_call = session.calls[2]
+    assert raw_call[0] == "GET"
+    assert raw_call[2]["headers"]["Accept"] == "application/vnd.github.raw+json"
+    assert raw_call[2]["params"] == {"ref": "main"}
+
+
+@pytest.mark.asyncio
+async def test_a_write_over_a_big_mirrored_file_compares_its_real_content(
+    hass: HomeAssistant, mirror_entry
+):
+    """mirror_write's before-sync read the big file as "" and so pushed a
+    spurious before-commit every time; with its real content it doesn't."""
+    big = "y" * (1024 * 1024 + 1)
+    session = FakeSession(
+        [
+            _FakeResponse(200, {"default_branch": "main"}),
+            _FakeResponse(200, {"content": "", "encoding": "none", "sha": "big-sha"}),
+            _FakeResponse(200, text=big),
+            _FakeResponse(200, {"content": {"sha": "after-sha"}}),
+        ]
+    )
+    with _patched(session):
+        result = await mirror.mirror_write(
+            hass,
+            path="packages/big.yaml",
+            content_before=big,
+            content_after=big + "z",
+        )
+    assert result.mirrored is True
+    assert result.commits == ("after",)
+    assert session.calls[3][2]["json"]["sha"] == "big-sha"

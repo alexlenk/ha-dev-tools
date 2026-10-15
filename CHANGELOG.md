@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.3] - 2026-10-15
+
+### Fixed
+- **Mirrored files over 1 MB are read with their real content** (issue #169). For a file between 1 and 100 MB, GitHub's contents API returns the sha but an empty `content` (`encoding: "none"`). The mirror decoded that as an empty file. The before-sync of a write then compared against `""` and pushed a needless "before" commit every time, and a snapshot read, `read_mirrored`, returned an empty file. Large storage files like `.storage/core.entity_registry` were affected. Such a file is now fetched again with the raw media type, which works up to 100 MB. Smaller files are read as before, with a single request.
+
 ## [2.28.2] - 2026-10-15
 
 ### Fixed
