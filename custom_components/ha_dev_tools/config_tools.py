@@ -37,6 +37,9 @@ try:  # HA 2026.10 validates with probatio, whose Invalid isn't voluptuous'.
     from probatio.humanize import humanize_error as probatio_humanize_error
 except ImportError:  # pragma: no cover - older HA, voluptuous only
     probatio = None  # type: ignore[assignment]
+_INVALID: tuple[type[Exception], ...] = (voluptuous.Invalid,) + (
+    (probatio.Invalid,) if probatio is not None else ()
+)
 
 # Domains whose "failed to set up" repairs mean a config item HA refused to
 # load - automation/script create them as `validation_failed_<part>` with
@@ -267,12 +270,13 @@ async def validation_error(
             await validate_automation(hass, domain, {**config, "id": str(item_id)})
         else:
             await validate_script(hass, str(item_id), dict(config))
-    except voluptuous.Invalid as err:
-        return humanize_error(config, err)
+    except _INVALID as err:
+        humanize: Any = (
+            probatio_humanize_error
+            if probatio is not None and isinstance(err, probatio.Invalid)
+            else humanize_error
+        )
+        return str(humanize(config, err))
     except HomeAssistantError as err:
         return str(err)
-    except Exception as err:
-        if probatio is not None and isinstance(err, probatio.Invalid):
-            return probatio_humanize_error(config, err)
-        raise
     return None
