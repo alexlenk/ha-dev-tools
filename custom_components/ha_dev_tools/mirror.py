@@ -129,6 +129,14 @@ async def _get_current(
             return None
         resp.raise_for_status()
         body = await resp.json()
+    if body.get("encoding") == "none":
+        # A file over 1 MB: the JSON response has its sha but not its
+        # content (an empty string, encoding "none" - issue #169); only the
+        # raw media type returns it, up to 100 MB.
+        raw = {**_headers(hass), "Accept": "application/vnd.github.raw+json"}
+        async with session.get(url, headers=raw, params={"ref": branch}) as resp:
+            resp.raise_for_status()
+            return await resp.text(), body["sha"]
     content = base64.b64decode(body["content"]).decode("utf-8")
     return content, body["sha"]
 
