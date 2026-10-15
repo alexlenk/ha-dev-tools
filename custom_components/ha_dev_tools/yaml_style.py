@@ -58,11 +58,18 @@ def quote_ambiguous_scalars(value: Any) -> Any:
     list/str from a tool call), never to values already loaded from the
     file - those already round-trip with whatever quote style they were
     written with (merge_preserving_style handles the one exception).
+    A `!secret name` / `!env_var NAME` string becomes that tag
+    (tag_references).
     """
     if isinstance(value, dict):
         return {k: quote_ambiguous_scalars(v) for k, v in value.items()}
     if isinstance(value, list):
         return [quote_ambiguous_scalars(v) for v in value]
+    if isinstance(value, str) and _TAG_REFERENCE.fullmatch(value):
+        # `!secret name` as a tool call (and to_json_safe) spells it: the
+        # tag it stands for, not a quoted string HA would take literally
+        # (issue #176).
+        return tag_references(value)
     if isinstance(value, str) and pyyaml_misreads(value):
         return DoubleQuotedScalarString(value)
     return value

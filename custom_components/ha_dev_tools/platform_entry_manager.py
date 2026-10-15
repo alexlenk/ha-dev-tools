@@ -37,7 +37,6 @@ from .yaml_style import (
     quote_ambiguous_scalars,
     spliced_or_full,
     surgical_edit,
-    tag_references,
     to_json_safe,
 )
 
@@ -342,7 +341,7 @@ class PlatformEntryManager:
             raise PlatformEntryError(
                 f"package file '{file_path}' doesn't exist - create it first"
             ) from None
-        prepared = tag_references(quote_ambiguous_scalars(dict(config)))
+        prepared = quote_ambiguous_scalars(dict(config))
         after = await self.hass.async_add_executor_job(
             self._build, content, domain, location, prepared
         )
