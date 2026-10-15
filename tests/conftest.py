@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
+from hypothesis import settings
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_dev_tools.const import DOMAIN
@@ -16,6 +17,13 @@ from custom_components.ha_dev_tools.const import DOMAIN
 # This fixture is automatically provided by pytest-homeassistant-custom-component
 # It creates a fully functional Home Assistant instance for testing
 pytest_plugins = "pytest_homeassistant_custom_component"
+
+# No per-example deadline for the property tests (issue #160): hypothesis'
+# default 200 ms failed them as "flaky" on a busy machine or CI runner,
+# though the code under test was fine. Examples and assertions are
+# unchanged; a test's own @settings(deadline=...) still wins.
+settings.register_profile("ha_dev_tools", deadline=None)
+settings.load_profile("ha_dev_tools")
 
 
 # Override the verify_cleanup fixture to disable the overly strict thread check
