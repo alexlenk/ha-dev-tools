@@ -53,8 +53,10 @@ from . import (
     mirror,
     mirror_secrets,
     mqtt_manager,
+    platform_entry_manager,
     references,
     registry_manager,
+    rest_command_write,
     service_call_manager,
     statistics_backup,
     statistics_derive,
@@ -4858,8 +4860,9 @@ class GetRestCommandTool(GatedTool):
         "(configuration.yaml or a packages/*.yaml file) - a plain file "
         "read can silently miss package-defined rest_commands. Fails "
         "clearly if the id isn't found or is defined in more than one "
-        "file, rather than guessing. Read-only - no write_rest_command "
-        "yet. Pass domain='shell_command' to read a shell_command entry "
+        "file, rather than guessing. Written with write_rest_command / "
+        "delete_rest_command. Pass domain='shell_command' to read a "
+        "shell_command entry "
         "by id instead (its config is the command string itself) - also "
         "read-only, deliberately: shell_command runs raw shell commands."
     )
@@ -4898,6 +4901,526 @@ class GetRestCommandTool(GatedTool):
         }
 
 
+# --- package platform entries (issue #164) and rest_command writes (#168) ----
+
+# Platforms that run shell commands - shell_command's own class of risk,
+# kept read-only on purpose (see rest_command_manager.py).
+_SHELL_PLATFORMS = {"command_line", "shell_command"}
+# A `rest` platform entry sends requests like a rest_command - the same
+# egress rules (#168's decisions) apply to its resource.
+_REST_PLATFORMS = {"rest"}
+
+_ENTRY_SELECTOR = vol.Schema(
+    {
+        vol.Required("domain"): str,
+        vol.Required("platform"): str,
+        vol.Optional("unique_id"): str,
+        vol.Optional("name"): str,
+        vol.Optional("file"): str,
+    }
+)
+
+
+def _entry_entity_id(
+    hass: HomeAssistant, domain: str, platform: str, unique_id: Any, name: Any
+) -> str | None:
+    """The live entity a platform entry created, if it can be told."""
+    if unique_id is not None:
+        return er.async_get(hass).async_get_entity_id(domain, platform, str(unique_id))
+    from homeassistant.util import slugify
+
+    # Every entry has a unique_id or a name (platform_entry_manager).
+    entity_id = f"{domain}.{slugify(str(name))}"
+    return entity_id if hass.states.get(entity_id) is not None else None
+
+
+async def _entry_references(
+    hass: HomeAssistant, llm_context: llm.LLMContext, entity_id: str | None
+) -> JsonValueType:
+    if entity_id is None:
+        return None
+    try:
+        user = await helper_manager.resolve_user(hass, llm_context)
+        found = await references.find_references(hass, user, entity_id)
+    except UnresolvedUserError:
+        return None
+    except WebSocketCommandError as exc:
+        # The preview still stands - it just can't list them.
+        return {"entity_id": entity_id, "error": str(exc)}
+    return cast(JsonValueType, {"entity_id": entity_id, **found})
+
+
+async def _egress_problems(
+    writer: rest_command_write.RestCommandWriter,
+    url: Any,
+    *,
+    old_url: Any = None,
+    allow_new_host: bool,
+) -> tuple[list[str], dict[str, Any]]:
+    """#168's host rules for a URL a write would send requests to."""
+    try:
+        host = rest_command_write.target_host(url)
+    except rest_command_write.RestCommandWriteError as err:
+        return [str(err)], {}
+    try:
+        old_host = rest_command_write.target_host(old_url) if old_url else None
+    except rest_command_write.RestCommandWriteError:
+        old_host = None
+    known = await writer._known_hosts()
+    new = host not in known and host != old_host
+    report = {
+        "host": host,
+        "host_class": rest_command_write.host_class(host),
+        "new_host": new,
+    }
+    if new and not allow_new_host:
+        return [
+            f"'{host}' ({report['host_class']}) is a host no rest_command uses "
+            "yet - pass allow_new_host to send requests there"
+        ], report
+    return [], report
+
+
+class ListPackagePlatformEntitiesTool(GatedTool):
+    """List YAML platform entries in packages - see platform_entry_manager.py."""
+
+    name = "list_package_platform_entities"
+    description = (
+        "List the YAML platform entries in packages/*.yaml - every top-level "
+        "<domain>: list of platform: entries (sensor: - platform: statistics, "
+        "binary_sensor:, switch:, ...), with file, domain, index, platform, "
+        "unique_id, name and config (literal credentials withheld). Filter "
+        "by domain and/or platform. configuration.yaml isn't listed - it "
+        "stays read-only."
+    )
+    parameters = vol.Schema(
+        {vol.Optional("domain"): str, vol.Optional("platform"): str}
+    )
+
+    def __init__(self, manager: platform_entry_manager.PlatformEntryManager) -> None:
+        self._manager = manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        args = tool_input.tool_args
+        entries = await self._manager.list_entries(
+            domain=args.get("domain"), platform=args.get("platform")
+        )
+        for entry in entries:
+            entry["config"] = mirror_secrets.mask_credentials(entry["config"])
+        return {"entries": cast(JsonValueType, entries)}
+
+
+class WritePackagePlatformEntityTool(WriteGatedTool):
+    """Create or replace a YAML platform entry in a package."""
+
+    name = "write_package_platform_entity"
+    description = (
+        "Create or replace one YAML platform entry in a package: config is "
+        "the entry (with platform, and a unique_id or else a name to find it "
+        "by). An entry of this domain + platform with the same unique_id - or "
+        "the same name, for one without - is replaced in its own file; "
+        "otherwise the config is a new entry in package (an existing "
+        "packages/ file). More than one match is refused; file narrows it. "
+        "The config is checked against the platform's own PLATFORM_SCHEMA "
+        "first. Refused: literal credentials (use !secret), command_line / "
+        "shell_command platforms (shell execution, read-only by design), "
+        "and for a rest platform a templated host, a new host unless "
+        "allow_new_host, verify_ssl: false unless allow_insecure_tls. The "
+        "preview shows the entry before and after and every reference to "
+        "its entity; the result says whether a reload took it in or a "
+        "restart is needed."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("domain"): str,
+            vol.Required("config"): dict,
+            vol.Optional("package"): str,
+            vol.Optional("file"): str,
+            vol.Optional("allow_new_host"): bool,
+            vol.Optional("allow_insecure_tls"): bool,
+        }
+    )
+
+    def __init__(
+        self,
+        manager: platform_entry_manager.PlatformEntryManager,
+        writer: rest_command_write.RestCommandWriter,
+    ) -> None:
+        self._manager = manager
+        self._writer = writer
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> tuple[dict[str, Any], Any, str, str, str]:
+        domain, config = args["domain"], dict(args["config"])
+        platform = str(config.get("platform", ""))
+        problems: list[str] = []
+        if platform in _SHELL_PLATFORMS:
+            raise platform_entry_manager.PlatformEntryError(
+                f"'{platform}' runs shell commands on the host - read-only by "
+                "design, like shell_command"
+            )
+        if error := await platform_entry_manager.validation_error(hass, domain, config):
+            problems.append(error)
+        if credentials := mirror_secrets.literal_credentials(to_json_safe(config)):
+            problems.append(
+                f"literal credential(s) at {', '.join(credentials)} - use "
+                "'!secret <name>' instead"
+            )
+        if problems:
+            raise platform_entry_manager.PlatformEntryError("; ".join(problems))
+        location, file_path, before, after = await self._manager.plan_write(
+            domain, config, package=args.get("package"), file=args.get("file")
+        )
+        old = await self._manager.get_entry(location) if location else None
+        report: dict[str, Any] = {
+            "domain": domain,
+            "platform": platform,
+            "file_path": file_path,
+            "action": "replace" if location else "create",
+            "before": (
+                mirror_secrets.mask_credentials(to_json_safe(old))
+                if old is not None
+                else None
+            ),
+            "after": mirror_secrets.mask_credentials(to_json_safe(config)),
+        }
+        if platform in _REST_PLATFORMS:
+            url = config.get("resource_template") or config.get("resource")
+            egress, host = await _egress_problems(
+                self._writer,
+                url,
+                old_url=(old or {}).get("resource"),
+                allow_new_host=bool(args.get("allow_new_host")),
+            )
+            report.update(host)
+            if rest_command_write._insecure(config) and not (
+                old is not None and rest_command_write._insecure(old)
+            ):
+                if not args.get("allow_insecure_tls"):
+                    egress.append(
+                        "verify_ssl: false turns off certificate checks - pass "
+                        "allow_insecure_tls if that's intended"
+                    )
+            if egress:
+                raise platform_entry_manager.PlatformEntryError("; ".join(egress))
+        return report, location, file_path, before, after
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        args = tool_input.tool_args
+        try:
+            report, location, *_ = await self._plan(hass, args)
+        except ValueError as exc:
+            return {"problems": str(exc)}
+        config = args["config"]
+        report["references"] = await _entry_references(
+            hass,
+            llm_context,
+            (
+                _entry_entity_id(
+                    hass,
+                    args["domain"],
+                    str(config.get("platform")),
+                    config.get("unique_id"),
+                    config.get("name"),
+                )
+                if location
+                else None
+            ),
+        )
+        return {"would_write": cast(JsonValueType, report)}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        args = tool_input.tool_args
+        try:
+            report, _, file_path, before, after = await self._plan(hass, args)
+            await self._manager.write_file(file_path, after)
+        except (ValueError, OSError, RuntimeError) as exc:
+            return _tool_error(exc)
+        report["reload"] = await self._manager.reload(report["platform"])
+        return await _mirror_file_write(
+            hass,
+            {"written": cast(JsonValueType, report)},
+            file_path=file_path,
+            content_before=before,
+            content_after=after,
+        )
+
+
+class DeletePackagePlatformEntitiesTool(WriteGatedTool):
+    """Delete YAML platform entries in packages."""
+
+    name = "delete_package_platform_entities"
+    description = (
+        "Delete YAML platform entries in packages: entries, a list of "
+        "{domain, platform, unique_id or name, file?} - each must match "
+        "exactly one entry, or nothing is deleted. Each file is written "
+        "once; a domain key left empty is removed. The preview shows every "
+        "entry and every reference to its entity; the result says whether "
+        "a reload took the change in or a restart is needed."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {vol.Required("entries"): vol.All([_ENTRY_SELECTOR], vol.Length(min=1))}
+    )
+
+    def __init__(self, manager: platform_entry_manager.PlatformEntryManager) -> None:
+        self._manager = manager
+
+    async def _locations(
+        self, args: dict[str, Any]
+    ) -> list[platform_entry_manager.EntryLocation]:
+        locations = []
+        for selector in args["entries"]:
+            locations.append(
+                await self._manager.resolve(
+                    selector["domain"],
+                    selector["platform"],
+                    unique_id=selector.get("unique_id"),
+                    name=selector.get("name"),
+                    file=selector.get("file"),
+                )
+            )
+        if len(set(locations)) != len(locations):
+            raise platform_entry_manager.PlatformEntryError(
+                "the same entry is listed twice"
+            )
+        return locations
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        try:
+            locations = await self._locations(tool_input.tool_args)
+        except ValueError as exc:
+            return {"problems": str(exc)}
+        entries = []
+        for location in locations:
+            config = await self._manager.get_entry(location)
+            entries.append(
+                {
+                    "file_path": location.file_path,
+                    "domain": location.domain,
+                    "index": location.index,
+                    "config": mirror_secrets.mask_credentials(to_json_safe(config)),
+                    "references": await _entry_references(
+                        hass,
+                        llm_context,
+                        _entry_entity_id(
+                            hass,
+                            location.domain,
+                            location.platform,
+                            location.unique_id,
+                            location.name,
+                        ),
+                    ),
+                }
+            )
+        return {"would_delete": cast(JsonValueType, entries)}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        try:
+            locations = await self._locations(tool_input.tool_args)
+            planned = await self._manager.plan_delete(locations)
+        except ValueError as exc:
+            return _tool_error(exc)
+        results = []
+        for file_path, entries, before, after in planned:
+            try:
+                await self._manager.write_file(file_path, after)
+            except (ValueError, OSError, RuntimeError) as exc:
+                return _tool_error(exc)
+            results.append(
+                await _mirror_file_write(
+                    hass,
+                    {"file_path": file_path, "deleted": len(entries)},
+                    file_path=file_path,
+                    content_before=before,
+                    content_after=after,
+                )
+            )
+        reloads = {
+            platform: await self._manager.reload(platform)
+            for platform in sorted({location.platform for location in locations})
+        }
+        return {
+            "deleted": cast(JsonValueType, results),
+            "reload": cast(JsonValueType, reloads),
+        }
+
+
+class WriteRestCommandTool(WriteGatedTool):
+    """Create or replace a rest_command in a package - see rest_command_write.py."""
+
+    name = "write_rest_command"
+    description = (
+        "Create or replace one rest_command entry (url, method, headers, "
+        "payload, ...) by id in a packages/*.yaml file - an existing id is "
+        "replaced where it's defined, a new one goes into package. Writes "
+        "config only; running it still takes an automation or script. "
+        "Refused: a templated scheme or host in url (templates only in the "
+        "path, query, payload, headers), a host no rest_command uses yet "
+        "unless allow_new_host (the preview says if it's a LAN or public "
+        "address), literal credentials (headers like Authorization, "
+        "username, password, a password in the URL - use !secret), "
+        "verify_ssl: false unless allow_insecure_tls, and an entry in "
+        "configuration.yaml (read-only). The preview shows the entry "
+        "before/after (credentials withheld), method, timeout, host and "
+        "every automation/script calling it. Reloads rest_command after."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("rest_command_id"): str,
+            vol.Required("config"): dict,
+            vol.Optional("package"): str,
+            vol.Optional("allow_new_host"): bool,
+            vol.Optional("allow_insecure_tls"): bool,
+        }
+    )
+
+    def __init__(self, writer: rest_command_write.RestCommandWriter) -> None:
+        self._writer = writer
+
+    async def _plan(self, args: dict[str, Any]) -> rest_command_write.RestCommandPlan:
+        return await self._writer.plan_write(
+            args["rest_command_id"],
+            dict(args["config"]),
+            package=args.get("package"),
+            allow_new_host=bool(args.get("allow_new_host")),
+            allow_insecure_tls=bool(args.get("allow_insecure_tls")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        try:
+            plan = await self._plan(tool_input.tool_args)
+        except (ValueError, DuplicateRestCommandIdError) as exc:
+            return {"problems": str(exc)}
+        report = dict(plan.report)
+        report["references"] = await _entry_references(
+            hass, llm_context, f"rest_command.{plan.rest_command_id}"
+        )
+        return {"would_write": cast(JsonValueType, report)}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        try:
+            plan = await self._plan(tool_input.tool_args)
+            reload = await self._writer.write(plan)
+        except (ValueError, DuplicateRestCommandIdError, OSError, RuntimeError) as exc:
+            return _tool_error(exc)
+        return await _mirror_file_write(
+            hass,
+            {"written": cast(JsonValueType, {**plan.report, "reload": reload})},
+            file_path=plan.file_path,
+            content_before=plan.content_before,
+            content_after=plan.content_after,
+        )
+
+
+class DeleteRestCommandTool(WriteGatedTool):
+    """Delete a rest_command from a package."""
+
+    name = "delete_rest_command"
+    description = (
+        "Delete one rest_command entry by id from the packages/*.yaml file "
+        "that defines it (not from configuration.yaml, read-only). The "
+        "preview shows the entry (credentials withheld) and every "
+        "automation/script still calling it. Reloads rest_command after."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema({vol.Required("rest_command_id"): str})
+
+    def __init__(self, writer: rest_command_write.RestCommandWriter) -> None:
+        self._writer = writer
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        rest_command_id = tool_input.tool_args["rest_command_id"]
+        try:
+            plan = await self._writer.plan_delete(rest_command_id)
+        except (
+            ValueError,
+            RestCommandNotFoundError,
+            DuplicateRestCommandIdError,
+        ) as exc:
+            return {"problems": str(exc)}
+        report = dict(plan.report)
+        report["references"] = await _entry_references(
+            hass, llm_context, f"rest_command.{rest_command_id}"
+        )
+        return {"would_delete": cast(JsonValueType, report)}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        try:
+            plan = await self._writer.plan_delete(
+                tool_input.tool_args["rest_command_id"]
+            )
+            reload = await self._writer.write(plan)
+        except (
+            ValueError,
+            RestCommandNotFoundError,
+            DuplicateRestCommandIdError,
+            OSError,
+            RuntimeError,
+        ) as exc:
+            return _tool_error(exc)
+        return await _mirror_file_write(
+            hass,
+            {"deleted": cast(JsonValueType, {**plan.report, "reload": reload})},
+            file_path=plan.file_path,
+            content_before=plan.content_before,
+            content_after=plan.content_after,
+        )
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
@@ -4913,6 +5436,12 @@ class DevToolsAPI(llm.API):
         self, llm_context: llm.LLMContext
     ) -> llm.APIInstance:
         """Return the instance of the API."""
+        writer = rest_command_write.RestCommandWriter(
+            self.hass, self.rest_command_manager
+        )
+        platforms = platform_entry_manager.PlatformEntryManager(
+            self.hass, self.rest_command_manager.file_manager
+        )
         return llm.APIInstance(
             self,
             API_PROMPT,
@@ -4979,6 +5508,11 @@ class DevToolsAPI(llm.API):
                 WriteEnergyConfigTool(),
                 ListRestCommandsTool(self.rest_command_manager),
                 GetRestCommandTool(self.rest_command_manager),
+                WriteRestCommandTool(writer),
+                DeleteRestCommandTool(writer),
+                ListPackagePlatformEntitiesTool(platforms),
+                WritePackagePlatformEntityTool(platforms, writer),
+                DeletePackagePlatformEntitiesTool(platforms),
             ],
         )
 

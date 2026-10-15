@@ -37,7 +37,7 @@ try:  # HA 2026.10 validates with probatio, whose Invalid isn't voluptuous'.
     from probatio.humanize import humanize_error as probatio_humanize_error
 except ImportError:  # pragma: no cover - older HA, voluptuous only
     probatio = None  # type: ignore[assignment]
-_INVALID: tuple[type[Exception], ...] = (voluptuous.Invalid,) + (
+INVALID: tuple[type[Exception], ...] = (voluptuous.Invalid,) + (
     (probatio.Invalid,) if probatio is not None else ()
 )
 
@@ -270,13 +270,19 @@ async def validation_error(
             await validate_automation(hass, domain, {**config, "id": str(item_id)})
         else:
             await validate_script(hass, str(item_id), dict(config))
-    except _INVALID as err:
-        humanize: Any = (
-            probatio_humanize_error
-            if probatio is not None and isinstance(err, probatio.Invalid)
-            else humanize_error
-        )
-        return str(humanize(config, err))
+    except INVALID as err:
+        return humanize_invalid(config, err)
     except HomeAssistantError as err:
         return str(err)
     return None
+
+
+def humanize_invalid(config: Any, err: Exception) -> str:
+    """HA's own text for a validation error - voluptuous' or, on HA
+    2026.10, probatio's."""
+    humanize: Any = (
+        probatio_humanize_error
+        if probatio is not None and isinstance(err, probatio.Invalid)
+        else humanize_error
+    )
+    return str(humanize(config, err))

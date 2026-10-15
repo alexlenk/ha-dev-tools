@@ -200,3 +200,30 @@ def mask_credentials(node: Any) -> Any:
         node = _URL_USERINFO.sub(f"://{WITHHELD}@", node)
         return _BEARER.sub(f"Bearer {WITHHELD}", node)
     return node
+
+
+def literal_credentials(node: Any, path: str = "") -> list[str]:
+    """Where a JSON-safe config holds a literal credential - for a write
+    that refuses one (issue #168): a credential-shaped key's value that
+    isn't a `!secret`/`!env_var` reference, `username` included, and a
+    password in a URL or a bearer token inside any string. Paths only,
+    never the values."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = f"{path}.{key}" if path else str(key)
+            if (
+                (_is_sensitive_key(key) or str(key).lower() == "username")
+                and isinstance(value, str | int | float)
+                and not isinstance(value, bool)
+                and not str(value).startswith(("!secret ", "!env_var "))
+            ):
+                found.append(child)
+            else:
+                found += literal_credentials(value, child)
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found += literal_credentials(item, f"{path}[{index}]")
+    elif isinstance(node, str) and (_URL_USERINFO.search(node) or _BEARER.search(node)):
+        found.append(path)
+    return found

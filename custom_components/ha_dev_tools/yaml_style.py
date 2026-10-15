@@ -19,11 +19,12 @@ form, for the audit tools (issue #96).
 from __future__ import annotations
 
 import math
+import re
 from io import StringIO
 from typing import Any, cast
 
 import yaml
-from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from ruamel.yaml.comments import CommentedMap, CommentedSeq, TaggedScalar
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 from yaml.nodes import ScalarNode
 from yaml.resolver import Resolver as PyYamlResolver
@@ -64,6 +65,23 @@ def quote_ambiguous_scalars(value: Any) -> Any:
         return [quote_ambiguous_scalars(v) for v in value]
     if isinstance(value, str) and pyyaml_misreads(value):
         return DoubleQuotedScalarString(value)
+    return value
+
+
+_TAG_REFERENCE = re.compile(r"!(secret|env_var) (\S+)")
+
+
+def tag_references(value: Any) -> Any:
+    """Recursively turn `!secret name` / `!env_var NAME` strings - how a
+    JSON tool call writes them, and how to_json_safe reads them - into the
+    YAML tags they stand for. Dumped as a plain string they'd be quoted, and
+    HA would take the literal text as the value."""
+    if isinstance(value, dict):
+        return {key: tag_references(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [tag_references(item) for item in value]
+    if isinstance(value, str) and (match := _TAG_REFERENCE.fullmatch(value)):
+        return TaggedScalar(value=match.group(2), tag=f"!{match.group(1)}")
     return value
 
 
