@@ -1310,8 +1310,11 @@ async def test_write_tools_return_setup_error_from_reload(
         admin_user,
         {
             "automation_id": "fault_detection",
+            # A valid config: one HA's validation refuses doesn't get
+            # this far any more (issue #165) - the repair after the reload
+            # is simulated, and setup_error still reports it.
             "config": {
-                "triggers": [{"trigger": "time_pattern", "minutes": "2,17,32,47"}],
+                "triggers": [{"trigger": "time_pattern", "minutes": "/15"}],
                 "actions": [],
             },
         },
