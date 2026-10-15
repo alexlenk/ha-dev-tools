@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.29.0] - 2026-10-15
+
+### Added
+- **`write_statistics`** writes hourly statistic values that no other statistic has (issue #166): base-fee histories, consumption built from invoice readings, a modelled price, single-hour corrections. `derive_statistics`, `merge_statistics` and `redistribute_statistics` can only scale, combine or move values that already exist.
+  - **Import**, from rows inline or from `file`, a JSON (a list, or `{rows: [...]}`) or CSV file in the mirror repo. Large files are read in full (#169).
+    - **A meter or cost** (`kind: sum`) takes each hour's **change**, `{start, change}`. Inside `start..end` (by default the rows' first to last hour), the rows replace what is there. An existing hour without a row counts 0, and the preview says so as `hours_set_to_zero`. After `end`, every row keeps its own change and the sums carry on seamlessly, the 5-minute rows included, so a live entity goes on recording from the new sum (`next_compile` checks it).
+    - **A measurement** (`kind: mean`, e.g. a price) takes `{start, mean, min?, max?}`. An existing hour in the range must be given too, or the import is refused.
+    - **A new statistic** can be created under `ha_dev_tools:`, with `kind`, `unit` and an optional `name`.
+  - **Adjust:** `[{start, change}]` sets single hours of a meter, and every later sum moves by the difference. The hours in between keep their own changes, and their 5-minute shape.
+  - **5-minute rows** in the range (the recorder keeps ~10 days) are rewritten too: each hour split evenly over its 12, or by the row's own `five_minute` values (12, adding up to the hour's change).
+  - **The seam after the range** uses this integration's own sum adjustment: hourly and 5-minute rows in one transaction, retried on lock errors. HA's `adjust_statistics`, which can commit half an adjustment on MySQL/MariaDB (#150), is never used. The import and then the adjustment are each checked against the recorder before the next step runs.
+  - **Refused:** a meter hour going down unless `allow_negative`, an hour that isn't complete yet, a time not on the hour, and a duplicate or malformed row. Every problem is listed, and nothing is written while there is one.
+  - **The preview** shows the rows written, the totals before and after with each month's difference, the largest hour before and after, the seams at start and end (the sum before, and the offset from `end` on), and the 5-minute rows rewritten.
+  - An existing statistic is backed up first, as `merge_statistics` does.
+
 ## [2.28.4] - 2026-10-15
 
 ### Fixed

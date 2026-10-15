@@ -19,6 +19,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, cast, override
 
+import aiohttp
+
 try:
     # HA 2026.9+ validates with probatio and types its schemas (llm.Tool's
     # parameters, a flow's data_schema) as probatio's - the voluptuous it
@@ -59,6 +61,7 @@ from . import (
     statistics_manager,
     statistics_merge,
     statistics_redistribute,
+    statistics_write,
     supervisor_manager,
     template_manager,
     trace_manager,
@@ -1931,6 +1934,130 @@ class DeriveStatisticsTool(WriteGatedTool):
 
 def _time_or_none(args: dict[str, Any], field: str) -> Any:
     return _parse_datetime(args[field], field=field) if args.get(field) else None
+
+
+class WriteStatisticsTool(WriteGatedTool):
+    """Write statistic values no other statistic has - see
+    statistics_write.py."""
+
+    name = "write_statistics"
+    description = (
+        "Write hourly statistic values that no other statistic has (invoice "
+        "readings, a fee history, a modelled price, a single-hour "
+        "correction). mode 'import' (default): rows for one statistic, "
+        "inline as rows or as file (a .json - a list or {rows: [...]} - or "
+        ".csv with a header, in the mirror repo). A meter or cost "
+        "(kind 'sum') takes each hour's change, {start, change}: inside "
+        "start..end (default: the rows' first to last hour) the rows replace "
+        "what is there (an existing hour without a row counts 0), after end "
+        "every row keeps its own change and the sums carry on seamlessly, a "
+        "live entity goes on recording from the new sum (next_compile "
+        "checks it). A measurement (kind 'mean', e.g. a price) takes "
+        "{start, mean, min?, max?}; an existing hour in the range must be "
+        "given too. mode 'adjust': [{start, change}] sets single hours of a "
+        "meter, every later sum moves by the difference. Where the "
+        "statistic still has 5-minute rows (~10 days), each hour is split "
+        "evenly over its 12, or by the row's five_minute (12 numbers adding "
+        "up to the change). A new statistic only under 'ha_dev_tools:' (kind "
+        "and unit, name optional). Refused: a meter hour going down unless "
+        "allow_negative, an incomplete hour, a time not on the hour; every "
+        "problem listed, nothing written while there's one. The preview "
+        "shows rows, totals by month before/after, the seams at start and "
+        "end and the 5-minute rows rewritten. An existing statistic is "
+        "backed up first, like merge_statistics. Never uses HA's own "
+        "adjust_statistics."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("statistic_id"): str,
+            vol.Optional("mode"): vol.In(statistics_write.MODES),
+            vol.Optional("rows"): vol.All([dict], vol.Length(min=1)),
+            vol.Optional("file"): str,
+            vol.Optional("kind"): vol.In(statistics_write.KINDS),
+            vol.Optional("start"): str,
+            vol.Optional("end"): str,
+            vol.Optional("unit"): str,
+            vol.Optional("name"): str,
+            vol.Optional("allow_negative"): bool,
+            vol.Optional("allow_no_backup"): bool,
+        }
+    )
+
+    async def _rows(self, hass: HomeAssistant, args: dict[str, Any]) -> list[Any]:
+        if ("rows" in args) == ("file" in args):
+            raise ValueError("pass exactly one of rows or file")
+        if "rows" in args:
+            return list(args["rows"])
+        if not mirror.is_mirror_enabled(hass):
+            raise ValueError("file is read from the mirror repo - mirroring is off")
+        content = await mirror.read_mirrored(hass, args["file"])
+        if content is None:
+            raise ValueError(f"the mirror repo has no '{args['file']}'")
+        return statistics_write.parse_rows(content, args["file"])
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> statistics_write.WritePlan:
+        return await statistics_write.plan_write(
+            hass,
+            args["statistic_id"],
+            await self._rows(hass, args),
+            mode=args.get("mode", "import"),
+            kind=args.get("kind"),
+            start=_time_or_none(args, "start"),
+            end=_time_or_none(args, "end"),
+            unit=args.get("unit"),
+            name=args.get("name"),
+            allow_negative=bool(args.get("allow_negative")),
+            can_back_up=mirror.is_mirror_enabled(hass),
+            allow_no_backup=bool(args.get("allow_no_backup")),
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """What would be written, or every reason it's refused."""
+        try:
+            plan = await self._plan(hass, tool_input.tool_args)
+        except (*_STATISTICS_ERRORS, ValueError, aiohttp.ClientError) as exc:
+            return {"problems": str(exc)}
+        return {"would_write": cast(JsonValueType, plan.preview())}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up an existing statistic, then write the rows."""
+        args = tool_input.tool_args
+        if busy := _statistics_busy(hass, [args["statistic_id"]]):
+            return busy
+        try:
+            plan = await self._plan(hass, args)
+        except (*_STATISTICS_ERRORS, ValueError, aiohttp.ClientError) as exc:
+            return _tool_error(exc)
+
+        async def write() -> JsonObjectType:
+            return cast(
+                JsonObjectType, await statistics_write.write_statistics(hass, plan)
+            )
+
+        return await _guarded_statistics_write(
+            hass,
+            [] if plan.target.get("new") else [args["statistic_id"]],
+            self.name,
+            write,
+            allow_no_backup=bool(args.get("allow_no_backup")),
+            # Locked even when new - nothing to back up, but a retry mustn't
+            # race the first write.
+            touches=[args["statistic_id"]],
+        )
 
 
 class RedistributeStatisticsTool(WriteGatedTool):
@@ -4809,6 +4936,7 @@ class DevToolsAPI(llm.API):
                 MigrateStatisticsTool(),
                 MergeStatisticsTool(),
                 DeriveStatisticsTool(),
+                WriteStatisticsTool(),
                 RedistributeStatisticsTool(),
                 RestoreStatisticsTool(),
                 ListAddonsTool(),
