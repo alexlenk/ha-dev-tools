@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.1] - 2026-10-15
+
+### Fixed
+- **`!secret` and `!env_var` references are written as YAML tags by `write_automation`, `write_script` and the template entity tools** (issue #176). A tool call spells a reference as the string `"!secret name"`, which is also how the read tools return one. These tools dumped that string as quoted text (`'!secret name'`), so Home Assistant took the literal text as the value.
+  - This also broke existing secrets. An update that sent back what `get_script` or `get_automation` had returned replaced every `!secret` already in that entry with the quoted text, even when only another field changed.
+  - The shared preparation of new config now turns such strings into the tag they stand for, so every write path does this.
+
 ## [2.30.0] - 2026-10-15
 
 ### Added
