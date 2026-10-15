@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-10-15
+
+### Added
+- **YAML platform entries in packages** (issue #164): `list_package_platform_entities`, `write_package_platform_entity` and `delete_package_platform_entities`. These cover every top-level `<domain>:` list of `platform:` entries in `packages/*.yaml` (`sensor: - platform: statistics`, `mqtt_room`, `filter`, `binary_sensor:`, `switch:`, ...), which had no write path at all. configuration.yaml stays read-only.
+  - **Finding an entry:** by domain + platform + `unique_id`, or its `name` when it has none. More than one match is refused, listing where each is; `file` narrows the search.
+  - **Validation:** the platform's own `PLATFORM_SCHEMA` checks the config before anything is written, and refusals carry HA's error text. A platform that can't be loaded is refused.
+  - **Refused:** literal credentials (`!secret` only), and `command_line`/`shell_command` platforms, which run shell commands and stay read-only like `shell_command`. `rest` entries follow the `rest_command` rules below.
+  - **The short form** (a single mapping under the domain key) is read and kept. Deleting the last entry under a key removes the key.
+  - **Preview and result:** the preview shows the entry before and after, and every reference to its entity. The result says whether `<platform>.reload` took the change in or a restart is needed.
+- **`write_rest_command` / `delete_rest_command`** (issue #168), after the security evaluation recorded on the issue. They create, replace or delete a `rest_command:` entry in a package, and only write config: running it still takes an automation or script plus `trigger_automation`, each confirm-gated.
+  - **Refused, per the owner's decisions:**
+    - a templated scheme or host; templates are allowed only in the path, query, payload and headers;
+    - a host no `rest_command` uses yet, unless `allow_new_host`;
+    - literal credentials in headers, `username`, `password` or the URL; `!secret` only, and never echoed;
+    - `verify_ssl: false` on a new or changed entry, unless `allow_insecure_tls`; an entry that already had it keeps it;
+    - an entry in configuration.yaml.
+  - **The preview** shows method, timeout, host, whether that host is a LAN or public address, and every automation or script calling it.
+  - `rest_command` is reloaded after a write.
+- **`!secret`/`!env_var` references** given as `"!secret name"` in these writes are written as real YAML tags, not as a quoted literal.
+
 ## [2.29.0] - 2026-10-15
 
 ### Added

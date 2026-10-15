@@ -18,9 +18,8 @@ template_yaml_manager.py's `candidate_files`, and it's already
 `DEFAULT_READ_ONLY_PATHS` in security.py, so no security config change
 was needed for this).
 
-Read-only by design (see the issue) - no write/splice logic, no
-ruamel round-trip dumper, no confirm-token write path. A write tool would
-need its own safety review and is explicitly out of scope here.
+Reading only, here; rest_command writes (issue #168, after its own
+security evaluation) are rest_command_write.py.
 
 `shell_command:` (issue #100) has the same layout - an id -> value
 mapping under a top-level key, in configuration.yaml or a package - so

@@ -93,7 +93,8 @@ That's it - ask it something.
 
 Every write tool (`write_automation`, `delete_automation`, `write_script`,
 the helper/derived-sensor/template-entity CRUD tools, `delete_entity`/
-`delete_entities`, `write_dashboard`/`patch_dashboard`, `write_energy_config`) always requires
+`delete_entities`, `write_dashboard`/`patch_dashboard`, `write_energy_config`,
+`write_rest_command`, the package platform-entry tools) always requires
 two calls: **propose**
 (no arguments changed, no side effects - returns a preview of what would be
 applied plus a short-lived `confirm_token`) and **confirm** (the identical
@@ -198,7 +199,9 @@ matters for setup, covered below.
 | `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward. The config is checked with HA's own automation validation first: one HA would refuse to set up is refused with HA's error, before any confirm token or write |
 | `delete_automation` | Layout-aware, package-safe delete - resolves which file actually defines it first, refuses to guess if the id isn't found or is defined in more than one file |
 | `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
-| `list_rest_commands` / `get_rest_command` | Same layout-aware pattern, for `rest_command:` - resolves whether it lives in `configuration.yaml` or a `packages/*.yaml` file. Read-only - no write_rest_command yet |
+| `list_rest_commands` / `get_rest_command` | Same layout-aware pattern, for `rest_command:` - resolves whether it lives in `configuration.yaml` or a `packages/*.yaml` file |
+| `write_rest_command` / `delete_rest_command` | Create, replace or delete a `rest_command:` entry in a package (configuration.yaml stays read-only). Writes config only; running it still takes an automation or script. Refused: a templated scheme or host, a host no rest_command uses yet unless `allow_new_host` (the preview says whether it's a LAN or public address), literal credentials (`!secret` only), and `verify_ssl: false` unless `allow_insecure_tls`. The preview shows method, timeout, host and every automation/script calling it |
+| `list_package_platform_entities` / `write_package_platform_entity` / `delete_package_platform_entities` | YAML platform entries in packages - `sensor: - platform: statistics`, `binary_sensor:`, `switch:`, ... Found by domain + platform + unique_id (or name), checked against the platform's own schema before writing. `command_line` is refused (shell execution), `rest` entries follow the rest_command rules above. The preview shows every reference to the entity; the result says whether a reload took it in or a restart is needed |
 | `check_config` | Home Assistant's own full config validation. With git mirroring on, a passing check also snapshots your hand-edited config (below) |
 | `get_config_file` | Raw text of a hand-edited config file - `configuration.yaml`, anything it `!include`s, `packages/*.yaml`, `custom_templates/*.jinja` - with `!secret`/`!include` as written, live or (`source: mirror`) its last good snapshot. Reads a file that no longer parses, where the structured tools can't. `key` (e.g. `irrigation_unlimited`) returns just that top-level block, wherever it lives - an integration's own YAML config. Withholds a file (or with `key`, a block) with a literal credential in it; never returns `secrets.yaml` |
 | `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
