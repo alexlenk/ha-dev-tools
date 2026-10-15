@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.2] - 2026-10-15
+
+### Fixed
+- **The template tools find short-form template entities** (issue #163). This is a platform key holding one mapping instead of a list, e.g. `- sensor:` followed directly by `name:`/`unique_id:`/`state:`. HA accepts that form and the entity is live, but `list_template_entities`, `get/update/delete_template_entity` and the batch delete only walked lists, so such an entity was "not found". A short-form entity is now treated like a one-item list:
+  - It is listed and resolved like any other.
+  - An update keeps it in the short form.
+  - A delete removes its platform key, or the whole block when that was its only content, as for a list of one.
+  - Other entities in the same file are untouched.
+
 ## [2.28.1] - 2026-10-15
 
 ### Fixed

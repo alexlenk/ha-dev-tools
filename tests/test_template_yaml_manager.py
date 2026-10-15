@@ -855,3 +855,99 @@ async def test_template_delete_removes_only_entity_platform_or_block_lines(
         "        state: '{{ 2 }}'\n",
         "",
     )
+
+
+# --- short-form entities (issue #163): a platform key holding one mapping
+# instead of a list of them, which HA accepts.
+
+# The issue's package: short-form sensors next to a list-form one.
+PACKAGE = """\
+template:
+  - sensor:
+        name: "Restmülltonne Distance (Raw)"
+        unique_id: restmulltonne_distance_raw
+        unit_of_measurement: "m"
+        state: "{{ state_attr('sensor.restmulltonne', 'distance') }}"
+  - sensor:
+      - name: "Listed"
+        unique_id: listed
+        state: "1"
+  - binary_sensor:
+      name: "Short binary"
+      unique_id: short_binary
+      state: "{{ true }}"
+    sensor:
+      name: "Same block"
+      unique_id: same_block
+      state: "2"
+"""
+PATH = "packages/ibeacon.yaml"
+
+
+def _blocks(tmp_path) -> list:
+    return pyyaml.safe_load((tmp_path / PATH).read_text())["template"]
+
+
+@pytest.mark.asyncio
+async def test_short_form_entities_are_listed_and_read(
+    hass: HomeAssistant, template_manager, tmp_path
+):
+    _write(tmp_path, PATH, PACKAGE)
+    listed = {
+        entity["unique_id"]: entity for entity in await template_manager.list_entities()
+    }
+    assert set(listed) == {
+        "restmulltonne_distance_raw",
+        "listed",
+        "short_binary",
+        "same_block",
+    }
+    assert listed["restmulltonne_distance_raw"]["entity_index"] == 0
+    assert listed["short_binary"]["platform"] == "binary_sensor"
+
+    location, config = await template_manager.get_entity("restmulltonne_distance_raw")
+    assert (location.block_index, location.platform) == (0, "sensor")
+    assert config["unit_of_measurement"] == "m"
+
+
+@pytest.mark.asyncio
+async def test_updating_a_short_form_entity_keeps_its_form(
+    hass: HomeAssistant, template_manager, tmp_path
+):
+    _write(tmp_path, PATH, PACKAGE)
+    await template_manager.update_entity(
+        "restmulltonne_distance_raw",
+        {
+            "name": "Restmülltonne Distance (Raw)",
+            "unique_id": "restmulltonne_distance_raw",
+            "unit_of_measurement": "cm",
+            "state": "{{ 1 }}",
+        },
+    )
+    blocks = _blocks(tmp_path)
+    assert isinstance(blocks[0]["sensor"], dict)  # still the short form
+    assert blocks[0]["sensor"]["unit_of_measurement"] == "cm"
+    # Everything else as it was.
+    original = pyyaml.safe_load(PACKAGE)["template"]
+    assert blocks[1:] == original[1:]
+
+
+@pytest.mark.asyncio
+async def test_deleting_short_form_entities_removes_their_key_or_block(
+    hass: HomeAssistant, template_manager, tmp_path
+):
+    _write(tmp_path, PATH, PACKAGE)
+    # The issue's case: the delete that failed with "not found".
+    await template_manager.delete_entities(["restmulltonne_distance_raw"])
+    blocks = _blocks(tmp_path)
+    original = pyyaml.safe_load(PACKAGE)["template"]
+    assert blocks == original[1:]  # its block was its only content
+
+    # One of two short-form keys in a block: only that key goes.
+    await template_manager.delete_entity("short_binary")
+    blocks = _blocks(tmp_path)
+    assert blocks == [original[1], {"sensor": original[2]["sensor"]}]
+    assert [e["unique_id"] for e in await template_manager.list_entities()] == [
+        "listed",
+        "same_block",
+    ]
