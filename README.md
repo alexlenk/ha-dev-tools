@@ -195,7 +195,7 @@ matters for setup, covered below.
 | `render_template` | Render a Jinja2 template against live state, never raising on error |
 | `validate_template` | Check template syntax and flag referenced entities that don't exist |
 | `get_automation` | Layout-aware read: resolves whether an automation lives in `automations.yaml` or a `packages/*.yaml` file, and reports whether it's currently enabled - that's runtime-only state the YAML itself never shows |
-| `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward |
+| `write_automation` | Layout-aware, package-safe write - never silently duplicates a package-defined automation, always reloads afterward. The config is checked with HA's own automation validation first: one HA would refuse to set up is refused with HA's error, before any confirm token or write |
 | `delete_automation` | Layout-aware, package-safe delete - resolves which file actually defines it first, refuses to guess if the id isn't found or is defined in more than one file |
 | `list_scripts` / `get_script` / `write_script` | Same layout-aware, package-safe pattern as `get_automation`/`write_automation`, for `script:` - resolves whether a script lives in `scripts.yaml` or a `packages/*.yaml` file, and writes through the correct one |
 | `list_rest_commands` / `get_rest_command` | Same layout-aware pattern, for `rest_command:` - resolves whether it lives in `configuration.yaml` or a `packages/*.yaml` file. Read-only - no write_rest_command yet |

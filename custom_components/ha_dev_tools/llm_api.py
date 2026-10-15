@@ -456,6 +456,19 @@ class WriteGatedTool(GatedTool):
     ) -> JsonObjectType:
         """Require a confirmed token, then short-circuit into dry-run or hand off to _write()."""
         args = tool_input.tool_args
+        # Refused outright - no token for a write that can only fail, and
+        # nothing written on a confirm either (issue #165).
+        if problem := await self._refusal(hass, tool_input, llm_context):
+            return {
+                "error": problem,
+                "error_type": "Invalid",
+                "action": self.name,
+                "note": (
+                    "Refused before anything was written, and no "
+                    "confirm_token was issued - fix the problem above and "
+                    "call again."
+                ),
+            }
         token = args.get("confirm_token")
         preview = {key: value for key, value in args.items() if key != "confirm_token"}
 
@@ -512,6 +525,17 @@ class WriteGatedTool(GatedTool):
     ) -> JsonObjectType:
         """Subclasses implement their actual write logic here, not _run."""
         raise NotImplementedError
+
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """Override to refuse a call before a token is issued or anything
+        is written - e.g. a config HA would refuse to set up (issue #165).
+        Checked on the propose and on the confirm call."""
+        return None
 
     async def _preview_context(
         self,
@@ -2483,7 +2507,9 @@ class WriteAutomationTool(WriteGatedTool):
         "an existing packages/*.yaml file, or omit it for the default "
         "automations.yaml. Always reloads automations afterward - never "
         "requires a restart. Pass expected_hash (from get_file_metadata or "
-        "a prior read) to detect concurrent edits."
+        "a prior read) to detect concurrent edits. The config is checked with HA's own "
+        "automation validation first; one HA would refuse to set up is refused "
+        "with HA's error, before any token or write."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -2497,6 +2523,19 @@ class WriteAutomationTool(WriteGatedTool):
     def __init__(self, automation_manager: AutomationManager) -> None:
         """Init with the AutomationManager backing this tool."""
         self._manager = automation_manager
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """HA's own error for a config it would refuse to set up."""
+        args = tool_input.tool_args
+        return await config_tools.validation_error(
+            hass, "automation", args["automation_id"], args["config"]
+        )
 
     @override
     async def _write(
@@ -4538,7 +4577,9 @@ class WriteScriptTool(WriteGatedTool):
         "existing packages/*.yaml file, or omit it for the default "
         "scripts.yaml. Always reloads scripts afterward - never requires "
         "a restart. Pass expected_hash (from get_file_metadata or a prior "
-        "read) to detect concurrent edits."
+        "read) to detect concurrent edits. The config is checked with HA's own "
+        "script validation first; one HA would refuse to set up is refused "
+        "with HA's error, before any token or write."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -4552,6 +4593,19 @@ class WriteScriptTool(WriteGatedTool):
     def __init__(self, script_manager: ScriptManager) -> None:
         """Init with the ScriptManager backing this tool."""
         self._manager = script_manager
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """HA's own error for a config it would refuse to set up."""
+        args = tool_input.tool_args
+        return await config_tools.validation_error(
+            hass, "script", args["script_id"], args["config"]
+        )
 
     @override
     async def _write(

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.1] - 2026-10-15
+
+### Fixed
+- **`write_automation` and `write_script` no longer write a config that Home Assistant then refuses to set up** (issue #165). Before writing, only the YAML syntax was checked, so a config like a `numeric_state` condition with `for:` (a trigger option, not a condition one) was written and reloaded. The automation was then left unloaded and the result only carried `setup_error`. Now each call first runs HA's own `async_validate_config_item`, the check HA's automation and script editors run on save.
+  - A config HA would refuse is refused with HA's own error text, before a confirm token is issued.
+  - It is checked again on the confirm call, so nothing is written even with a token.
+  - `setup_error` is still reported after the reload, for anything only setup itself can find.
+  - The validation errors of HA 2026.10 (`probatio`) and of earlier versions (`voluptuous`) are both handled.
+
 ## [2.28.0] - 2026-10-10
 
 ### Added

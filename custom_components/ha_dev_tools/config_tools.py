@@ -13,6 +13,9 @@ fail the check or log it - it loads the item as an unavailable entity and
 raises a Repairs issue instead (issue #89). `active_repairs` reads HA's
 issue registry, the same data the Repairs page shows, and `setup_error`
 finds the one for a specific automation/script right after a write.
+`validation_error` runs the same check before writing (issue #165) - HA's
+own `async_validate_config_item`, what its automation/script editor calls
+on save - so such a config is refused instead of written.
 """
 
 from __future__ import annotations
@@ -20,11 +23,20 @@ from __future__ import annotations
 import string
 from typing import Any
 
+import voluptuous
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.check_config import async_check_ha_config_file
 from homeassistant.helpers.translation import async_get_translations
+from voluptuous.humanize import humanize_error
+
+try:  # HA 2026.10 validates with probatio, whose Invalid isn't voluptuous'.
+    import probatio
+    from probatio.humanize import humanize_error as probatio_humanize_error
+except ImportError:  # pragma: no cover - older HA, voluptuous only
+    probatio = None  # type: ignore[assignment]
 
 # Domains whose "failed to set up" repairs mean a config item HA refused to
 # load - automation/script create them as `validation_failed_<part>` with
@@ -236,3 +248,31 @@ async def reload_domain(
         "domain": domain,
         "entry": _entry_summary(hass, entry),
     }
+
+
+async def validation_error(
+    hass: HomeAssistant, domain: str, item_id: str, config: dict[str, Any]
+) -> str | None:
+    """HA's own error for an automation/script config it would refuse to
+    set up, or None - checked without writing or loading anything."""
+    from homeassistant.components.automation.config import (
+        async_validate_config_item as validate_automation,
+    )
+    from homeassistant.components.script.config import (
+        async_validate_config_item as validate_script,
+    )
+
+    try:
+        if domain == "automation":
+            await validate_automation(hass, domain, {**config, "id": str(item_id)})
+        else:
+            await validate_script(hass, str(item_id), dict(config))
+    except voluptuous.Invalid as err:
+        return humanize_error(config, err)
+    except HomeAssistantError as err:
+        return str(err)
+    except Exception as err:
+        if probatio is not None and isinstance(err, probatio.Invalid):
+            return probatio_humanize_error(config, err)
+        raise
+    return None
