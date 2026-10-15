@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.4] - 2026-10-15
+
+### Fixed
+Findings from the code audit (issue #153):
+- **A confirm token is bound to the user who proposed the write.** Before, it was bound only to the tool and its arguments, so a second admin's session could confirm a write the first admin's agent had proposed. A token offered by anyone else isn't used up, so the proposer can still confirm it.
+- **No more filesystem calls on Home Assistant's event loop.** The existence and file checks in reads, writes, metadata, deletes and backups, and the package-file checks of the automation, script and template tools, ran on the loop and could stall it on a slow or networked `/config` (an NFS or Samba mount). They all run in the executor now. (`security.validate_file_path`'s symlink check is the one left; it's tracked in #173.)
+- **File backups in `.ha_dev_tools_backups/` no longer grow without bound or overwrite each other.**
+  - Only each file's 20 newest backups are kept.
+  - A backup mirrors its file's path (`packages/a/x.yaml.<time>.backup`), so same-named packages in different folders don't share backups.
+  - Backups are stamped to the microsecond, so two writes within one second don't overwrite each other's.
+  - Backups in the old flat naming are left as they are.
+
+### Removed
+- `FileManager.list_files`, which no tool used.
+
 ## [2.28.3] - 2026-10-15
 
 ### Fixed

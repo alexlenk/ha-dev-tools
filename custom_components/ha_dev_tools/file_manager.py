@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Tuple
@@ -20,6 +21,18 @@ from .const import (
 from .security import SecurityManager
 
 _LOGGER = logging.getLogger(__name__)
+
+BACKUP_DIR = ".ha_dev_tools_backups"
+# Backups kept per file - the mirror repo, when on, has the full history.
+BACKUPS_PER_FILE = 20
+_BACKUP_STAMP = "%Y%m%d_%H%M%S_%f"
+
+
+def _is_file(path: Path) -> bool:
+    """exists() and is_file() in one go - for the executor (issue #153:
+    every filesystem call off the event loop, which a slow or networked
+    /config would otherwise stall)."""
+    return path.is_file()
 
 
 def package_file(package: str) -> str:
@@ -84,17 +97,8 @@ class FileManager:
         try:
             full_path = self._config_path / file_path
 
-            # Check if file exists
-            if not full_path.exists():
-                _LOGGER.warning("File not found: %s", full_path)
-                raise FileNotFoundError(f"File not found: {file_path}")
-
-            # Check if it's actually a file (not a directory)
-            if not full_path.is_file():
-                _LOGGER.warning("Path is not a file: %s", full_path)
-                raise FileNotFoundError(f"Path is not a file: {file_path}")
-
-            # Read file contents
+            # Read file contents - a missing path or a directory is "not
+            # found" either way.
             content = await self.hass.async_add_executor_job(
                 self._read_file_sync, full_path
             )
@@ -127,6 +131,13 @@ class FileManager:
         Returns:
             File contents as string
         """
+        relative = file_path.relative_to(self._config_path)
+        if not file_path.exists():
+            _LOGGER.warning("File not found: %s", file_path)
+            raise FileNotFoundError(f"File not found: {relative}")
+        if not file_path.is_file():
+            _LOGGER.warning("Path is not a file: %s", file_path)
+            raise FileNotFoundError(f"Path is not a file: {relative}")
         with open(file_path, "r", encoding="utf-8", newline="") as f:
             return f.read()
 
@@ -186,8 +197,10 @@ class FileManager:
         try:
             full_path = self._config_path / file_path
 
+            exists = await self.hass.async_add_executor_job(full_path.exists)
+
             # Check expected_hash if provided (conflict detection)
-            if expected_hash is not None and full_path.exists():
+            if expected_hash is not None and exists:
                 current_metadata = await self.get_file_metadata(file_path)
                 if current_metadata.get("content_hash") != expected_hash:
                     raise ValueError(
@@ -196,13 +209,11 @@ class FileManager:
                     )
 
             # Create backup if file exists
-            if full_path.exists():
+            if exists:
                 await self._create_backup(full_path)
 
-            # Ensure parent directory exists
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write file contents atomically (write to temp, then rename)
+            # Write file contents atomically (write to temp, then rename),
+            # the parent directory created first if need be
             await self.hass.async_add_executor_job(
                 self._write_file_atomic, full_path, content
             )
@@ -243,6 +254,7 @@ class FileManager:
         """
         import tempfile
 
+        file_path.parent.mkdir(parents=True, exist_ok=True)
         # Write to temporary file in the same directory
         temp_fd, temp_path = tempfile.mkstemp(
             dir=file_path.parent, prefix=f".{file_path.name}.", suffix=".tmp"
@@ -273,28 +285,33 @@ class FileManager:
             file_path: Path to the file to backup
         """
         try:
-            # Create backup directory structure
-            backup_dir = self._config_path / ".ha_dev_tools_backups"
-            backup_dir.mkdir(exist_ok=True)
-
-            # Create timestamped backup filename
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            rel_path = file_path.relative_to(self._config_path)
-            backup_name = f"{rel_path.name}.{timestamp}.backup"
-            backup_path = backup_dir / backup_name
-
-            # Copy file to backup location
-            await self.hass.async_add_executor_job(
-                self._copy_file_sync, file_path, backup_path
+            backup_path = await self.hass.async_add_executor_job(
+                self._backup_sync, file_path, datetime.now()
             )
-
             _LOGGER.debug("Created backup: %s", backup_path)
 
         except Exception as e:
             # Log backup failure but don't fail the write operation
             _LOGGER.warning("Failed to create backup for %s: %s", file_path, e)
+
+    def _backup_sync(self, file_path: Path, now: datetime) -> Path:
+        """Synchronous: copy `file_path` to its own backup, then keep only
+        its BACKUPS_PER_FILE newest (issue #153). A backup mirrors the
+        file's path under BACKUP_DIR - packages/a/x.yaml and packages/b/
+        x.yaml no longer share a name - and is stamped to the microsecond,
+        so two writes in one second don't overwrite each other's."""
+        rel_path = file_path.relative_to(self._config_path)
+        folder = self._config_path / BACKUP_DIR / rel_path.parent
+        folder.mkdir(parents=True, exist_ok=True)
+        backup_path = folder / f"{rel_path.name}.{now.strftime(_BACKUP_STAMP)}.backup"
+        self._copy_file_sync(file_path, backup_path)
+        pattern = re.compile(
+            rf"{re.escape(rel_path.name)}\.\d{{8}}_\d{{6}}_\d{{6}}\.backup"
+        )
+        own = sorted(path for path in folder.iterdir() if pattern.fullmatch(path.name))
+        for old in own[:-BACKUPS_PER_FILE]:
+            old.unlink(missing_ok=True)
+        return backup_path
 
     def _copy_file_sync(self, source: Path, destination: Path) -> None:
         """
@@ -328,73 +345,11 @@ class FileManager:
 
         try:
             full_path = self._config_path / file_path
-            exists = full_path.exists() and full_path.is_file()
-            return exists
+            return await self.hass.async_add_executor_job(_is_file, full_path)
 
         except Exception as e:
             _LOGGER.error("Error checking file existence %s: %s", file_path, e)
             raise RuntimeError(f"Error checking file: {str(e)}")
-
-    async def list_files(self, directory: str = "") -> list:
-        """
-        List configuration files with metadata.
-
-        Args:
-            directory: Optional subdirectory to list (relative to config dir)
-
-        Returns:
-            List of file info dictionaries
-
-        Raises:
-            ValueError: If path validation fails
-            PermissionError: If access is denied
-        """
-        try:
-            base_path = self._config_path
-            if directory:
-                # Validate directory path
-                is_valid, error = self.security_manager.validate_file_path(directory)
-                if not is_valid:
-                    raise ValueError(f"Invalid directory path: {error}")
-                base_path = self._config_path / directory
-
-            if not base_path.exists():
-                return []
-
-            # List files
-            files = []
-            for item in base_path.iterdir():
-                try:
-                    # Get relative path from config dir
-                    rel_path = item.relative_to(self._config_path)
-
-                    # Skip blacklisted files
-                    if self.security_manager.is_blacklisted(str(rel_path)):
-                        continue
-
-                    # Get file info
-                    stat = item.stat()
-                    file_info = {
-                        "name": item.name,
-                        "path": str(rel_path),
-                        "size": stat.st_size,
-                        "modified": stat.st_mtime,
-                        "is_directory": item.is_dir(),
-                    }
-                    files.append(file_info)
-
-                except Exception as e:
-                    _LOGGER.debug("Skipping file %s: %s", item, e)
-                    continue
-
-            _LOGGER.debug("Listed %d files in %s", len(files), base_path)
-            return files
-
-        except (ValueError, PermissionError):
-            raise
-        except Exception as e:
-            _LOGGER.error("Error listing files in %s: %s", directory, e)
-            raise RuntimeError(f"Error listing files: {str(e)}")
 
     async def delete_file(self, file_path: str) -> bool:
         """
@@ -428,18 +383,9 @@ class FileManager:
         try:
             full_path = self._config_path / file_path
 
-            # Check if file exists
-            if not full_path.exists():
-                _LOGGER.warning("File not found for deletion: %s", full_path)
-                raise FileNotFoundError(f"File not found: {file_path}")
-
-            # Check if it's actually a file (not a directory)
-            if not full_path.is_file():
-                _LOGGER.warning("Path is not a file: %s", full_path)
-                raise ValueError("Cannot delete directory")
-
-            # Delete file
-            await self.hass.async_add_executor_job(full_path.unlink)
+            await self.hass.async_add_executor_job(
+                self._delete_file_sync, full_path, file_path
+            )
 
             _LOGGER.info("Successfully deleted file: %s", file_path)
             return True
@@ -449,6 +395,16 @@ class FileManager:
         except Exception as e:
             _LOGGER.error("Unexpected error deleting file %s: %s", file_path, e)
             raise RuntimeError(f"Error deleting file: {str(e)}")
+
+    @staticmethod
+    def _delete_file_sync(full_path: Path, file_path: str) -> None:
+        if not full_path.exists():
+            _LOGGER.warning("File not found for deletion: %s", full_path)
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if not full_path.is_file():
+            _LOGGER.warning("Path is not a file: %s", full_path)
+            raise ValueError("Cannot delete directory")
+        full_path.unlink()
 
     async def get_file_metadata(self, file_path: str) -> Dict[str, Any]:
         """
@@ -488,7 +444,7 @@ class FileManager:
             full_path = self._config_path / file_path
 
             # Check if file exists
-            if not full_path.exists() or not full_path.is_file():
+            if not await self.hass.async_add_executor_job(_is_file, full_path):
                 _LOGGER.debug("File does not exist: %s", file_path)
                 return metadata
 

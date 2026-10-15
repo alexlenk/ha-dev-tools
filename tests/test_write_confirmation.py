@@ -104,3 +104,26 @@ async def test_create_pending_prunes_expired_entries(hass: HomeAssistant, monkey
     write_confirmation.create_pending(hass, "some_tool", {"a": 2})
 
     assert stale_token not in store
+
+
+def test_a_token_is_only_consumed_by_the_user_who_proposed(hass):
+    """Issue #153: a second admin's session can't confirm a write the
+    first admin's agent proposed."""
+    token = write_confirmation.create_pending(
+        hass, "some_tool", {"a": 1}, user_id="alice"
+    )
+    assert (
+        write_confirmation.consume_pending(
+            hass, "some_tool", {"a": 1}, token, user_id="bob"
+        )
+        is False
+    )
+    assert (
+        write_confirmation.consume_pending(hass, "some_tool", {"a": 1}, token) is False
+    )
+    assert (
+        write_confirmation.consume_pending(
+            hass, "some_tool", {"a": 1}, token, user_id="alice"
+        )
+        is True
+    )

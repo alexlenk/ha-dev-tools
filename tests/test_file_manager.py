@@ -451,84 +451,9 @@ async def test_file_exists_unexpected_error_wrapped_as_runtime_error(
     hass: HomeAssistant, file_manager
 ):
     """An unexpected filesystem error should be wrapped, not leaked raw."""
-    with patch.object(Path, "exists", side_effect=OSError("simulated stat failure")):
+    with patch.object(Path, "is_file", side_effect=OSError("simulated stat failure")):
         with pytest.raises(RuntimeError, match="Error checking file"):
             await file_manager.file_exists("configuration.yaml")
-
-
-# --- list_files -----------------------------------------------------------------
-
-
-async def test_list_files_invalid_directory(hass: HomeAssistant, file_manager):
-    """Path traversal in the directory argument must be rejected."""
-    with pytest.raises(ValueError, match="Invalid directory path"):
-        await file_manager.list_files("../etc")
-
-
-async def test_list_files_nonexistent_directory_returns_empty(
-    hass: HomeAssistant, file_manager
-):
-    """A directory that doesn't exist yet is not an error, just no files.
-
-    Uses a name matching the permissive fixture's *.yaml allowlist glob,
-    since the directory argument is itself validated as a path.
-    """
-    result = await file_manager.list_files("does_not_exist.yaml")
-
-    assert result == []
-
-
-async def test_list_files_lists_and_skips_blacklisted(
-    hass: HomeAssistant, file_manager
-):
-    """Blacklisted files are silently excluded from the listing.
-
-    Uses the top-level (default, empty-directory) listing since the
-    permissive fixture's allowlist only covers file globs, not bare
-    subdirectory paths - list_files only validates a directory argument
-    when one is actually given (falsy directory skips that check).
-    """
-    visible_file = Path(hass.config.config_dir) / "visible.yaml"
-    visible_file.write_text("a: 1\n")
-    secrets_file = Path(hass.config.config_dir) / "secrets.yaml"
-    secrets_file.write_text("api_key: hidden\n")
-
-    try:
-        result = await file_manager.list_files()
-
-        names = [f["name"] for f in result]
-        assert "visible.yaml" in names
-        assert "secrets.yaml" not in names
-    finally:
-        visible_file.unlink(missing_ok=True)
-        secrets_file.unlink(missing_ok=True)
-
-
-async def test_list_files_skips_entries_that_error_on_stat(
-    hass: HomeAssistant, file_manager
-):
-    """A single unreadable entry (e.g. a broken symlink) shouldn't fail the whole listing."""
-    broken_link = Path(hass.config.config_dir) / "broken_link.yaml"
-    broken_link.symlink_to(Path(hass.config.config_dir) / "does_not_exist_target.yaml")
-
-    try:
-        result = await file_manager.list_files()
-
-        names = [f["name"] for f in result]
-        assert "broken_link.yaml" not in names
-    finally:
-        broken_link.unlink(missing_ok=True)
-
-
-async def test_list_files_unexpected_error_wrapped_as_runtime_error(
-    hass: HomeAssistant, file_manager
-):
-    """An unexpected error while iterating the directory should be wrapped."""
-    with patch.object(
-        Path, "iterdir", side_effect=OSError("simulated iterdir failure")
-    ):
-        with pytest.raises(RuntimeError, match="Error listing files"):
-            await file_manager.list_files()
 
 
 # --- delete_file error branches ------------------------------------------------
@@ -612,3 +537,100 @@ async def test_get_file_metadata_unexpected_error_wrapped_as_runtime_error(
     ):
         with pytest.raises(RuntimeError, match="Error getting file metadata"):
             await file_manager.get_file_metadata("configuration.yaml")
+
+
+# --- issue #153: backups, and no filesystem call on the event loop -------------
+
+
+async def test_backups_keep_their_path_and_the_newest_20(
+    hass: HomeAssistant, file_manager
+):
+    """Two packages with the same file name, and many writes within one
+    second, each keep their own backups - and only the newest 20 per file."""
+    import uuid
+
+    from custom_components.ha_dev_tools import file_manager as fm
+
+    # hass.config.config_dir outlives a test run - fresh folders each time.
+    run = uuid.uuid4().hex[:8]
+    a, b = f"a_{run}", f"b_{run}"
+    config = Path(hass.config.config_dir)
+    for folder in (a, b):
+        (config / "packages" / folder).mkdir(parents=True, exist_ok=True)
+        (config / "packages" / folder / "x.yaml").write_text(f"{folder[0]}: 0\n")
+    for index in range(1, 25):
+        await file_manager.write_file(
+            f"packages/{a}/x.yaml", f"a: {index}\n", validate_before_write=False
+        )
+    await file_manager.write_file(
+        f"packages/{b}/x.yaml", "b: 1\n", validate_before_write=False
+    )
+
+    root = config / fm.BACKUP_DIR / "packages"
+    a_backups = sorted((root / a).iterdir())
+    assert len(a_backups) == fm.BACKUPS_PER_FILE
+    # The newest 20 of the 24 previous contents: a: 4 .. a: 23.
+    assert [path.read_text() for path in a_backups] == [
+        f"a: {index}\n" for index in range(4, 24)
+    ]
+    assert [path.read_text() for path in (root / b).iterdir()] == ["b: 0\n"]
+
+
+async def test_old_style_backups_are_left_alone(hass: HomeAssistant, file_manager):
+    import uuid
+
+    from custom_components.ha_dev_tools import file_manager as fm
+
+    keep = f"keep_{uuid.uuid4().hex[:8]}.yaml"
+    config = Path(hass.config.config_dir)
+    (config / keep).write_text("a: 0\n")
+    legacy = config / fm.BACKUP_DIR / f"{keep}.20240101_000000.backup"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old\n")
+    for index in range(fm.BACKUPS_PER_FILE + 2):
+        await file_manager.write_file(
+            keep, f"a: {index}\n", validate_before_write=False
+        )
+    assert legacy.read_text() == "old\n"
+
+
+async def test_no_filesystem_call_runs_on_the_event_loop(
+    hass: HomeAssistant, file_manager
+):
+    """A slow or networked /config must not stall HA: every stat, mkdir
+    and read happens in the executor."""
+    import threading
+
+    loop_thread = threading.current_thread()
+    on_loop: list[str] = []
+    originals = {name: getattr(Path, name) for name in ("exists", "is_file", "mkdir")}
+
+    def watch(name):
+        def wrapper(self, *args, **kwargs):
+            if threading.current_thread() is loop_thread:
+                on_loop.append(f"{name}({self})")
+            return originals[name](self, *args, **kwargs)
+
+        return wrapper
+
+    config = Path(hass.config.config_dir)
+    (config / "packages").mkdir(exist_ok=True)
+    (config / "watched.yaml").write_text("a: 1\n")
+    with (
+        patch.object(Path, "exists", watch("exists")),
+        patch.object(Path, "is_file", watch("is_file")),
+        patch.object(Path, "mkdir", watch("mkdir")),
+    ):
+        await file_manager.read_file("watched.yaml")
+        await file_manager.write_file(
+            "watched.yaml", "a: 2\n", validate_before_write=False
+        )
+        await file_manager.write_file(
+            "packages/new.yaml", "b: 1\n", validate_before_write=False
+        )
+        await file_manager.file_exists("watched.yaml")
+        await file_manager.get_file_metadata("watched.yaml")
+        await file_manager.delete_file("packages/new.yaml")
+        with pytest.raises(FileNotFoundError):
+            await file_manager.read_file("missing.yaml")
+    assert on_loop == []

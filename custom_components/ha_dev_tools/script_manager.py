@@ -123,7 +123,10 @@ class ScriptManager:
     async def candidate_files(self) -> list[str]:
         """Return every file that may define scripts, default file first."""
         candidates: list[str] = []
-        if (self._config_dir / DEFAULT_SCRIPTS_FILE).is_file():
+        # Off the event loop, like every filesystem call here (issue #153).
+        if await self.hass.async_add_executor_job(
+            (self._config_dir / DEFAULT_SCRIPTS_FILE).is_file
+        ):
             candidates.append(DEFAULT_SCRIPTS_FILE)
         candidates.extend(await self.hass.async_add_executor_job(self._glob_packages))
         return candidates
@@ -275,7 +278,9 @@ class ScriptManager:
             location = locations[0]
         elif package:
             file_path = package_file(package)
-            if not (self._config_dir / file_path).is_file():
+            if not await self.hass.async_add_executor_job(
+                (self._config_dir / file_path).is_file
+            ):
                 raise ScriptNotFoundError(
                     f"Package file '{file_path}' does not exist - create it "
                     "first, this tool won't invent a new package file"
