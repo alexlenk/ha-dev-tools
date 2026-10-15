@@ -543,7 +543,9 @@ class TemplateYamlManager:
         triggers = quote_ambiguous_scalars(triggers) if triggers else triggers
 
         file_path = package_file(package)
-        if not (self._config_dir / file_path).is_file():
+        if not await self.hass.async_add_executor_job(
+            (self._config_dir / file_path).is_file
+        ):
             raise TemplateEntityNotFoundError(
                 f"Package file '{file_path}' does not exist - create it "
                 "first, this tool won't invent a new package file"

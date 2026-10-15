@@ -34,6 +34,9 @@ _STORE_KEY = "pending_confirmations"
 class _PendingConfirmation:
     args_hash: str
     expires_at: float
+    # Whose call proposed it - only that user's confirm consumes it, not
+    # another admin's session (issue #153).
+    user_id: str | None = None
 
 
 def _args_hash(tool_name: str, args: dict) -> str:
@@ -57,26 +60,36 @@ def _prune_expired(store: dict[str, _PendingConfirmation], *, now: float) -> Non
         del store[token]
 
 
-def create_pending(hass: HomeAssistant, tool_name: str, args: dict) -> str:
-    """Register a new pending confirmation for this exact tool call, return its token."""
+def create_pending(
+    hass: HomeAssistant, tool_name: str, args: dict, *, user_id: str | None = None
+) -> str:
+    """Register a new pending confirmation for this exact tool call (by
+    `user_id`, when known), return its token."""
     store = _store(hass)
     now = time.time()
     _prune_expired(store, now=now)
     token = secrets.token_urlsafe(24)
     store[token] = _PendingConfirmation(
-        args_hash=_args_hash(tool_name, args), expires_at=now + TOKEN_TTL_SECONDS
+        args_hash=_args_hash(tool_name, args),
+        expires_at=now + TOKEN_TTL_SECONDS,
+        user_id=user_id,
     )
     return token
 
 
 def consume_pending(
-    hass: HomeAssistant, tool_name: str, args: dict, token: str
+    hass: HomeAssistant,
+    tool_name: str,
+    args: dict,
+    token: str,
+    *,
+    user_id: str | None = None,
 ) -> bool:
     """Validate and one-time-consume a token for this exact tool call.
 
-    True only if the token exists, hasn't expired, and matches a hash of
-    these same arguments. Consumed (deleted) on success so a token can't
-    be replayed for a second write.
+    True only if the token exists, hasn't expired, matches a hash of these
+    same arguments and was proposed by this same user. Consumed (deleted)
+    on success so a token can't be replayed for a second write.
     """
     store = _store(hass)
     now = time.time()
@@ -85,6 +98,8 @@ def consume_pending(
     if pending is None:
         return False
     if pending.args_hash != _args_hash(tool_name, args):
+        return False
+    if pending.user_id != user_id:
         return False
     del store[token]
     return True

@@ -472,10 +472,13 @@ class WriteGatedTool(GatedTool):
         token = args.get("confirm_token")
         preview = {key: value for key, value in args.items() if key != "confirm_token"}
 
+        user_id = llm_context.context.user_id if llm_context.context else None
         if not token or not write_confirmation.consume_pending(
-            hass, self.name, args, token
+            hass, self.name, args, token, user_id=user_id
         ):
-            new_token = write_confirmation.create_pending(hass, self.name, args)
+            new_token = write_confirmation.create_pending(
+                hass, self.name, args, user_id=user_id
+            )
             minutes = write_confirmation.TOKEN_TTL_SECONDS // 60
             return {
                 "confirmation_required": True,

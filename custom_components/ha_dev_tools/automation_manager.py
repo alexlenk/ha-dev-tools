@@ -119,7 +119,10 @@ class AutomationManager:
     async def candidate_files(self) -> list[str]:
         """Return every file that may define automations, default file first."""
         candidates: list[str] = []
-        if (self._config_dir / DEFAULT_AUTOMATIONS_FILE).is_file():
+        # Off the event loop, like every filesystem call here (issue #153).
+        if await self.hass.async_add_executor_job(
+            (self._config_dir / DEFAULT_AUTOMATIONS_FILE).is_file
+        ):
             candidates.append(DEFAULT_AUTOMATIONS_FILE)
         candidates.extend(await self.hass.async_add_executor_job(self._glob_packages))
         return candidates
@@ -310,7 +313,9 @@ class AutomationManager:
             location = locations[0]
         elif package:
             file_path = package_file(package)
-            if not (self._config_dir / file_path).is_file():
+            if not await self.hass.async_add_executor_job(
+                (self._config_dir / file_path).is_file
+            ):
                 raise AutomationNotFoundError(
                     f"Package file '{file_path}' does not exist - create it "
                     "first, this tool won't invent a new package file"

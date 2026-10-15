@@ -336,3 +336,39 @@ def test_rest_command_credentials_are_masked():
     assert masked["verify_ssl"] is True
     assert masked["payload"] == '{"on": true}'
     assert "pw123" not in masked["urls"][0]
+
+
+# --- confirm tokens are bound to the proposing user (issue #153) ----------------
+
+
+@pytest.mark.asyncio
+async def test_another_admin_cant_confirm_a_proposed_write(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user
+):
+    from custom_components.ha_dev_tools.llm_api import WriteGatedTool, vol
+
+    writes: list[dict] = []
+
+    class Recorder(WriteGatedTool):
+        name = "recorder"
+        parameters = vol.Schema(
+            {vol.Optional("x"): int, vol.Optional("confirm_token"): str}
+        )
+
+        async def _write(self, hass, tool_input, llm_context):
+            writes.append(dict(tool_input.tool_args))
+            return {"written": True}
+
+    other_admin = MockUser(is_owner=True).add_to_hass(hass)
+    _arm(hass)
+    tool = Recorder()
+    proposal = await _call(hass, tool, admin_user, x=1)
+    token = proposal["confirm_token"]
+
+    stolen = await _call(hass, tool, other_admin, x=1, confirm_token=token)
+    assert stolen.get("confirmation_required") is True  # a fresh proposal
+    assert writes == []
+    # Not consumed by the refused attempt: the proposer can still confirm.
+    confirmed = await _call(hass, tool, admin_user, x=1, confirm_token=token)
+    assert confirmed["written"] is True
+    assert writes == [{"x": 1, "confirm_token": token}]
