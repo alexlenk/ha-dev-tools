@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.2] - 2026-10-22
+
+### Added
+- **The arm window's limits are settings** on the integration's Configure page:
+  - **idle window**: 5 minutes to 8 hours, default 30 minutes;
+  - **hard cap**: 15 minutes to 24 hours, default 4 hours.
+  - The idle window can't be longer than the hard cap.
+  - There is no "never expire": an arm always ends on its own, at most a day after it was created.
+  - The limits are read on every check, like dry-run, so a change applies to an active arm at once.
+  - The "not armed" message and the arm status in every write response show the limits in effect.
+  - Stored values outside the bounds are clamped, never trusted.
+
 ## [2.30.1] - 2026-10-15
 
 ### Fixed

@@ -31,13 +31,19 @@ required before any tool's real logic runs:
 The arm file's two timestamps carry different, deliberately asymmetric
 meanings:
 - Its *content* is the original arm time, written once by the human who
-  created it. This is the 4-hour hard cap. dev_tools never rewrites
+  created it. This is the hard cap (4 hours by default). dev_tools never rewrites
   content - if it could, a tool call could reset its own ceiling
   forever, which defeats the point of having one.
 - Its *mtime* is the last-used time. dev_tools IS allowed to bump this
   (touch_armed(), called after every successful tool call) - that's
   what implements "stays armed while actually being used, up to 30
-  minutes idle." Extending an already-granted session is safe; it can
+  minutes idle" (by default).
+
+Both limits can be set in the integration's Configure page, within fixed
+bounds (const.py: 5 minutes - 8 hours idle, 15 minutes - 24 hours cap,
+idle never above the cap), so an arm always expires on its own. They're
+read fresh on every check, like dry-run - a shorter setting applies to an
+active arm at once. Extending an already-granted session is safe; it can
   only ever move toward expiry, never manufacture a fresh grant from
   nothing (only a human creating the file from scratch can do that).
 
@@ -54,7 +60,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -62,7 +70,16 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DOMAIN, OPT_DRY_RUN
+from .const import (
+    ARM_IDLE_MINUTES_DEFAULT,
+    ARM_IDLE_MINUTES_RANGE,
+    ARM_MAX_MINUTES_DEFAULT,
+    ARM_MAX_MINUTES_RANGE,
+    DOMAIN,
+    OPT_ARM_IDLE_MINUTES,
+    OPT_ARM_MAX_MINUTES,
+    OPT_DRY_RUN,
+)
 from .ws_call import resolve_user
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,11 +90,54 @@ _LOGGER = logging.getLogger(__name__)
 # general path for this exact file, that layer would refuse it too.
 ARM_FILE_NAME = ".storage/ha_dev_tools.armed"
 
-IDLE_TIMEOUT = timedelta(minutes=30)
-MAX_SESSION = timedelta(hours=4)
+IDLE_TIMEOUT = timedelta(minutes=ARM_IDLE_MINUTES_DEFAULT)
+MAX_SESSION = timedelta(minutes=ARM_MAX_MINUTES_DEFAULT)
 CLEANUP_INTERVAL = timedelta(minutes=5)
 # How far an arm time may lie ahead of this host's clock (see _is_expired).
 CLOCK_SKEW = timedelta(minutes=1)
+
+
+@dataclass(frozen=True, slots=True)
+class ArmLimits:
+    """The arm window's limits in effect: idle window and hard cap."""
+
+    idle: timedelta
+    cap: timedelta
+
+
+DEFAULT_LIMITS = ArmLimits(IDLE_TIMEOUT, MAX_SESSION)
+
+
+def _bounded(value: object, default: int, bounds: tuple[int, int]) -> int:
+    try:
+        number = int(cast(Any, value))
+    except (TypeError, ValueError):
+        return default
+    return min(max(number, bounds[0]), bounds[1])
+
+
+def arm_limits(hass: HomeAssistant) -> ArmLimits:
+    """The configured limits, read fresh - clamped to their bounds, and the
+    idle window never above the cap, however the options got there."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    options = entries[0].options if entries else {}
+    idle = _bounded(
+        options.get(OPT_ARM_IDLE_MINUTES),
+        ARM_IDLE_MINUTES_DEFAULT,
+        ARM_IDLE_MINUTES_RANGE,
+    )
+    cap = _bounded(
+        options.get(OPT_ARM_MAX_MINUTES), ARM_MAX_MINUTES_DEFAULT, ARM_MAX_MINUTES_RANGE
+    )
+    return ArmLimits(timedelta(minutes=min(idle, cap)), timedelta(minutes=cap))
+
+
+def _duration(delta: timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    if minutes % 60:
+        return f"{minutes} minutes"
+    hours = minutes // 60
+    return f"{hours} hour{'s' if hours != 1 else ''}"
 
 
 class NotArmedError(Exception):
@@ -104,17 +164,19 @@ def _read_armed_at(path: Path) -> float | None:
         return None
 
 
-def _is_expired(path: Path, *, now: float | None = None) -> bool:
+def _is_expired(
+    path: Path, *, now: float | None = None, limits: ArmLimits = DEFAULT_LIMITS
+) -> bool:
     """True if the arm file is missing, idle-expired, or past its hard cap."""
     now = time.time() if now is None else now
     try:
         stat = path.stat()
     except FileNotFoundError:
         return True
-    if now - stat.st_mtime > IDLE_TIMEOUT.total_seconds():
+    if now - stat.st_mtime > limits.idle.total_seconds():
         return True
     armed_at = _read_armed_at(path)
-    if armed_at is None or now - armed_at > MAX_SESSION.total_seconds():
+    if armed_at is None or now - armed_at > limits.cap.total_seconds():
         return True
     # A future arm time would hold the hard cap off indefinitely (until
     # then plus 4 hours) - only a mistyped or deliberately forward-dated
@@ -122,16 +184,17 @@ def _is_expired(path: Path, *, now: float | None = None) -> bool:
     return armed_at > now + CLOCK_SKEW.total_seconds()
 
 
-def _armed_error_message(path: Path) -> str | None:
+def _armed_error_message(path: Path, limits: ArmLimits = DEFAULT_LIMITS) -> str | None:
     """Synchronous check, run only via the executor - see check_armed()."""
-    if not _is_expired(path):
+    if not _is_expired(path, limits=limits):
         return None
+    idle = _duration(limits.idle)
     return (
         "dev_tools is not armed. Run this on the Home Assistant host "
         "(e.g. via SSH or the Terminal add-on), exactly as written:\n\n"
         f"    date +%s > {path}\n\n"
-        "That enables it for up to 4 hours (extended by 30 minutes on "
-        "each use, idle windows beyond 30 minutes expire it)."
+        f"That enables it for up to {_duration(limits.cap)} (extended by "
+        f"{idle} on each use, idle windows beyond {idle} expire it)."
     )
 
 
@@ -139,15 +202,17 @@ def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
 
 
-def _arm_status(path: Path, *, now: float | None = None) -> dict[str, Any]:
+def _arm_status(
+    path: Path, *, now: float | None = None, limits: ArmLimits = DEFAULT_LIMITS
+) -> dict[str, Any]:
     """Synchronous arm-window status, run only via the executor - see arm_status()."""
     now = time.time() if now is None else now
-    if _is_expired(path, now=now):
+    if _is_expired(path, now=now, limits=limits):
         return {"armed": False, "arm_command": f"date +%s > {path}"}
-    idle_expires = path.stat().st_mtime + IDLE_TIMEOUT.total_seconds()
+    idle_expires = path.stat().st_mtime + limits.idle.total_seconds()
     # _is_expired() already failed closed on an unparseable file, so a
     # still-armed file always has a readable arm timestamp here.
-    hard_cap_expires = cast(float, _read_armed_at(path)) + MAX_SESSION.total_seconds()
+    hard_cap_expires = cast(float, _read_armed_at(path)) + limits.cap.total_seconds()
     expires = min(idle_expires, hard_cap_expires)
     return {
         "armed": True,
@@ -156,9 +221,9 @@ def _arm_status(path: Path, *, now: float | None = None) -> dict[str, Any]:
         "idle_expires_at": _iso(idle_expires),
         "hard_cap_expires_at": _iso(hard_cap_expires),
         "note": (
-            "Each successful call extends the idle window by 30 minutes, "
-            "up to the hard cap. Re-arm on the Home Assistant host before "
-            "a long batch that would outlast it."
+            f"Each successful call extends the idle window by "
+            f"{_duration(limits.idle)}, up to the hard cap. Re-arm on the "
+            "Home Assistant host before a long batch that would outlast it."
         ),
     }
 
@@ -173,7 +238,9 @@ async def arm_status(hass: HomeAssistant) -> dict[str, Any]:
     admin check) already carries the arm command.
     """
     path = _arm_file_path(hass)
-    return await hass.async_add_executor_job(_arm_status, path)
+    return await hass.async_add_executor_job(
+        partial(_arm_status, path, limits=arm_limits(hass))
+    )
 
 
 async def check_armed(hass: HomeAssistant) -> None:
@@ -185,7 +252,9 @@ async def check_armed(hass: HomeAssistant) -> None:
     The file I/O runs in the executor so this never blocks the event loop.
     """
     path = _arm_file_path(hass)
-    message = await hass.async_add_executor_job(_armed_error_message, path)
+    message = await hass.async_add_executor_job(
+        _armed_error_message, path, arm_limits(hass)
+    )
     if message is not None:
         raise NotArmedError(message)
 
@@ -234,11 +303,13 @@ def is_dry_run(hass: HomeAssistant) -> bool:
     return bool(entries[0].options.get(OPT_DRY_RUN, False))
 
 
-def _cleanup_if_expired(hass: HomeAssistant) -> None:
+def _cleanup_if_expired(
+    hass: HomeAssistant, limits: ArmLimits = DEFAULT_LIMITS
+) -> None:
     path = _arm_file_path(hass)
     if not path.exists():
         return
-    if _is_expired(path):
+    if _is_expired(path, limits=limits):
         try:
             path.unlink()
             _LOGGER.info("Removed expired dev_tools arm file: %s", path)
@@ -255,12 +326,12 @@ async def async_setup_cleanup(hass: HomeAssistant) -> Callable[[], None]:
     tick hadn't fired yet, then on CLEANUP_INTERVAL after that. All file
     I/O runs in the executor so this never blocks the event loop.
     """
-    await hass.async_add_executor_job(_cleanup_if_expired, hass)
+    await hass.async_add_executor_job(_cleanup_if_expired, hass, arm_limits(hass))
 
     @callback
     def _tick(_now: object) -> None:
         # Fire-and-forget: async_add_executor_job tracks the resulting
         # future itself, so this callback doesn't need to await it.
-        hass.async_add_executor_job(_cleanup_if_expired, hass)
+        hass.async_add_executor_job(_cleanup_if_expired, hass, arm_limits(hass))
 
     return async_track_time_interval(hass, _tick, CLEANUP_INTERVAL)

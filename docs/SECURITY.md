@@ -84,6 +84,12 @@ date +%s > /config/.storage/ha_dev_tools.armed
   is touched on each use. If `dev_tools` could rewrite the content too, a
   busy session could reset its own ceiling indefinitely; keeping that one
   field permanently outside its own reach is what makes the cap real.
+- Both limits are settings on the integration's **Configure** page, within
+  fixed bounds: the idle window 5 minutes - 8 hours, the hard cap 15
+  minutes - 24 hours, and the idle window never above the cap. There's no
+  "never expire": an arm always ends on its own, at most a day after it
+  was created. The settings are read on every check, so shortening them
+  applies to an active arm at once.
 
 A background task removes an expired arm file on a 5-minute cycle, purely
 for tidiness. It is **never what enforces expiry** - every gated call

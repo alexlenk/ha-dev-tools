@@ -65,6 +65,8 @@ for the full list, including client-specific versions).
 
    This enables `dev_tools` for up to 4 hours (extended by 30 minutes each
    time a tool is used, and it expires on its own after 30 minutes idle).
+   Both limits can be changed on the integration's Configure page (idle
+   window 5 minutes - 8 hours, hard cap 15 minutes - 24 hours).
    Since it expires, a shell alias saves retyping it:
 
    ```bash
