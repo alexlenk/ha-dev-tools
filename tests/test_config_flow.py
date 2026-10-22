@@ -195,3 +195,34 @@ async def test_options_flow_arm_limits(hass: HomeAssistant):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[OPT_ARM_IDLE_MINUTES] == 45
     assert entry.options[OPT_ARM_MAX_MINUTES] == 480
+
+
+@pytest.mark.asyncio
+async def test_options_flow_control_exclusions(hass: HomeAssistant):
+    from custom_components.ha_dev_tools.const import (
+        OPT_CONTROL_EXCLUDED_DEVICES,
+        OPT_CONTROL_EXCLUDED_ENTITIES,
+    )
+
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = result["data_schema"]({})
+    assert defaults[OPT_CONTROL_EXCLUDED_DEVICES] == []
+    assert defaults[OPT_CONTROL_EXCLUDED_ENTITIES] == []
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            OPT_CONTROL_EXCLUDED_DEVICES: ["abc123"],
+            OPT_CONTROL_EXCLUDED_ENTITIES: ["cover.garage_door"],
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[OPT_CONTROL_EXCLUDED_DEVICES] == ["abc123"]
+    assert entry.options[OPT_CONTROL_EXCLUDED_ENTITIES] == ["cover.garage_door"]
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["data_schema"]({})[OPT_CONTROL_EXCLUDED_ENTITIES] == [
+        "cover.garage_door"
+    ]
