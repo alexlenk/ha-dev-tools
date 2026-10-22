@@ -4,6 +4,13 @@ DOMAIN = "ha_dev_tools"
 
 # Options flow key for the dry-run toggle (see access_control.is_dry_run()).
 OPT_DRY_RUN = "dry_run"
+# The arm window's two limits, in minutes - see access_control.py.
+OPT_ARM_IDLE_MINUTES = "arm_idle_minutes"
+OPT_ARM_MAX_MINUTES = "arm_max_minutes"
+ARM_IDLE_MINUTES_DEFAULT = 30
+ARM_MAX_MINUTES_DEFAULT = 240
+ARM_IDLE_MINUTES_RANGE = (5, 480)
+ARM_MAX_MINUTES_RANGE = (15, 1440)
 
 # Options flow keys for git mirroring (see mirror.py). mirror_repo is
 # "owner/repo" for a dedicated, private mirror repo - deliberately never

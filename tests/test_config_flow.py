@@ -170,3 +170,28 @@ async def test_options_flow_configures_mirroring(hass: HomeAssistant):
     assert entry.options[OPT_MIRROR_ENABLED] is True
     assert entry.options[OPT_MIRROR_REPO] == "alexlenk/ha-mirror"
     assert entry.options[OPT_MIRROR_TOKEN] == "ghp_example"
+
+
+@pytest.mark.asyncio
+async def test_options_flow_arm_limits(hass: HomeAssistant):
+    from custom_components.ha_dev_tools.const import (
+        OPT_ARM_IDLE_MINUTES,
+        OPT_ARM_MAX_MINUTES,
+    )
+
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = result["data_schema"]({})
+    assert (defaults[OPT_ARM_IDLE_MINUTES], defaults[OPT_ARM_MAX_MINUTES]) == (30, 240)
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {OPT_ARM_IDLE_MINUTES: 90, OPT_ARM_MAX_MINUTES: 60}
+    )
+    assert result["errors"] == {OPT_ARM_IDLE_MINUTES: "idle_above_cap"}
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {OPT_ARM_IDLE_MINUTES: 45.0, OPT_ARM_MAX_MINUTES: 480.0}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[OPT_ARM_IDLE_MINUTES] == 45
+    assert entry.options[OPT_ARM_MAX_MINUTES] == 480

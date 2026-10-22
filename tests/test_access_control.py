@@ -319,3 +319,64 @@ async def test_arm_status_treats_unparseable_file_as_not_armed(hass: HomeAssista
     status = await access_control.arm_status(hass)
 
     assert status["armed"] is False
+
+
+# --- configurable limits ---------------------------------------------------------
+
+
+def _entry_with(hass: HomeAssistant, **options) -> MockConfigEntry:
+    entry = MockConfigEntry(domain=DOMAIN, options=options)
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_configured_limits_apply_to_an_active_arm(hass: HomeAssistant):
+    from custom_components.ha_dev_tools.const import (
+        OPT_ARM_IDLE_MINUTES,
+        OPT_ARM_MAX_MINUTES,
+    )
+
+    now = time.time()
+    # 20 minutes idle, 2 hours since arming: fine with the defaults.
+    _write_arm_file(hass, armed_at=now - 7200, mtime=now - 1200)
+    await access_control.check_armed(hass)
+
+    entry = _entry_with(hass, **{OPT_ARM_IDLE_MINUTES: 10})
+    with pytest.raises(NotArmedError, match="extended by 10 minutes"):
+        await access_control.check_armed(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={OPT_ARM_IDLE_MINUTES: 30, OPT_ARM_MAX_MINUTES: 60}
+    )
+    with pytest.raises(NotArmedError, match="for up to 1 hour "):
+        await access_control.check_armed(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={OPT_ARM_IDLE_MINUTES: 480, OPT_ARM_MAX_MINUTES: 1440}
+    )
+    _write_arm_file(hass, armed_at=now - 20 * 3600, mtime=now - 7 * 3600)
+    await access_control.check_armed(hass)  # longer limits: still armed
+    status = await access_control.arm_status(hass)
+    assert status["armed"] is True and "by 8 hours" in status["note"]
+
+
+def test_limits_are_clamped_and_idle_stays_within_the_cap(hass: HomeAssistant):
+    from datetime import timedelta
+
+    from custom_components.ha_dev_tools.const import (
+        OPT_ARM_IDLE_MINUTES,
+        OPT_ARM_MAX_MINUTES,
+    )
+
+    assert access_control.arm_limits(hass) == access_control.DEFAULT_LIMITS
+    entry = _entry_with(hass, **{OPT_ARM_IDLE_MINUTES: 0, OPT_ARM_MAX_MINUTES: 10**6})
+    limits = access_control.arm_limits(hass)
+    assert (limits.idle, limits.cap) == (timedelta(minutes=5), timedelta(hours=24))
+    hass.config_entries.async_update_entry(
+        entry, options={OPT_ARM_IDLE_MINUTES: 400, OPT_ARM_MAX_MINUTES: 60}
+    )
+    limits = access_control.arm_limits(hass)
+    assert limits.idle == limits.cap == timedelta(minutes=60)
+    hass.config_entries.async_update_entry(
+        entry, options={OPT_ARM_IDLE_MINUTES: "x", OPT_ARM_MAX_MINUTES: None}
+    )
+    assert access_control.arm_limits(hass) == access_control.DEFAULT_LIMITS

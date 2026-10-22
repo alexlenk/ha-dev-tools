@@ -1,4 +1,4 @@
-"""Options flow: the dry-run toggle."""
+"""Options flow: dry-run, the arm window's limits, git mirroring."""
 
 from __future__ import annotations
 
@@ -12,10 +12,35 @@ try:
     import probatio as vol
 except ImportError:  # pragma: no cover - HA before 2026.9
     import voluptuous as vol  # type: ignore[no-redef]
+
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.helpers import selector
 
-from .const import OPT_DRY_RUN, OPT_MIRROR_ENABLED, OPT_MIRROR_REPO, OPT_MIRROR_TOKEN
+from .const import (
+    ARM_IDLE_MINUTES_DEFAULT,
+    ARM_IDLE_MINUTES_RANGE,
+    ARM_MAX_MINUTES_DEFAULT,
+    ARM_MAX_MINUTES_RANGE,
+    OPT_ARM_IDLE_MINUTES,
+    OPT_ARM_MAX_MINUTES,
+    OPT_DRY_RUN,
+    OPT_MIRROR_ENABLED,
+    OPT_MIRROR_REPO,
+    OPT_MIRROR_TOKEN,
+)
+
+
+def _minutes(bounds: tuple[int, int]) -> selector.NumberSelector:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=bounds[0],
+            max=bounds[1],
+            step=1,
+            unit_of_measurement="min",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    )
+
 
 # GitHub's owner/repo: what the mirror's API URLs are built from.
 _REPO = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
@@ -46,8 +71,15 @@ class HADevToolsOptionsFlow(OptionsFlow):
                 data[OPT_MIRROR_TOKEN] = options[OPT_MIRROR_TOKEN]
             repo = (data.get(OPT_MIRROR_REPO) or "").strip()
             data[OPT_MIRROR_REPO] = repo
+            for key in (OPT_ARM_IDLE_MINUTES, OPT_ARM_MAX_MINUTES):
+                if key in data:
+                    data[key] = int(data[key])
             if repo and not _REPO.fullmatch(repo):
                 errors[OPT_MIRROR_REPO] = "invalid_repo"
+            elif data.get(OPT_ARM_IDLE_MINUTES, ARM_IDLE_MINUTES_DEFAULT) > data.get(
+                OPT_ARM_MAX_MINUTES, ARM_MAX_MINUTES_DEFAULT
+            ):
+                errors[OPT_ARM_IDLE_MINUTES] = "idle_above_cap"
             else:
                 return self.async_create_entry(data=data)
 
@@ -59,6 +91,18 @@ class HADevToolsOptionsFlow(OptionsFlow):
                     vol.Required(
                         OPT_DRY_RUN, default=options.get(OPT_DRY_RUN, False)
                     ): bool,
+                    vol.Required(
+                        OPT_ARM_IDLE_MINUTES,
+                        default=options.get(
+                            OPT_ARM_IDLE_MINUTES, ARM_IDLE_MINUTES_DEFAULT
+                        ),
+                    ): _minutes(ARM_IDLE_MINUTES_RANGE),
+                    vol.Required(
+                        OPT_ARM_MAX_MINUTES,
+                        default=options.get(
+                            OPT_ARM_MAX_MINUTES, ARM_MAX_MINUTES_DEFAULT
+                        ),
+                    ): _minutes(ARM_MAX_MINUTES_RANGE),
                     vol.Required(
                         OPT_MIRROR_ENABLED,
                         default=options.get(OPT_MIRROR_ENABLED, False),
