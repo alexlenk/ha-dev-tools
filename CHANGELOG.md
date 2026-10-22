@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.31.0] - 2026-10-22
+
+### Added
+- **`control_entities`: turn entities on, off or toggle them without writing an automation.**
+  - Domains: `switch`, `light`, `fan`, `input_boolean`, `climate`, `media_player`, `humidifier`, `cover` and `valve`. For a cover or valve, on opens and off closes.
+  - `brightness_pct` (0-100) goes with `on`, for lights only.
+  - Several entities can be passed in one call.
+  - Every call is confirm-gated. The preview shows each entity's name, area, current state and the service it would call.
+  - The result shows each entity's state before and after. One that fails doesn't stop the others.
+  - Each action maps to that domain's own service, so no other service or service data can be reached.
+- **Devices and entities agents may never control**, two new settings on the Configure page.
+  - `control_entities` refuses every entity of a listed device (a garage door, say) and every listed entity.
+  - `lock`, `alarm_control_panel` and `siren` are never controlled, whatever the settings.
+  - A refused call lists every reason and gets no confirm token.
+
 ## [2.30.2] - 2026-10-22
 
 ### Added

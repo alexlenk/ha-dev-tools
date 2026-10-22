@@ -18,6 +18,13 @@ surface itself is the allowlist:
   could be a desk lamp or a garage door opener; a `lock`/`alarm_control_panel`
   entity is out of scope entirely and was never considered here).
 
+`control_entities` (2026-10-22) is the owner's decision to open the
+actuator domains after all - on / off / toggle (plus a light's brightness)
+for a fixed list of domains, each mapped to its own hardcoded service, so
+it's still no passthrough. lock, alarm_control_panel and siren stay out;
+devices and entities listed on the Configure page (a garage door, say) are
+refused, and every call is confirm-gated like the rest.
+
 Every caller of these goes through the same WriteGatedTool propose/confirm
 gate as write_automation (see write_confirmation.py) on top of the two
 GatedTool checks (arm file + admin) every tool already requires - these
@@ -165,3 +172,166 @@ async def set_boolean_value(hass: HomeAssistant, entity_id: str, state: bool) ->
         {"entity_id": entity_id},
         blocking=True,
     )
+
+
+# --- control_entities: on / off / toggle without an automation ----------------
+#
+# The owner's decisions (2026-10-22): switch, light, fan, input_boolean,
+# climate, media_player, humidifier, cover and valve; on / off / toggle,
+# plus brightness for lights; every call confirm-gated; devices and
+# entities listed in the Configure page are never acted on. lock,
+# alarm_control_panel and siren aren't controllable at all - none of them
+# is a domain below, and they're refused by name for a clear message.
+
+# domain -> (on, off, toggle) service
+CONTROL_SERVICES: dict[str, tuple[str, str, str]] = {
+    domain: ("turn_on", "turn_off", "toggle")
+    for domain in (
+        "switch",
+        "light",
+        "fan",
+        "input_boolean",
+        "climate",
+        "media_player",
+        "humidifier",
+    )
+} | {
+    "cover": ("open_cover", "close_cover", "toggle"),
+    "valve": ("open_valve", "close_valve", "toggle"),
+}
+NEVER_CONTROLLED = ("lock", "alarm_control_panel", "siren")
+CONTROL_ACTIONS = ("on", "off", "toggle")
+
+
+class ControlRefusedError(Exception):
+    """A control_entities call that can't go ahead - nothing was called."""
+
+
+def _excluded(hass: HomeAssistant) -> tuple[set[str], set[str]]:
+    from .const import (
+        DOMAIN,
+        OPT_CONTROL_EXCLUDED_DEVICES,
+        OPT_CONTROL_EXCLUDED_ENTITIES,
+    )
+
+    entries = hass.config_entries.async_entries(DOMAIN)
+    options = entries[0].options if entries else {}
+    return (
+        set(options.get(OPT_CONTROL_EXCLUDED_DEVICES) or []),
+        set(options.get(OPT_CONTROL_EXCLUDED_ENTITIES) or []),
+    )
+
+
+def plan_control(
+    hass: HomeAssistant,
+    entity_ids: list[str],
+    action: str,
+    brightness_pct: float | None = None,
+) -> list[dict[str, Any]]:
+    """Each entity's service call and what it is now - or every reason the
+    call is refused, before anything happens."""
+    from homeassistant.helpers import area_registry as ar
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    if action not in CONTROL_ACTIONS:
+        raise ControlRefusedError(f"action is one of {CONTROL_ACTIONS}")
+    problems: list[str] = []
+    if brightness_pct is not None and action != "on":
+        problems.append("brightness_pct goes with action 'on'")
+    if len(set(entity_ids)) != len(entity_ids):
+        problems.append("an entity is listed more than once")
+    excluded_devices, excluded_entities = _excluded(hass)
+    entities, devices, areas = (
+        er.async_get(hass),
+        dr.async_get(hass),
+        ar.async_get(hass),
+    )
+    plan = []
+    for entity_id in entity_ids:
+        domain = _domain_of(entity_id)
+        if domain in NEVER_CONTROLLED:
+            problems.append(f"{entity_id}: {domain} is never controlled by an agent")
+            continue
+        if domain not in CONTROL_SERVICES:
+            problems.append(
+                f"{entity_id}: {domain} isn't controllable here (one of "
+                f"{', '.join(sorted(CONTROL_SERVICES))})"
+            )
+            continue
+        state = hass.states.get(entity_id)
+        if state is None:
+            problems.append(f"{entity_id}: no such entity")
+            continue
+        entry = entities.async_get(entity_id)
+        device = (
+            devices.async_get(entry.device_id) if entry and entry.device_id else None
+        )
+        if entity_id in excluded_entities:
+            problems.append(
+                f"{entity_id}: excluded from agent control (Configure page)"
+            )
+            continue
+        if device is not None and device.id in excluded_devices:
+            problems.append(
+                f"{entity_id}: its device '{device.name_by_user or device.name}' is "
+                "excluded from agent control (Configure page)"
+            )
+            continue
+        if brightness_pct is not None and domain != "light":
+            problems.append(f"{entity_id}: brightness_pct is for lights only")
+            continue
+        area_id = (entry.area_id if entry else None) or (
+            device.area_id if device else None
+        )
+        area = areas.async_get_area(area_id) if area_id else None
+        service = CONTROL_SERVICES[domain][CONTROL_ACTIONS.index(action)]
+        data: dict[str, Any] = {"entity_id": entity_id}
+        if brightness_pct is not None:
+            data["brightness_pct"] = brightness_pct
+        plan.append(
+            {
+                "entity_id": entity_id,
+                "name": state.attributes.get("friendly_name", entity_id),
+                "area": area.name if area else None,
+                "state_now": state.state,
+                "service": f"{domain}.{service}",
+                "data": data,
+            }
+        )
+    if problems:
+        raise ControlRefusedError("; ".join(problems))
+    return plan
+
+
+async def control_entities(
+    hass: HomeAssistant, plan: list[dict[str, Any]], user_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Call each planned service as `user_id` (so the logbook says who);
+    what each entity is afterwards. One that fails doesn't stop the
+    others - each reports its own outcome."""
+    results = []
+    for step in plan:
+        domain, service = step["service"].split(".", 1)
+        entity_id = step["entity_id"]
+        try:
+            await hass.services.async_call(
+                domain,
+                service,
+                step["data"],
+                blocking=True,
+                context=Context(user_id=user_id),
+            )
+        except Exception as err:  # noqa: BLE001 - reported per entity
+            results.append({"entity_id": entity_id, "error": str(err)})
+            continue
+        state = hass.states.get(entity_id)
+        results.append(
+            {
+                "entity_id": entity_id,
+                "service": step["service"],
+                "state_before": step["state_now"],
+                "state_after": state.state if state else None,
+            }
+        )
+    return results

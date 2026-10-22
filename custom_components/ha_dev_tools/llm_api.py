@@ -4590,10 +4590,8 @@ class SetBooleanValueTool(WriteGatedTool):
     name = "set_boolean_value"
     description = (
         "Turn an `input_boolean` helper on or off directly. Scoped to just "
-        "this virtual helper domain - never `switch` or any other domain "
-        "that could be a real-world actuator (see issue #76's risk "
-        "discussion); those would need their own separate security review "
-        "before getting a write tool."
+        "this virtual helper domain - control_entities turns other "
+        "entities (switch, light, cover, ...) on and off."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("entity_id"): str, vol.Required("state"): bool}
@@ -4618,6 +4616,83 @@ class SetBooleanValueTool(WriteGatedTool):
         ) as exc:
             return _tool_error(exc)
         return {"entity_id": args["entity_id"], "state": args["state"]}
+
+
+class ControlEntitiesTool(WriteGatedTool):
+    """Turn entities on/off/toggle without an automation - see
+    service_call_manager.py's control_entities."""
+
+    name = "control_entities"
+    description = (
+        "Turn one or more entities on, off or toggle them directly, "
+        "without writing an automation: switch, light, fan, input_boolean, "
+        "climate, media_player, humidifier (turn_on/turn_off/toggle), cover "
+        "(on opens, off closes) and valve (on opens, off closes). "
+        "brightness_pct (0-100) goes with action 'on' and lights only. "
+        "lock, alarm_control_panel and siren are never controlled, and "
+        "neither is any device or entity excluded on this integration's "
+        "Configure page - such a call is refused before a confirm_token is "
+        "issued, with every reason listed. The preview shows each entity's "
+        "name, area, current state and the service that would be called; "
+        "the result each one's state before and after (one that fails "
+        "doesn't stop the others)."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("entity_ids"): vol.All([str], vol.Length(min=1)),
+            vol.Required("action"): vol.In(service_call_manager.CONTROL_ACTIONS),
+            vol.Optional("brightness_pct"): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=100)
+            ),
+        }
+    )
+
+    @staticmethod
+    def _plan(hass: HomeAssistant, args: dict[str, Any]) -> list[dict[str, Any]]:
+        return service_call_manager.plan_control(
+            hass, args["entity_ids"], args["action"], args.get("brightness_pct")
+        )
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """Every reason the entities can't be controlled, if any."""
+        try:
+            self._plan(hass, tool_input.tool_args)
+        except service_call_manager.ControlRefusedError as exc:
+            return str(exc)
+        return None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Each entity, where it is, what it is now and the service call."""
+        return {
+            "would_call": cast(JsonValueType, self._plan(hass, tool_input.tool_args))
+        }
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Call each entity's service; report its state before and after."""
+        results = await service_call_manager.control_entities(
+            hass,
+            self._plan(hass, tool_input.tool_args),
+            llm_context.context.user_id if llm_context.context else None,
+        )
+        return {"results": cast(JsonValueType, results)}
 
 
 class ListScriptsTool(GatedTool):
@@ -5482,6 +5557,7 @@ class DevToolsAPI(llm.API):
                 TriggerAutomationTool(),
                 SetNumberValueTool(),
                 SetBooleanValueTool(),
+                ControlEntitiesTool(),
                 ListScriptsTool(self.script_manager),
                 GetScriptTool(self.script_manager),
                 WriteScriptTool(self.script_manager),

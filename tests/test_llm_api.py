@@ -72,6 +72,7 @@ from custom_components.ha_dev_tools.llm_api import (
     DOMAIN,
     AuditAutomationsTool,
     CheckConfigTool,
+    ControlEntitiesTool,
     CreateDerivedSensorTool,
     CreateHelperTool,
     CreateTemplateEntityTool,
@@ -251,6 +252,7 @@ async def test_dev_tools_real_tools_registered(
         "trigger_automation",
         "set_number_value",
         "set_boolean_value",
+        "control_entities",
         "list_scripts",
         "get_script",
         "write_script",
@@ -3326,6 +3328,81 @@ async def test_set_boolean_value_tool_surfaces_entity_not_found_error(
     )
 
     assert result["error_type"] == "EntityNotFoundError"
+
+
+@pytest.mark.asyncio
+async def test_control_entities_tool_refuses_before_a_token(
+    hass: HomeAssistant, admin_user
+):
+    _arm(hass)
+    hass.states.async_set("lock.front_door", "locked")
+
+    result = await ControlEntitiesTool().async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="control_entities",
+            tool_args={"entity_ids": ["lock.front_door"], "action": "off"},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert "confirm_token" not in result
+    assert result["error_type"] == "Invalid"
+    assert "lock is never controlled" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_control_entities_tool_confirm_flow(hass: HomeAssistant, admin_user):
+    _arm(hass)
+    hass.states.async_set("light.desk", "off", {"friendly_name": "Desk lamp"})
+
+    callers = []
+
+    async def turn_on(call):
+        callers.append(call.context.user_id)
+        hass.states.async_set("light.desk", "on")
+
+    hass.services.async_register("light", "turn_on", turn_on)
+    tool = ControlEntitiesTool()
+    args = {"entity_ids": ["light.desk"], "action": "on", "brightness_pct": 30}
+
+    proposal = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="control_entities", tool_args=args),
+        _llm_context(admin_user.id),
+    )
+    assert proposal["would_call"] == [
+        {
+            "entity_id": "light.desk",
+            "name": "Desk lamp",
+            "area": None,
+            "state_now": "off",
+            "service": "light.turn_on",
+            "data": {"entity_id": "light.desk", "brightness_pct": 30},
+        }
+    ]
+    assert hass.states.get("light.desk").state == "off"
+
+    result = await tool.async_call(
+        hass,
+        llm.ToolInput(
+            tool_name="control_entities",
+            tool_args={**args, "confirm_token": proposal["confirm_token"]},
+        ),
+        _llm_context(admin_user.id),
+    )
+
+    assert _without_arm(result) == {
+        "results": [
+            {
+                "entity_id": "light.desk",
+                "service": "light.turn_on",
+                "state_before": "off",
+                "state_after": "on",
+            }
+        ]
+    }
+    assert callers == [admin_user.id]
 
 
 # --- write_dashboard tool (storage-file-based mirroring) ---------------------

@@ -172,8 +172,8 @@ HA Dev Tools → Configure), not YAML.
 
 ## Scoped service-call tools
 
-`trigger_automation`, `set_number_value`, and `set_boolean_value`
-(`service_call_manager.py`) call Home Assistant services - a different
+`trigger_automation`, `set_number_value`, `set_boolean_value` and
+`control_entities` (`service_call_manager.py`) call Home Assistant services - a different
 surface than the path allowlist above, which only governs file-touching
 tools. A generic `call_service` tool (domain + service + arbitrary data) was
 considered and rejected: it would be able to reach *any* registered
@@ -182,7 +182,7 @@ devices (`lock.unlock`, `alarm_control_panel.disarm`, `backup.*`,
 `homeassistant.restart`), and bounding that with a configurable allow/deny
 list just moves the same risk into a config value someone has to get right.
 
-Instead, each of these three tools wraps exactly one hardcoded service
+Instead, each of these tools wraps exactly one hardcoded service
 call, so the tool surface itself is the allowlist rather than something
 configured on top of a broad one:
 
@@ -195,10 +195,29 @@ configured on top of a broad one:
   `input_number` and `input_boolean` domains respectively - refusing every
   other domain outright. In particular, `switch` (which could be anything
   from a desk lamp to a garage door opener) and any domain that maps to a
-  real-world actuator were deliberately left out; those would need their
-  own separate risk review before ever getting a write tool.
+  real-world actuator were deliberately left out of these two; they got
+  their own review as `control_entities`, below.
 
-All three still go through the same two `GatedTool` checks (arm file +
+`control_entities` (2026-10-22) is the owner's decision to open the
+actuator domains after all, still without a passthrough: on / off / toggle
+for `switch`, `light`, `fan`, `input_boolean`, `climate`, `media_player`,
+`humidifier`, `cover` and `valve`, each action mapped to that domain's own
+hardcoded service (`turn_on`/`turn_off`/`toggle`, `open_cover`/
+`close_cover`, `open_valve`/`close_valve`), plus `brightness_pct` for a
+light. No other service or service data can be reached through it.
+
+- `lock`, `alarm_control_panel` and `siren` are never controllable - they
+  aren't in the mapping, and are refused by name.
+- Devices and entities listed on the Configure page ("Devices/Entities
+  agents may never control") are refused - every entity of an excluded
+  device, whatever it is. That's where a garage door opener or a door's
+  relay switch goes.
+- A refusal comes before any confirm token, listing every reason, so a
+  call that can't go ahead is never put to the user to confirm.
+- The preview names each entity, its area, its current state and the
+  exact service call, so the user confirms what will actually move.
+
+All four still go through the same two `GatedTool` checks (arm file +
 admin) as every other tool, plus the same `WriteGatedTool` propose/confirm
 gate as `write_automation` - this scoping is in addition to those, not a
 replacement for them.

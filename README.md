@@ -227,7 +227,8 @@ matters for setup, covered below.
 |---|---|
 | `trigger_automation` | Run an existing automation immediately by its config id, the same as the UI's "Run actions" button - for one-shot testing without a throwaway automation edit cycle. Like the button, the run is left to finish on its own - a client timeout never cuts it off; it returns at once with the run's `context_id` (`wait_seconds` waits for a short run's outcome). Only ever triggers an automation already in reviewed config; never accepts an arbitrary entity_id or service |
 | `set_number_value` | Set a `number` or `input_number` entity's value directly (e.g. an EMHASS battery-schedule slot, a Modbus-backed inverter setting) - scoped to exactly these two domains, not a generic service-call tool |
-| `set_boolean_value` | Turn an `input_boolean` helper on or off directly - scoped to just this virtual helper domain, never `switch` or any other domain that could be a real-world actuator |
+| `set_boolean_value` | Turn an `input_boolean` helper on or off directly - scoped to just this virtual helper domain |
+| `control_entities` | Turn entities on, off or toggle them without writing an automation: `switch`, `light` (with optional `brightness_pct`), `fan`, `input_boolean`, `climate`, `media_player`, `humidifier`, `cover` and `valve` (on opens, off closes). The preview shows each entity's name, area, current state and the service it would call; the result shows each one's state before and after. `lock`, `alarm_control_panel` and `siren` are never controlled, and neither is any device or entity listed under "Devices/Entities agents may never control" on the Configure page (a garage door, say) - such a call is refused before a confirm token is issued |
 
 **Diagnose**
 | Tool | What it does |

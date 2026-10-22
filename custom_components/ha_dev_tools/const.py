@@ -11,6 +11,9 @@ ARM_IDLE_MINUTES_DEFAULT = 30
 ARM_MAX_MINUTES_DEFAULT = 240
 ARM_IDLE_MINUTES_RANGE = (5, 480)
 ARM_MAX_MINUTES_RANGE = (15, 1440)
+# Devices / entities control_entities may never act on (Configure page).
+OPT_CONTROL_EXCLUDED_DEVICES = "control_excluded_devices"
+OPT_CONTROL_EXCLUDED_ENTITIES = "control_excluded_entities"
 
 # Options flow keys for git mirroring (see mirror.py). mirror_repo is
 # "owner/repo" for a dedicated, private mirror repo - deliberately never

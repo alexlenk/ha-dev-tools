@@ -1,4 +1,5 @@
-"""Options flow: dry-run, the arm window's limits, git mirroring."""
+"""Options flow: dry-run, the arm window's limits, what control_entities
+may never touch, git mirroring."""
 
 from __future__ import annotations
 
@@ -23,11 +24,14 @@ from .const import (
     ARM_MAX_MINUTES_RANGE,
     OPT_ARM_IDLE_MINUTES,
     OPT_ARM_MAX_MINUTES,
+    OPT_CONTROL_EXCLUDED_DEVICES,
+    OPT_CONTROL_EXCLUDED_ENTITIES,
     OPT_DRY_RUN,
     OPT_MIRROR_ENABLED,
     OPT_MIRROR_REPO,
     OPT_MIRROR_TOKEN,
 )
+from .service_call_manager import CONTROL_SERVICES
 
 
 def _minutes(bounds: tuple[int, int]) -> selector.NumberSelector:
@@ -42,12 +46,17 @@ def _minutes(bounds: tuple[int, int]) -> selector.NumberSelector:
     )
 
 
+# Only what control_entities could act on is offered.
+_CONTROLLABLE_DOMAINS = sorted(CONTROL_SERVICES)
+
+
 # GitHub's owner/repo: what the mirror's API URLs are built from.
 _REPO = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 
 
 class HADevToolsOptionsFlow(OptionsFlow):
-    """Manage the dry-run toggle and git-mirroring settings after setup."""
+    """Manage dry-run, the arm window, control exclusions and git
+    mirroring after setup."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Accept config_entry only because async_get_options_flow passes
@@ -103,6 +112,28 @@ class HADevToolsOptionsFlow(OptionsFlow):
                             OPT_ARM_MAX_MINUTES, ARM_MAX_MINUTES_DEFAULT
                         ),
                     ): _minutes(ARM_MAX_MINUTES_RANGE),
+                    vol.Optional(
+                        OPT_CONTROL_EXCLUDED_DEVICES,
+                        default=options.get(OPT_CONTROL_EXCLUDED_DEVICES, []),
+                    ): selector.DeviceSelector(
+                        selector.DeviceSelectorConfig(
+                            entity=selector.EntityFilterSelectorConfig(
+                                domain=_CONTROLLABLE_DOMAINS
+                            ),
+                            multiple=True,
+                        )
+                    ),
+                    vol.Optional(
+                        OPT_CONTROL_EXCLUDED_ENTITIES,
+                        default=options.get(OPT_CONTROL_EXCLUDED_ENTITIES, []),
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            filter=selector.EntityWithDeviceFilterSelectorConfig(
+                                domain=_CONTROLLABLE_DOMAINS
+                            ),
+                            multiple=True,
+                        )
+                    ),
                     vol.Required(
                         OPT_MIRROR_ENABLED,
                         default=options.get(OPT_MIRROR_ENABLED, False),
