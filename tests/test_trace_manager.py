@@ -27,6 +27,7 @@ AUTOMATIONS = [
     {
         "id": "porch_light",
         "alias": "Porch light",
+        "variables": {"api_token": "tok-abcdef12"},
         "triggers": [{"trigger": "event", "event_type": "porch"}],
         "conditions": [
             {"condition": "template", "value_template": "{{ trigger.event.data.go }}"}
@@ -161,6 +162,8 @@ async def test_get_trace_by_run_id_and_options(hass: HomeAssistant, admin_user):
     assert trace["steps"][-1]["result"]["result"] is False
     assert all("changed_variables" not in step for step in trace["steps"])
     assert trace["config"]["id"] == "porch_light"
+    # Masked like get_automation's config (issue #151).
+    assert "tok-abcdef12" not in str(trace["config"])
 
 
 @pytest.mark.asyncio
