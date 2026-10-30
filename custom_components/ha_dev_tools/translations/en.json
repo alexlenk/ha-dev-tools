@@ -21,7 +21,10 @@
           "control_excluded_devices": "Devices agents may never control",
           "control_excluded_entities": "Entities agents may never control",
           "mirror_enabled": "Enable git mirroring",
-          "mirror_repo": "Mirror repository (owner/repo)",
+          "mirror_provider": "Mirror host",
+          "mirror_repo": "Mirror repository",
+          "mirror_server": "GitLab server",
+          "mirror_verify_ssl": "Verify the GitLab server's certificate",
           "mirror_token": "Mirror repository access token"
         },
         "data_description": {
@@ -31,20 +34,37 @@
           "control_excluded_devices": "control_entities refuses every entity of these devices - a garage door, a door lock's relay, anything that mustn't be switched by an agent. lock, alarm_control_panel and siren entities are never controlled anyway.",
           "control_excluded_entities": "control_entities refuses these entities, whatever their device.",
           "mirror_enabled": "When enabled, a confirmed write from a supported tool (write_automation, delete_automation, write_script, create/update/delete_template_entity, write_dashboard, create/update/delete_helper, create/update/delete_derived_sensor, delete_entity/delete_entities) pushes the touched content's before/after state to the mirror repository below - a private, push-only audit trail and manual-rollback source, never the repo any deploy mechanism pulls from. Derived sensors have no real file, so their resolved config entry data/options are pushed to a synthetic path instead, and deleting one pushes a small deletion marker rather than removing anything; delete_entity works the same way, pushing the entity's full registry data to a synthetic path before removing it, since entity_registry deletion is otherwise only protected by Home Assistant's own 30-day orphan window. delete_entities pushes one combined before/after commit pair for the whole list rather than one pair per entity, so a large batch doesn't flood the mirror repository with commits. Content that looks like it contains a literal credential is never pushed. In dry-run mode (above), write_automation, delete_automation, write_script, and the template-entity tools push the resolved would-be content to a proposed branch (named after the write's kind and id) instead of the mirror repo's default branch, since nothing live changed; write_dashboard, the helper tools, the derived-sensor tools, and delete_entity/delete_entities have no such preview and push nothing while dry-run is on.",
-          "mirror_repo": "A dedicated, private GitHub repository in owner/repo form. Deliberately separate from any repo a Git Pull-style add-on deploys from.",
-          "mirror_token": "A fine-grained GitHub personal access token scoped to only the mirror repository above, with Contents: Read and write and nothing else - no workflow scope, no admin, an actual expiration date set. Never shown here once saved: leave it empty to keep the stored token, or enter a new one to replace it."
+          "mirror_provider": "GitHub, or GitLab (gitlab.com or self-hosted).",
+          "mirror_repo": "A dedicated, private repository. GitHub: owner/repo. GitLab: the project path as in its URL, e.g. group/subgroup/project. Deliberately separate from any repo a Git Pull-style add-on deploys from.",
+          "mirror_server": "GitLab only: the server's address, starting with https - GitLab.com's own by default, or your self-hosted server's (a port and sub-path are fine).",
+          "mirror_verify_ssl": "GitLab only. Leave on. Turn off only for a self-hosted GitLab whose certificate comes from an internal CA Home Assistant doesn't trust - the token is then sent without checking who answers, and a repair issue stays up while it's off.",
+          "mirror_token": "GitHub: a fine-grained personal access token scoped to only the mirror repository, with Contents: Read and write and nothing else - no workflow scope, no admin, an actual expiration date set. GitLab: a project access token on the mirror project (Settings -> Access tokens), role Developer or higher (Maintainer if the default branch is protected), scope api - the file API refuses write_repository, which only covers git push - with an expiration date. Never shown here once saved: leave it empty to keep the stored token, or enter a new one to replace it."
         }
       }
     },
     "error": {
       "invalid_repo": "Not a GitHub repository in owner/repo form.",
-      "idle_above_cap": "The idle window can't be longer than the hard cap."
+      "idle_above_cap": "The idle window can't be longer than the hard cap.",
+      "invalid_project": "Not a GitLab project path (group/project, subgroups allowed).",
+      "invalid_server": "The server address must start with https and contain nothing but a host, an optional port and a path."
     }
   },
   "issues": {
     "mcp_server_not_exposing_dev_tools": {
       "title": "dev_tools isn't reachable over MCP yet",
       "description": "HA Dev Tools registers the `dev_tools` LLM API, but Home Assistant's own **Model Context Protocol Server** integration isn't loaded or isn't configured to expose it - so an MCP client currently gets a plain 404 instead of reaching any tool here.\n\nTo fix: **Settings → Devices & Services → Add Integration → Model Context Protocol Server** (if not already added), then add `dev_tools` to its exposed APIs. This issue clears itself automatically once that's done - no restart needed."
+    },
+    "mirror_tls_unverified": {
+      "title": "Mirror token sent without checking the server certificate",
+      "description": "Git mirroring to {server} has certificate verification turned off, so the mirror token is sent to whoever answers at that address. Add the server's CA to Home Assistant's trust store (or give it a publicly trusted certificate), then turn **Verify the GitLab server's certificate** back on in **Settings -> Devices & Services -> HA Dev Tools -> Configure**. This issue clears itself when it's on again or mirroring is off."
+    }
+  },
+  "selector": {
+    "mirror_provider": {
+      "options": {
+        "github": "GitHub",
+        "gitlab": "GitLab"
+      }
     }
   }
 }

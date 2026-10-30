@@ -15,7 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from . import access_control, config_snapshot
+from . import access_control, config_snapshot, mirror
 from .automation_manager import AutomationManager
 from .const import DOMAIN
 from .file_manager import FileManager
@@ -70,6 +70,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Snapshots of hand-edited config to the mirror repo, at start and daily
     # (issue #105) - a no-op while mirroring is off.
     unsub_snapshots = config_snapshot.async_setup_snapshots(hass)
+    # Repair issue while the mirror skips GitLab's certificate check (#182).
+    mirror.refresh_tls_issue(hass, entry.options)
     hass.data[DOMAIN]["unsub_llm_api"] = unsub_llm_api
     hass.data[DOMAIN]["unsub_arm_cleanup"] = unsub_arm_cleanup
     hass.data[DOMAIN]["unsub_mcp_repair"] = unsub_mcp_repair

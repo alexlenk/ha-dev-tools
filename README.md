@@ -273,20 +273,36 @@ confirm step still returns its preview, but the underlying write never
 actually happens - see [The safety model](#the-safety-model) above for what
 that does and doesn't guarantee.
 
-**Git mirroring:** from the same **Configure** dialog, enable it, set
-**Mirror repository** to a dedicated private GitHub repo (`owner/repo` -
-separate from your HA config repo, and never the repo any deploy mechanism
-pulls from), and paste a **Mirror repository access token**. To create the
-token: GitHub → your avatar → **Settings → Developer settings → Personal
-access tokens → Fine-grained tokens → Generate new token** → restrict
-**Repository access** to that one repo → set **Contents** permission to
-**Read and write** (nothing else) → set an **Expiration** date → generate
-and paste it in.
+**Git mirroring:** from the same **Configure** dialog, enable it, pick the
+**Mirror host** (GitHub or GitLab), set **Mirror repository** to a
+dedicated private repo - separate from your HA config repo, and never the
+repo any deploy mechanism pulls from - and paste a **Mirror repository
+access token**.
+
+- **GitHub:** the repository is `owner/repo`. To create the token: GitHub →
+  your avatar → **Settings → Developer settings → Personal access tokens →
+  Fine-grained tokens → Generate new token** → restrict **Repository
+  access** to that one repo → set **Contents** permission to **Read and
+  write** (nothing else) → set an **Expiration** date → generate and paste
+  it in.
+- **GitLab** (gitlab.com or self-hosted): set **GitLab server** to its
+  `https://` address (default `https://gitlab.com`) and the repository to
+  the project path as in its URL (`group/subgroup/project`). The project
+  needs at least one commit. To create the token: open the project →
+  **Settings → Access tokens → Add new token** → role **Developer** (or
+  **Maintainer**, if the default branch is protected against Developer
+  pushes) → scope **`api`** → an expiration date → create and paste it in.
+  A project access token only reaches that one project. It has to be
+  `api`: GitLab's file API refuses `write_repository`, which only covers
+  `git push`. For a self-hosted server whose certificate comes from an
+  internal CA, you can turn off **Verify the GitLab server's certificate**
+  - a repair issue stays up while it's off, since the token is then sent to
+  whoever answers at that address. Better: add the CA to Home Assistant's
+  trust store and leave it on.
 
 Every confirmed write then pushes the touched file's before/after content
 to that repo's default branch (in dry-run, to its own `proposed/<kind>-<id>`
-branch instead, so you can review the diff on GitHub before turning dry-run
-off). Content that looks like a literal credential (not routed through
+branch instead, so you can review the diff before turning dry-run off). Content that looks like a literal credential (not routed through
 `!secret`) is never pushed. Rollback is manual: find the old version in the
 mirror repo's git history and paste it back in - there's no automated
 revert. Helper and derived-sensor writes are reconstructed in memory rather
