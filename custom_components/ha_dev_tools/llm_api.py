@@ -4292,15 +4292,6 @@ class GetDashboardTool(GatedTool):
         return {**config, dashboard_patch.HASH_KEY: dashboard_patch.config_hash(config)}
 
 
-def _dashboard_storage_path(url_path: str | None) -> str:
-    # Storage key convention confirmed directly against home-assistant/
-    # core's lovelace/dashboard.py: CONFIG_STORAGE_KEY_DEFAULT = "lovelace"
-    # for the default dashboard, CONFIG_STORAGE_KEY = "lovelace.{}" (the
-    # dashboard's id, which is its url_path for storage-mode dashboards)
-    # for any other.
-    return f".storage/lovelace{f'.{url_path}' if url_path else ''}"
-
-
 async def _save_dashboard(
     hass: HomeAssistant,
     user: Any,
@@ -4309,12 +4300,32 @@ async def _save_dashboard(
     response: JsonObjectType,
 ) -> JsonObjectType:
     """Save a dashboard config and mirror the storage file's before/after."""
-    storage_path = _dashboard_storage_path(url_path)
-    content_before = await _read_storage_file(hass, storage_path)
-    await dashboard_manager.write_dashboard(hass, user, config, url_path=url_path)
-    content_after = await _read_storage_file(hass, storage_path)
-    if content_after is None:
+    if not mirror.is_mirror_enabled(hass):
+        await dashboard_manager.write_dashboard(hass, user, config, url_path=url_path)
         return response
+    storage_path = await dashboard_manager.storage_path(hass, user, url_path)
+    content_before = (
+        await _read_storage_file(hass, storage_path) if storage_path else None
+    )
+    await dashboard_manager.write_dashboard(hass, user, config, url_path=url_path)
+    content_after = (
+        await _read_storage_file(hass, storage_path) if storage_path else None
+    )
+    if storage_path is None or content_after is None:
+        # Saved, but not mirrored - say so rather than only logging it
+        # (issue #192).
+        return {
+            **response,
+            "mirror": {
+                "mirrored": False,
+                "reason": (
+                    f"saved, but its storage file ({storage_path}) wasn't found "
+                    "to mirror"
+                    if storage_path
+                    else "saved, but HA lists no storage file for this dashboard"
+                ),
+            },
+        }
     return await _mirror_file_write(
         hass,
         response,
