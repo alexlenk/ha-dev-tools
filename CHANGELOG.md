@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `configuration.yaml` must load `packages/` with `!include_dir_named`. Otherwise Home Assistant wouldn't pick the file up, and the write is refused with the reason (including for `!include_dir_merge_named`, whose file layout these tools don't write).
 - **`delete_package`** deletes a package file that holds no configuration any more (only comments, blank lines or `{}`). A file that still holds anything is refused, naming its top-level keys.
 
+### Changed
+- **Renamed to "Dev Tools MCP"** (was "HA Dev Tools MCP"). The name is shown in HACS, the integration list, the setup and options dialogs, the MCP Server's API list, and the notifications.
+  - It's a display name only. The domain `ha_dev_tools` and the API id `dev_tools` are unchanged, so existing installs and MCP Server setups keep working without changes.
+  - An existing config entry keeps its old title until you rename it in the UI.
+
 ## [2.33.2] - 2026-10-30
 
 ### Fixed

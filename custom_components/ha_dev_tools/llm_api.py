@@ -118,7 +118,7 @@ from .yaml_style import find_misread_scalars, to_json_safe
 _LOGGER = logging.getLogger(__name__)
 
 API_ID = "dev_tools"
-API_NAME = "HA Dev Tools"
+API_NAME = "Dev Tools MCP"
 API_PROMPT = (
     "Tools for developing and maintaining this Home Assistant instance: "
     "authoring and validating automations, reading logs, and looking up "
@@ -1699,7 +1699,7 @@ def _notify_statistics_result(
     persistent_notification.async_create(
         hass,
         f"`{operation}` {outcome}",
-        title=f"HA Dev Tools: {operation}",
+        title=f"Dev Tools MCP: {operation}",
         notification_id=f"{DOMAIN}_{operation}",
     )
 

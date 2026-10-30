@@ -1,6 +1,6 @@
 {
   "domain": "ha_dev_tools",
-  "name": "HA Dev Tools MCP",
+  "name": "Dev Tools MCP",
   "after_dependencies": ["energy", "hassio", "http", "logbook", "mqtt", "recorder"],
   "codeowners": ["@alexlenk"],
   "config_flow": true,

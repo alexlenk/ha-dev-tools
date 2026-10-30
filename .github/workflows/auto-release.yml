@@ -104,7 +104,7 @@ jobs:
               echo "⚠️ Version section not found in CHANGELOG.md, using generic release description"
               echo "# Release v$VERSION" > "$NOTES_FILE"
               echo "" >> "$NOTES_FILE"
-              echo "This release includes updates and improvements to the HA Dev Tools integration." >> "$NOTES_FILE"
+              echo "This release includes updates and improvements to the Dev Tools MCP integration." >> "$NOTES_FILE"
               echo "" >> "$NOTES_FILE"
               echo "For detailed changes, see the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)." >> "$NOTES_FILE"
             else
@@ -114,7 +114,7 @@ jobs:
             echo "⚠️ CHANGELOG.md not found, generating basic release description"
             echo "# Release v$VERSION" > "$NOTES_FILE"
             echo "" >> "$NOTES_FILE"
-            echo "This release includes updates and improvements to the HA Dev Tools integration." >> "$NOTES_FILE"
+            echo "This release includes updates and improvements to the Dev Tools MCP integration." >> "$NOTES_FILE"
           fi
 
           {

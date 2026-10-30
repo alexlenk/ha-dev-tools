@@ -185,7 +185,7 @@ plumbing bug, not by design), and even working as intended, it left
 of the box. Fixed by giving `write_paths` a real default instead of trying
 to repair the broken YAML bridge. If per-install customization is ever
 needed, it belongs in a proper options flow (Settings → Devices & Services →
-HA Dev Tools → Configure), not YAML.
+Dev Tools MCP → Configure), not YAML.
 
 ## Scoped service-call tools
 

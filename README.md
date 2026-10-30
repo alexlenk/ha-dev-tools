@@ -1,6 +1,6 @@
-<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools MCP logo">
+<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="Dev Tools MCP logo">
 
-# HA Dev Tools MCP
+# Dev Tools MCP
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
@@ -48,11 +48,11 @@ Needs Home Assistant **2026.10.0+** (see [Requirements](#requirements) below
 for the full list, including client-specific versions).
 
 1. Install via HACS or manually - see [Installation](#installation) below.
-2. **Settings → Devices & Services → Add Integration → HA Dev Tools.**
+2. **Settings → Devices & Services → Add Integration → Dev Tools MCP.**
 3. **Settings → Devices & Services → Add Integration → Model Context
    Protocol Server** (Home Assistant's own built-in integration) - in its
    setup, add `dev_tools` to the exposed APIs. This step is easy to miss and
-   is the single most common way to end up stuck: skip it and HA Dev Tools'
+   is the single most common way to end up stuck: skip it and Dev Tools MCP's
    card still shows healthy, but an MCP client just gets a bare 404 (a
    **Settings → System → Repairs** issue will flag it if you do).
 4. **Arm it.** Every tool except a diagnostic ping refuses to run until you
@@ -139,8 +139,9 @@ account, full stop).
 
 ### HACS (recommended)
 
-1. Open HACS and search for **HA Dev Tools MCP** (it's in the default HACS
-   list, so no custom repository is needed).
+1. Open HACS and search for **Dev Tools MCP** (called HA Dev Tools MCP
+   before 2.34.0; it's in the default HACS list, so no custom repository
+   is needed).
 2. Download it.
 3. Restart Home Assistant.
 
