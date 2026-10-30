@@ -58,6 +58,29 @@ async def list_dashboards(hass: HomeAssistant, user: User) -> list[dict[str, Any
     ]
 
 
+DEFAULT_URL_PATH = "lovelace"
+
+
+async def storage_path(
+    hass: HomeAssistant, user: User, url_path: str | None
+) -> str | None:
+    """The .storage file a storage-mode dashboard is saved in, or None
+    (YAML mode, or not a dashboard HA knows).
+
+    Resolved the way HA's lovelace component does (issue #192): a
+    dashboard's store key is `lovelace.<id>` - its collection id, the
+    slugified url_path (`dashboard-guest` -> `lovelace.dashboard_guest`),
+    not the url_path itself. A save without url_path goes to the dashboard
+    whose url_path is "lovelace" if one exists (the Overview, on newer
+    installs), else to the legacy default store `lovelace`.
+    """
+    wanted = url_path or DEFAULT_URL_PATH
+    for item in await call_ws_command(hass, user, "lovelace/dashboards/list"):
+        if item.get("url_path") == wanted and item.get("mode", "storage") == "storage":
+            return f".storage/lovelace.{item['id']}"
+    return ".storage/lovelace" if url_path is None else None
+
+
 async def get_dashboard(
     hass: HomeAssistant, user: User, *, url_path: str | None = None
 ) -> dict[str, Any]:

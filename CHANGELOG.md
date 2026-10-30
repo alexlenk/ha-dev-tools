@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.34.1] - 2026-10-30
+
+### Fixed
+- **Dashboard edits are mirrored again** (issue #192). `write_dashboard` and `patch_dashboard` looked for the wrong storage file, so no dashboard ever reached the mirror repo.
+  - Home Assistant names a dashboard's file after its id, the slugified url_path: `dashboard-guest` → `.storage/lovelace.dashboard_guest`.
+  - Since HA's migration of the default dashboard, the Overview lives in `.storage/lovelace.lovelace`, not `.storage/lovelace`.
+  - The path is now resolved from HA's own dashboard list.
+- **A dashboard save that can't be mirrored says so in its result** (`mirror: {mirrored: false, reason}`) instead of only logging a warning.
+
+### Added
+- **Config snapshots include every storage-mode dashboard.** With mirroring on, they run at start, daily and on a passing `check_config`. The repo then has a current copy of a dashboard last edited in the UI, for history and reference searches. The read allowlist and the usual credential check apply.
+
 ## [2.34.0] - 2026-10-30
 
 ### Added

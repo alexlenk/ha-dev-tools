@@ -25,6 +25,8 @@ way HA's own loader does (relative to the including file, hidden files and
 folders skipped). An included file is part of the file that includes it -
 HA reads it as such - so it's covered by that file's read permission rather
 than needing its own allowlist entry; the denylist still applies to it.
+Snapshots also carry every storage-mode dashboard's .storage/lovelace*
+file (issue #192), so the repo has a dashboard edited in the UI too.
 """
 
 from __future__ import annotations
@@ -116,6 +118,24 @@ def discover_files(config_dir: str, security: SecurityManager) -> dict[str, str]
             if rel_path is not None and security.is_readable(f"/config/{rel_path}"):
                 add(item, folder)
     return found
+
+
+def dashboard_files(config_dir: str, security: SecurityManager) -> list[str]:
+    """Every storage-mode dashboard's .storage file (issue #192) - not
+    lovelace_dashboards / lovelace_resources, which list them. Snapshots
+    include them, so the mirror repo holds a current copy of a dashboard
+    last edited in the UI too. Blocking - run in an executor."""
+    storage = Path(config_dir) / ".storage"
+    if not storage.is_dir():
+        return []
+    return [
+        f".storage/{item.name}"
+        for item in sorted(storage.iterdir())
+        if (item.name == "lovelace" or item.name.startswith("lovelace."))
+        and item.is_file()
+        and security.is_readable(f"/config/.storage/{item.name}")
+        and not security.is_denylisted(f"/config/.storage/{item.name}")
+    ]
 
 
 def _read(config_dir: str, rel_path: str) -> str:
@@ -289,7 +309,11 @@ async def async_snapshot(hass: HomeAssistant) -> dict[str, Any]:
 
         def collect() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
             readable, unreadable = [], []
-            for rel_path in discover_files(config_dir, _security(hass)):
+            security = _security(hass)
+            for rel_path in [
+                *discover_files(config_dir, security),
+                *dashboard_files(config_dir, security),
+            ]:
                 try:
                     readable.append((rel_path, _read(config_dir, rel_path)))
                 except (OSError, UnicodeDecodeError, ConfigFileError) as exc:
