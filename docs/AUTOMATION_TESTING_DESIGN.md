@@ -168,7 +168,8 @@ rejected - see "Explicitly rejected" below.
 
 ### Mirroring - independent on/off, either run mode
 
-A dedicated, private GitHub repo, configured in the integration -
+A dedicated, private repo on GitHub or GitLab (issue #182; gitlab.com or
+self-hosted), configured in the integration -
 deliberately **not** the same repo the existing Git Pull add-on deploys
 from (see `scripts/config-repo-setup/`, which hardens that different repo
 for a different purpose). Keeping them separate is what avoids two

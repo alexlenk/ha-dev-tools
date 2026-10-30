@@ -1,11 +1,18 @@
 """Push-only git mirroring of confirmed writes to a dedicated private repo.
 
 See docs/AUTOMATION_TESTING_DESIGN.md's "Mirroring" section for the full
-design. Talks to GitHub over its REST API (via HA's own shared aiohttp
+design. Talks to the repo host's REST API (via HA's own shared aiohttp
 client session) rather than shelling out to a git binary or adding
 GitPython as a dependency - no local git repo needed at all, and this
 integration otherwise keeps its runtime footprint deliberately light
 (RPi/NUC-class installs).
+
+The host is GitHub or GitLab (gitlab.com or self-hosted, issue #182) -
+each a small backend with the same five operations (default branch, read
+a file, write a file as one commit, read a branch head, point a branch at
+a commit). Everything above them - before/after commits, drift detection,
+proposed/* branches, the credential scan - is shared, so both hosts
+mirror exactly alike.
 
 Independent of run mode (live/dry-run) and of the confirm-token gate -
 mirror_write()/mirror_dry_run() are only ever called after a write has
@@ -24,15 +31,27 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+from aiohttp import ClientSession
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from . import mirror_secrets
-from .const import DOMAIN, OPT_MIRROR_ENABLED, OPT_MIRROR_REPO, OPT_MIRROR_TOKEN
+from .const import (
+    DOMAIN,
+    GITLAB_DEFAULT_SERVER,
+    OPT_MIRROR_ENABLED,
+    OPT_MIRROR_PROVIDER,
+    OPT_MIRROR_REPO,
+    OPT_MIRROR_SERVER,
+    OPT_MIRROR_TOKEN,
+    OPT_MIRROR_VERIFY_SSL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 _API_BASE = "https://api.github.com"
+TLS_ISSUE_ID = "mirror_tls_unverified"
 
 
 def _entry(hass: HomeAssistant):
@@ -57,33 +76,50 @@ def is_mirror_enabled(hass: HomeAssistant) -> bool:
     )
 
 
-def _mirror_repo(hass: HomeAssistant) -> str:
-    entry = _entry(hass)
-    return entry.options[OPT_MIRROR_REPO]
+def tls_unverified(options: Any) -> bool:
+    """True when these options mirror to GitLab without checking its
+    certificate - the only host the switch applies to."""
+    return bool(
+        options.get(OPT_MIRROR_ENABLED)
+        and options.get(OPT_MIRROR_PROVIDER) == "gitlab"
+        and options.get(OPT_MIRROR_VERIFY_SSL, True) is False
+    )
 
 
-def _mirror_token(hass: HomeAssistant) -> str:
-    entry = _entry(hass)
-    return entry.options[OPT_MIRROR_TOKEN]
-
-
-def _headers(hass: HomeAssistant) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_mirror_token(hass)}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+def refresh_tls_issue(hass: HomeAssistant, options: Any) -> None:
+    """Raise or clear the repair issue saying certificate checks are off."""
+    if not tls_unverified(options):
+        ir.async_delete_issue(hass, DOMAIN, TLS_ISSUE_ID)
+        return
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        TLS_ISSUE_ID,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=TLS_ISSUE_ID,
+        translation_placeholders={
+            "server": str(options.get(OPT_MIRROR_SERVER) or GITLAB_DEFAULT_SERVER)
+        },
+    )
 
 
 def _url_path(path: str) -> str:
     """A repo path (or branch) as a URL path: each segment percent-encoded,
     and refused if a segment is empty, `.` or `..` - those would let a path
-    built from a write's arguments steer the token to another GitHub API
+    built from a write's arguments steer the token to another API
     endpoint (`contents/../../...`)."""
     segments = path.split("/")
     if any(segment in ("", ".", "..") for segment in segments):
         raise ValueError(f"not a mirror repo path: {path!r}")
     return "/".join(quote(segment, safe="") for segment in segments)
+
+
+def _url_id(path: str) -> str:
+    """A repo path (or branch) as ONE URL segment - GitLab's form for file
+    paths, branches and project paths. Checked like _url_path first."""
+    _url_path(path)
+    return quote(path, safe="")
 
 
 def proposed_branch_name(kind: str, entity_id: str) -> str:
@@ -97,48 +133,211 @@ def proposed_branch_name(kind: str, entity_id: str) -> str:
     return f"proposed/{kind}-{safe_id}"
 
 
+class _GitHub:
+    """GitHub's Contents and Git Data APIs."""
+
+    def __init__(self, session: ClientSession, repo: str, token: str) -> None:
+        self.session = session
+        self.repo = repo
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    async def default_branch(self) -> str:
+        url = f"{_API_BASE}/repos/{self.repo}"
+        async with self.session.get(url, headers=self.headers) as resp:
+            resp.raise_for_status()
+            body = await resp.json()
+        return body["default_branch"]
+
+    async def get_file(self, path: str, branch: str) -> tuple[str, str] | None:
+        url = f"{_API_BASE}/repos/{self.repo}/contents/{_url_path(path)}"
+        params = {"ref": branch}
+        async with self.session.get(url, headers=self.headers, params=params) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            body = await resp.json()
+        if body.get("encoding") == "none":
+            # A file over 1 MB: the JSON response has its sha but not its
+            # content (an empty string, encoding "none" - issue #169); only
+            # the raw media type returns it, up to 100 MB.
+            raw = {**self.headers, "Accept": "application/vnd.github.raw+json"}
+            async with self.session.get(url, headers=raw, params=params) as resp:
+                resp.raise_for_status()
+                return await resp.text(), body["sha"]
+        content = base64.b64decode(body["content"]).decode("utf-8")
+        return content, body["sha"]
+
+    async def put_file(
+        self, path: str, content: str, *, message: str, sha: str | None, branch: str
+    ) -> str:
+        url = f"{_API_BASE}/repos/{self.repo}/contents/{_url_path(path)}"
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "branch": branch,
+        }
+        if sha is not None:
+            payload["sha"] = sha
+        async with self.session.put(url, headers=self.headers, json=payload) as resp:
+            resp.raise_for_status()
+            body = await resp.json()
+        return body["content"]["sha"]
+
+    async def ref_sha(self, branch: str) -> str | None:
+        url = f"{_API_BASE}/repos/{self.repo}/git/ref/heads/{_url_path(branch)}"
+        async with self.session.get(url, headers=self.headers) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            body = await resp.json()
+        return body["object"]["sha"]
+
+    async def set_ref(self, branch: str, sha: str, existing: str | None) -> None:
+        if existing is None:
+            url = f"{_API_BASE}/repos/{self.repo}/git/refs"
+            payload: dict[str, Any] = {"ref": f"refs/heads/{branch}", "sha": sha}
+            async with self.session.post(
+                url, headers=self.headers, json=payload
+            ) as resp:
+                resp.raise_for_status()
+        else:
+            url = f"{_API_BASE}/repos/{self.repo}/git/refs/heads/{_url_path(branch)}"
+            payload = {"sha": sha, "force": True}
+            async with self.session.patch(
+                url, headers=self.headers, json=payload
+            ) as resp:
+                resp.raise_for_status()
+
+
+class _GitLab:
+    """GitLab's REST API v4 (issue #182) - gitlab.com or self-hosted.
+
+    A file's version is its last commit id (the API's optimistic-locking
+    token); GitLab returns none on a write, so it's read back with a HEAD.
+    A branch can't be force-moved, so a proposed/* branch is deleted and
+    recreated - never a protected branch, which GitLab refuses to delete.
+    Writes need a token with the `api` scope (`write_repository` is for
+    git-over-HTTPS only); a project access token keeps it to the one
+    project.
+    """
+
+    def __init__(
+        self, session: ClientSession, server: str, project: str, token: str
+    ) -> None:
+        self.session = session
+        self.base = f"{server.rstrip('/')}/api/v4/projects/{_url_id(project)}"
+        self.headers = {"PRIVATE-TOKEN": token}
+
+    def _file_url(self, path: str) -> str:
+        return f"{self.base}/repository/files/{_url_id(path)}"
+
+    async def default_branch(self) -> str:
+        async with self.session.get(self.base, headers=self.headers) as resp:
+            resp.raise_for_status()
+            body = await resp.json()
+        if not body.get("default_branch"):
+            raise ValueError(
+                "the mirror project has no default branch yet - push an "
+                "initial commit to it first"
+            )
+        return body["default_branch"]
+
+    async def get_file(self, path: str, branch: str) -> tuple[str, str] | None:
+        async with self.session.get(
+            self._file_url(path), headers=self.headers, params={"ref": branch}
+        ) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            body = await resp.json()
+        content = base64.b64decode(body["content"]).decode("utf-8")
+        return content, body["last_commit_id"]
+
+    async def put_file(
+        self, path: str, content: str, *, message: str, sha: str | None, branch: str
+    ) -> str:
+        payload: dict[str, Any] = {
+            "branch": branch,
+            "commit_message": message,
+            "encoding": "base64",
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        }
+        write = self.session.post
+        if sha is not None:
+            payload["last_commit_id"] = sha
+            write = self.session.put
+        async with write(
+            self._file_url(path), headers=self.headers, json=payload
+        ) as resp:
+            resp.raise_for_status()
+        async with self.session.head(
+            self._file_url(path), headers=self.headers, params={"ref": branch}
+        ) as resp:
+            resp.raise_for_status()
+            return resp.headers["X-Gitlab-Last-Commit-Id"]
+
+    async def ref_sha(self, branch: str) -> str | None:
+        url = f"{self.base}/repository/branches/{_url_id(branch)}"
+        async with self.session.get(url, headers=self.headers) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            body = await resp.json()
+        return body["commit"]["id"]
+
+    async def set_ref(self, branch: str, sha: str, existing: str | None) -> None:
+        if existing is not None:
+            url = f"{self.base}/repository/branches/{_url_id(branch)}"
+            async with self.session.delete(url, headers=self.headers) as resp:
+                resp.raise_for_status()
+        async with self.session.post(
+            f"{self.base}/repository/branches",
+            headers=self.headers,
+            params={"branch": branch, "ref": sha},
+        ) as resp:
+            resp.raise_for_status()
+
+
+def _forge(hass: HomeAssistant) -> _GitHub | _GitLab:
+    """The configured host's backend, from the options as they are now."""
+    options = _entry(hass).options
+    token = options[OPT_MIRROR_TOKEN]
+    if options.get(OPT_MIRROR_PROVIDER) == "gitlab":
+        verify = options.get(OPT_MIRROR_VERIFY_SSL, True) is not False
+        return _GitLab(
+            async_get_clientsession(hass, verify_ssl=verify),
+            options.get(OPT_MIRROR_SERVER) or GITLAB_DEFAULT_SERVER,
+            options[OPT_MIRROR_REPO],
+            token,
+        )
+    return _GitHub(async_get_clientsession(hass), options[OPT_MIRROR_REPO], token)
+
+
 async def _get_default_branch(hass: HomeAssistant) -> str:
     """Return the mirror repo's actual default branch (issue #50).
 
     Not every mirror repo has (or should be forced to have) a branch named
     "main" - a repo bootstrapped for one purpose and never merged anywhere,
     or one with a deliberately different default branch name, are both
-    real cases. GitHub's Contents/Git Data APIs don't auto-create a target
-    branch if it's missing, so pushing to a hardcoded "main" silently
-    failed against a real repo without one. Queried fresh on every mirror
-    operation rather than cached - this is one cheap GET, and a repo's
-    default branch can change.
+    real cases. Neither host's file API auto-creates a missing target
+    branch, so pushing to a hardcoded "main" silently failed against a real
+    repo without one. Queried fresh on every mirror operation rather than
+    cached - this is one cheap GET, and a repo's default branch can change.
     """
-    session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}"
-    async with session.get(url, headers=_headers(hass)) as resp:
-        resp.raise_for_status()
-        body = await resp.json()
-    return body["default_branch"]
+    return await _forge(hass).default_branch()
 
 
 async def _get_current(
     hass: HomeAssistant, path: str, *, branch: str
 ) -> tuple[str, str] | None:
-    """Fetch (content, sha) for path at the given branch's HEAD, or None if it
-    doesn't exist there yet."""
-    session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{_url_path(path)}"
-    async with session.get(url, headers=_headers(hass), params={"ref": branch}) as resp:
-        if resp.status == 404:
-            return None
-        resp.raise_for_status()
-        body = await resp.json()
-    if body.get("encoding") == "none":
-        # A file over 1 MB: the JSON response has its sha but not its
-        # content (an empty string, encoding "none" - issue #169); only the
-        # raw media type returns it, up to 100 MB.
-        raw = {**_headers(hass), "Accept": "application/vnd.github.raw+json"}
-        async with session.get(url, headers=raw, params={"ref": branch}) as resp:
-            resp.raise_for_status()
-            return await resp.text(), body["sha"]
-    content = base64.b64decode(body["content"]).decode("utf-8")
-    return content, body["sha"]
+    """Fetch (content, version) for path at the given branch's HEAD, or None
+    if it doesn't exist there yet - the version being what the next write
+    of it passes back (GitHub's blob sha, GitLab's last commit id)."""
+    return await _forge(hass).get_file(path, branch)
 
 
 async def _put(
@@ -150,36 +349,20 @@ async def _put(
     sha: str | None,
     branch: str,
 ) -> str:
-    """Create or update a single file at the given branch's HEAD, return its new sha.
+    """Create or update a single file at the given branch's HEAD, return its
+    new version.
 
     One file per call, never a broader tree write - keeps each mirror
     commit scoped to exactly the file a write tool actually touched.
     """
-    session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/contents/{_url_path(path)}"
-    payload: dict[str, Any] = {
-        "message": message,
-        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-        "branch": branch,
-    }
-    if sha is not None:
-        payload["sha"] = sha
-    async with session.put(url, headers=_headers(hass), json=payload) as resp:
-        resp.raise_for_status()
-        body = await resp.json()
-    return body["content"]["sha"]
+    return await _forge(hass).put_file(
+        path, content, message=message, sha=sha, branch=branch
+    )
 
 
 async def _get_ref_sha(hass: HomeAssistant, branch: str) -> str | None:
     """Get a branch's current HEAD commit sha, or None if it doesn't exist."""
-    session = async_get_clientsession(hass)
-    url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/ref/heads/{_url_path(branch)}"
-    async with session.get(url, headers=_headers(hass)) as resp:
-        if resp.status == 404:
-            return None
-        resp.raise_for_status()
-        body = await resp.json()
-    return body["object"]["sha"]
+    return await _forge(hass).ref_sha(branch)
 
 
 async def _set_ref(hass: HomeAssistant, branch: str, sha: str) -> None:
@@ -190,21 +373,10 @@ async def _set_ref(hass: HomeAssistant, branch: str, sha: str) -> None:
     branch's diff a clean "current reality -> would-be change" comparison
     on every dry-run, not an accumulating pile of unrelated old attempts.
     """
-    session = async_get_clientsession(hass)
-    existing = await _get_ref_sha(hass, branch)
-    if existing is None:
-        url = f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs"
-        payload: dict[str, Any] = {"ref": f"refs/heads/{branch}", "sha": sha}
-        async with session.post(url, headers=_headers(hass), json=payload) as resp:
-            resp.raise_for_status()
-    elif existing != sha:
-        url = (
-            f"{_API_BASE}/repos/{_mirror_repo(hass)}/git/refs/heads/"
-            f"{_url_path(branch)}"
-        )
-        payload = {"sha": sha, "force": True}
-        async with session.patch(url, headers=_headers(hass), json=payload) as resp:
-            resp.raise_for_status()
+    forge = _forge(hass)
+    existing = await forge.ref_sha(branch)
+    if existing != sha:
+        await forge.set_ref(branch, sha, existing)
 
 
 @dataclass(frozen=True)

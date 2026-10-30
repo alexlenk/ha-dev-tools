@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-10-30
+
+### Added
+- **Git mirroring to GitLab** (gitlab.com or self-hosted; issue #182). A new **Mirror host** setting chooses between GitHub (the default, unchanged) and GitLab.
+  - For GitLab: a **GitLab server** (`https://`, an optional port and sub-path) and the project path (`group/subgroup/project`).
+  - Every mirror feature works the same on both: before/after commits, drift detection, dry-run `proposed/*` branches, config snapshots, the credential scan and reading mirrored files.
+  - It uses GitLab's REST API, so no git client or local clone is needed.
+  - The token needs the `api` scope. A project access token keeps it to the one project. GitLab's file API refuses `write_repository`.
+  - A `proposed/*` branch is deleted and recreated, because GitLab can't force-move a branch.
+- **Verify the GitLab server's certificate** (on by default) can be turned off for a self-hosted GitLab with an internal CA. While it's off, a repair issue says the token is sent without checking the server. GitHub is always verified.
+
 ## [2.32.0] - 2026-10-30
 
 ### Added

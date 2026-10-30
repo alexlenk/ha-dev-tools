@@ -15,13 +15,23 @@ ARM_MAX_MINUTES_RANGE = (15, 1440)
 OPT_CONTROL_EXCLUDED_DEVICES = "control_excluded_devices"
 OPT_CONTROL_EXCLUDED_ENTITIES = "control_excluded_entities"
 
-# Options flow keys for git mirroring (see mirror.py). mirror_repo is
-# "owner/repo" for a dedicated, private mirror repo - deliberately never
-# the repo any deploy mechanism (e.g. the Git Pull add-on) pulls from, see
+# Options flow keys for git mirroring (see mirror.py). mirror_repo is a
+# dedicated, private mirror repo - "owner/repo" on GitHub, the project path
+# ("group/subgroup/project") on GitLab - deliberately never the repo any
+# deploy mechanism (e.g. the Git Pull add-on) pulls from, see
 # docs/AUTOMATION_TESTING_DESIGN.md's "Mirroring" section.
 OPT_MIRROR_ENABLED = "mirror_enabled"
 OPT_MIRROR_REPO = "mirror_repo"
 OPT_MIRROR_TOKEN = "mirror_token"
+# Where the mirror repo lives (issue #182): "github" (the default, for an
+# entry that predates the option) or "gitlab" - gitlab.com or self-hosted at
+# mirror_server. mirror_verify_ssl=False skips the certificate check for a
+# self-hosted GitLab with an internal CA; a repair issue says it's off.
+OPT_MIRROR_PROVIDER = "mirror_provider"
+OPT_MIRROR_SERVER = "mirror_server"
+OPT_MIRROR_VERIFY_SSL = "mirror_verify_ssl"
+MIRROR_PROVIDERS = ("github", "gitlab")
+GITLAB_DEFAULT_SERVER = "https://gitlab.com"
 
 # Operation types
 OPERATION_READ = "read"

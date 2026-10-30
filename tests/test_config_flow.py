@@ -226,3 +226,64 @@ async def test_options_flow_control_exclusions(hass: HomeAssistant):
     assert result["data_schema"]({})[OPT_CONTROL_EXCLUDED_ENTITIES] == [
         "cover.garage_door"
     ]
+
+
+@pytest.mark.asyncio
+async def test_options_flow_gitlab_mirror(hass: HomeAssistant):
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.ha_dev_tools.const import (
+        OPT_MIRROR_PROVIDER,
+        OPT_MIRROR_SERVER,
+        OPT_MIRROR_VERIFY_SSL,
+    )
+    from custom_components.ha_dev_tools.mirror import TLS_ISSUE_ID
+
+    entry = MockConfigEntry(domain=DOMAIN, options={})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = result["data_schema"]({})
+    assert defaults[OPT_MIRROR_PROVIDER] == "github"
+    assert defaults[OPT_MIRROR_SERVER] == "https://gitlab.com"
+    assert defaults[OPT_MIRROR_VERIFY_SSL] is True
+
+    gitlab = {
+        OPT_MIRROR_ENABLED: True,
+        OPT_MIRROR_PROVIDER: "gitlab",
+        OPT_MIRROR_TOKEN: "glpat-x",
+    }
+    for repo, server, error in (
+        (
+            "home/ha/mirror",
+            "http://git.example.com",
+            {OPT_MIRROR_SERVER: "invalid_server"},
+        ),
+        ("mirror", "https://git.example.com", {OPT_MIRROR_REPO: "invalid_project"}),
+        ("../x/y", "https://git.example.com", {OPT_MIRROR_REPO: "invalid_project"}),
+    ):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {**gitlab, OPT_MIRROR_REPO: repo, OPT_MIRROR_SERVER: server},
+        )
+        assert result["errors"] == error
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            **gitlab,
+            OPT_MIRROR_REPO: "home/ha/mirror",
+            OPT_MIRROR_SERVER: " https://git.example.com:8443/gitlab/ ",
+            OPT_MIRROR_VERIFY_SSL: False,
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[OPT_MIRROR_SERVER] == "https://git.example.com:8443/gitlab"
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, TLS_ISSUE_ID)
+    assert issue is not None
+
+    # Certificate checks back on: the issue goes.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {**dict(entry.options), OPT_MIRROR_VERIFY_SSL: True}
+    )
+    assert ir.async_get(hass).async_get_issue(DOMAIN, TLS_ISSUE_ID) is None
