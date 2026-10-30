@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.33.1] - 2026-10-30
+
+### Fixed
+- **The file security check no longer runs on Home Assistant's event loop** (issue #173). The check that keeps a path inside `/config` after following symlinks does one filesystem lookup per path component. On a slow or network-mounted `/config` (NFS, Samba) it could briefly stall HA on every file read, write, existence check and metadata call. It now runs in the executor like the file access itself (#153). The check is unchanged, including the denylist check on the real path.
+
 ## [2.33.0] - 2026-10-30
 
 ### Added

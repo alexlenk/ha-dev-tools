@@ -16,6 +16,7 @@ from .const import (
     ERROR_BLACKLISTED_FILE,
     ERROR_FILE_NOT_FOUND,
     ERROR_WRITE_NOT_PERMITTED,
+    OPERATION_READ,
     OPERATION_WRITE,
 )
 from .security import SecurityManager
@@ -69,6 +70,16 @@ class FileManager:
             "FileManager initialized for config directory: %s", self.config_dir
         )
 
+    async def _validate(
+        self, file_path: str, operation: str = OPERATION_READ
+    ) -> Tuple[bool, Optional[str]]:
+        """The security check, in the executor: its symlink containment
+        check resolves the path, one lstat per component - a stall on the
+        event loop when /config is a slow or network mount (issue #173)."""
+        return await self.hass.async_add_executor_job(
+            self.security_manager.validate_file_path, file_path, operation
+        )
+
     async def read_file(self, file_path: str) -> str:
         """
         Read file contents with security validation.
@@ -85,7 +96,7 @@ class FileManager:
             ValueError: If path validation fails
         """
         # Validate file path security
-        is_valid, error = self.security_manager.validate_file_path(file_path)
+        is_valid, error = await self._validate(file_path)
         if not is_valid:
             if error == ERROR_FILE_NOT_FOUND:
                 raise FileNotFoundError(f"File not found: {file_path}")
@@ -172,9 +183,7 @@ class FileManager:
         # branches - is_allowlisted() for reads is a superset of
         # is_writable(), so omitting operation here would pass anything
         # merely readable straight through to write).
-        is_valid, error = self.security_manager.validate_file_path(
-            file_path, operation=OPERATION_WRITE
-        )
+        is_valid, error = await self._validate(file_path, OPERATION_WRITE)
         if not is_valid:
             if error == ERROR_BLACKLISTED_FILE:
                 raise PermissionError(f"Access to blacklisted file denied: {file_path}")
@@ -339,7 +348,7 @@ class FileManager:
             ValueError: If path validation fails
         """
         # Validate file path security
-        is_valid, error = self.security_manager.validate_file_path(file_path)
+        is_valid, error = await self._validate(file_path)
         if not is_valid:
             raise ValueError(f"Invalid file path: {error}")
 
@@ -369,9 +378,7 @@ class FileManager:
         # Validate file path security - explicitly as a write (deletion is
         # destructive) - see write_file's identical comment for why the
         # operation kwarg can't be omitted here.
-        is_valid, error = self.security_manager.validate_file_path(
-            file_path, operation=OPERATION_WRITE
-        )
+        is_valid, error = await self._validate(file_path, OPERATION_WRITE)
         if not is_valid:
             if error == ERROR_BLACKLISTED_FILE:
                 raise PermissionError(f"Access to blacklisted file denied: {file_path}")
@@ -426,7 +433,7 @@ class FileManager:
             ValueError: If path validation fails
         """
         # Validate file path security
-        is_valid, error = self.security_manager.validate_file_path(file_path)
+        is_valid, error = await self._validate(file_path)
 
         # Build base metadata
         metadata = {

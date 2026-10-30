@@ -634,3 +634,29 @@ async def test_no_filesystem_call_runs_on_the_event_loop(
         with pytest.raises(FileNotFoundError):
             await file_manager.read_file("missing.yaml")
     assert on_loop == []
+
+
+@pytest.mark.asyncio
+async def test_security_check_runs_off_the_event_loop(
+    hass: HomeAssistant, file_manager, mock_config_file
+):
+    """validate_file_path resolves symlinks - an lstat per path component -
+    so every FileManager operation runs it in the executor (issue #173)."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+    check = file_manager.security_manager.validate_file_path
+
+    def recording(*args, **kwargs):
+        threads.append(threading.get_ident())
+        return check(*args, **kwargs)
+
+    file_manager.security_manager.validate_file_path = recording
+    await file_manager.read_file("configuration.yaml")
+    await file_manager.file_exists("configuration.yaml")
+    await file_manager.get_file_metadata("configuration.yaml")
+    await file_manager.write_file("packages/x.yaml", "a: 1\n")
+    await file_manager.delete_file("packages/x.yaml")
+    assert len(threads) >= 5
+    assert loop_thread not in threads
