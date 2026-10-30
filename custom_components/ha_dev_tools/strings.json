@@ -36,7 +36,7 @@
           "mirror_enabled": "When enabled, a confirmed write from a supported tool (write_automation, delete_automation, write_script, create/update/delete_template_entity, write_dashboard, create/update/delete_helper, create/update/delete_derived_sensor, delete_entity/delete_entities) pushes the touched content's before/after state to the mirror repository below - a private, push-only audit trail and manual-rollback source, never the repo any deploy mechanism pulls from. Derived sensors have no real file, so their resolved config entry data/options are pushed to a synthetic path instead, and deleting one pushes a small deletion marker rather than removing anything; delete_entity works the same way, pushing the entity's full registry data to a synthetic path before removing it, since entity_registry deletion is otherwise only protected by Home Assistant's own 30-day orphan window. delete_entities pushes one combined before/after commit pair for the whole list rather than one pair per entity, so a large batch doesn't flood the mirror repository with commits. Content that looks like it contains a literal credential is never pushed. In dry-run mode (above), write_automation, delete_automation, write_script, and the template-entity tools push the resolved would-be content to a proposed branch (named after the write's kind and id) instead of the mirror repo's default branch, since nothing live changed; write_dashboard, the helper tools, the derived-sensor tools, and delete_entity/delete_entities have no such preview and push nothing while dry-run is on.",
           "mirror_provider": "GitHub, or GitLab (gitlab.com or self-hosted).",
           "mirror_repo": "A dedicated, private repository. GitHub: owner/repo. GitLab: the project path as in its URL, e.g. group/subgroup/project. Deliberately separate from any repo a Git Pull-style add-on deploys from.",
-          "mirror_server": "GitLab only: the server's https:// address (default https://gitlab.com), e.g. https://git.example.com.",
+          "mirror_server": "GitLab only: the server's address, starting with https - GitLab.com's own by default, or your self-hosted server's (a port and sub-path are fine).",
           "mirror_verify_ssl": "GitLab only. Leave on. Turn off only for a self-hosted GitLab whose certificate comes from an internal CA Home Assistant doesn't trust - the token is then sent without checking who answers, and a repair issue stays up while it's off.",
           "mirror_token": "GitHub: a fine-grained personal access token scoped to only the mirror repository, with Contents: Read and write and nothing else - no workflow scope, no admin, an actual expiration date set. GitLab: a project access token on the mirror project (Settings -> Access tokens), role Developer or higher (Maintainer if the default branch is protected), scope api - the file API refuses write_repository, which only covers git push - with an expiration date. Never shown here once saved: leave it empty to keep the stored token, or enter a new one to replace it."
         }
@@ -46,7 +46,7 @@
       "invalid_repo": "Not a GitHub repository in owner/repo form.",
       "idle_above_cap": "The idle window can't be longer than the hard cap.",
       "invalid_project": "Not a GitLab project path (group/project, subgroups allowed).",
-      "invalid_server": "Not an https:// server address."
+      "invalid_server": "The server address must start with https and contain nothing but a host, an optional port and a path."
     }
   },
   "issues": {
