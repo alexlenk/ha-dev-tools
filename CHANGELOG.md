@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.33.2] - 2026-10-30
+
+### Fixed
+- **Literal credentials no longer reach the agent through the structured read tools** (issue #151).
+  - `get_config_file` withheld a file with a literal password, token or key. `get_automation`, `get_script`, `get_template_entity`, `list_scripts`, `list_template_entities`, `list_rest_commands` and `get_trace`'s `include_config` returned the same values as written.
+  - These tools now mask them, as `get_rest_command` already did: a credential-shaped key's value, a password in a URL, a bearer token. `!secret` references are shown as they are.
+  - `misread_values` no longer echoes such a value.
+- **A masked value sent back unchanged keeps the real credential.** An agent reads an item, changes one field and writes the whole item back.
+  - Every write tool puts the original back. It takes the value from the same place in the current config, or the one value under the same key that masks to it.
+  - A mask that matches nothing is refused before a confirm token, naming the field. That covers the text around it edited, a new item, or two values that would fit.
+  - The confirm token stays bound to what was sent. Anything computed from the restored config (a preview, a validation error quoting a value) is masked again.
+
 ## [2.33.1] - 2026-10-30
 
 ### Fixed

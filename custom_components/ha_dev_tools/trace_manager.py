@@ -26,6 +26,7 @@ from homeassistant.auth.models import User
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
+from . import mirror_secrets
 from .ws_call import call_ws_command
 
 DOMAINS = ("automation", "script")
@@ -191,5 +192,7 @@ async def get_trace(
     if trace.get("blueprint_inputs") is not None:
         result["blueprint_inputs"] = trace["blueprint_inputs"]
     if include_config:
-        result["config"] = trace.get("config")
+        # The automation's config as it ran - masked like get_automation's
+        # (issue #151).
+        result["config"] = mirror_secrets.mask_credentials(trace.get("config"))
     return result

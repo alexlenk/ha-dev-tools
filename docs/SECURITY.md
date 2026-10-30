@@ -160,6 +160,23 @@ inside strings such as a JSON `payload`. The response names the line and
 key, never the value. Config snapshots to the mirror repo use the same
 check.
 
+The structured read tools return the same config item by item. They mask
+literal credentials instead of withholding the item (issue #151):
+`get_automation`, `get_script`, `get_template_entity`, `list_scripts`,
+`list_template_entities`, `get_trace`'s `include_config`,
+`get_rest_command`/`list_rest_commands` and
+`list_package_platform_entities`. Each such value is replaced by a
+placeholder, and `!secret` references are shown as they are. An agent reads an item,
+changes one field and writes it back, so every write tool puts a placeholder
+that comes back unchanged back to the original: from the same place in
+the current config, or the one value under the same key that masks to it.
+A placeholder that matches nothing (the text around it edited, a new item,
+two values that would fit) is refused before a confirm token, never
+guessed. The token stays bound to what was sent, and any answer computed
+from a restored config - a preview, a validation error quoting a value -
+has the originals masked out again, so a credential reaches the agent
+neither way.
+
 An earlier version of this project had a `configuration.yaml`-based
 `ha_dev_tools: security:` block for customizing this - it was removed
 because it never actually reached the tools that use it (a config-entry

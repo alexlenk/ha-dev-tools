@@ -350,6 +350,19 @@ def _write_schema(fields: dict) -> vol.Schema:
     return vol.Schema({**fields, vol.Optional("confirm_token"): str})
 
 
+# Issue #151: what a read tool returns, and what a write takes back.
+_MASKED_READ_NOTE = (
+    " Literal credentials (a password, token or key written in plain text, a "
+    "password in a URL, a bearer token) come back masked; !secret "
+    "references are shown as they are."
+)
+_MASKED_WRITE_NOTE = (
+    " A masked credential from a read tool can be sent back unchanged - the "
+    "real value is kept; one that no longer matches the current config is "
+    "refused (send the full value or a !secret)."
+)
+
+
 _CONFIRM_TOKEN_NOTE = (
     " Every call to this tool must happen twice: the first call never "
     "writes anything - it returns a preview of the change plus a "
@@ -500,6 +513,18 @@ class WriteGatedTool(GatedTool):
             "arm": cast(JsonValueType, await access_control.arm_status(hass)),
         }
 
+    def _refused(self, problem: str) -> JsonObjectType:
+        return {
+            "error": problem,
+            "error_type": "Invalid",
+            "action": self.name,
+            "note": (
+                "Refused before anything was written, and no "
+                "confirm_token was issued - fix the problem above and "
+                "call again."
+            ),
+        }
+
     @override
     async def _run(
         self,
@@ -507,21 +532,73 @@ class WriteGatedTool(GatedTool):
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
-        """Require a confirmed token, then short-circuit into dry-run or hand off to _write()."""
-        args = tool_input.tool_args
+        """Put masked credentials back (issue #151), then the confirm flow.
+
+        A read tool masks literal credentials; the agent sends a config
+        back with the placeholder where it didn't change them. The confirm
+        token stays bound to what was sent; everything that reads the
+        config - validation, preview, the write, the dry-run mirror - gets
+        the originals, and nothing restored goes back out in the answer.
+        """
+        sent = tool_input.tool_args
+        if not mirror_secrets.contains_withheld(sent):
+            return await self._confirmed(hass, tool_input, llm_context, sent)
+        try:
+            restored, originals = await self._restore_masked(hass, sent)
+        except ValueError as exc:
+            return self._refused(str(exc))
+        response = await self._confirmed(
+            hass, replace(tool_input, tool_args=restored), llm_context, sent
+        )
+        return cast(JsonObjectType, mirror_secrets.scrub(response, originals))
+
+    async def _masked_originals(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """{argument: what it holds now} for the arguments a read tool
+        returns masked - override where a write takes one back. An
+        argument with no original here can't have a masked value restored."""
+        return {}
+
+    async def _restore_masked(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[Any]]:
+        originals = await self._masked_originals(hass, args)
+        restored, put_back, problems = dict(args), [], []
+        for name, value in args.items():
+            if not mirror_secrets.contains_withheld(value):
+                continue
+            restored[name], missing, found = mirror_secrets.restore_withheld(
+                value, originals.get(name)
+            )
+            put_back += found
+            problems += [f"{name}.{path}" if path else name for path in missing]
+        if problems:
+            raise ValueError(
+                "masked credential(s) at "
+                + ", ".join(problems)
+                + " can't be put back - nothing in the current config masks "
+                "to exactly that (the text around the mask was changed, the "
+                "item is new, or two values fit). Send the full value, or a "
+                "'!secret <name>' reference"
+            )
+        return restored, put_back
+
+    async def _confirmed(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+        sent: dict[str, Any],
+    ) -> JsonObjectType:
+        """Require a confirmed token, then short-circuit into dry-run or
+        hand off to _write(). The token is bound to `sent` - the arguments
+        as the caller sent them."""
+        args = sent
         # Refused outright - no token for a write that can only fail, and
         # nothing written on a confirm either (issue #165).
         if problem := await self._refusal(hass, tool_input, llm_context):
-            return {
-                "error": problem,
-                "error_type": "Invalid",
-                "action": self.name,
-                "note": (
-                    "Refused before anything was written, and no "
-                    "confirm_token was issued - fix the problem above and "
-                    "call again."
-                ),
-            }
+            return self._refused(problem)
         token = args.get("confirm_token")
         preview = {key: value for key, value in args.items() if key != "confirm_token"}
 
@@ -2673,16 +2750,20 @@ class GetAutomationTool(GatedTool):
 
     name = "get_automation"
     description = (
-        "Read an automation's config by id, resolving which file actually "
-        "defines it (the default automations.yaml, or a packages/*.yaml "
-        "file) - a plain file read can silently miss package-defined "
-        "automations. Fails clearly if the id isn't found or is defined in "
-        "more than one file, rather than guessing. Also reports whether "
-        "the automation is currently enabled - that's runtime-only state "
-        "(toggling it via the UI or automation.turn_off never touches the "
-        "YAML), so the config content alone never tells you whether it's "
-        "actually active right now."
-    ) + _MISREAD_VALUES_NOTE
+        (
+            "Read an automation's config by id, resolving which file actually "
+            "defines it (the default automations.yaml, or a packages/*.yaml "
+            "file) - a plain file read can silently miss package-defined "
+            "automations. Fails clearly if the id isn't found or is defined in "
+            "more than one file, rather than guessing. Also reports whether "
+            "the automation is currently enabled - that's runtime-only state "
+            "(toggling it via the UI or automation.turn_off never touches the "
+            "YAML), so the config content alone never tells you whether it's "
+            "actually active right now."
+        )
+        + _MASKED_READ_NOTE
+        + _MISREAD_VALUES_NOTE
+    )
     parameters = vol.Schema({vol.Required("automation_id"): str})
 
     def __init__(self, automation_manager: AutomationManager) -> None:
@@ -2708,7 +2789,7 @@ class GetAutomationTool(GatedTool):
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
-            "config": to_json_safe(config),
+            "config": mirror_secrets.mask_credentials(to_json_safe(config)),
             "currently_enabled": (
                 None if live_state is None else live_state.state == "on"
             ),
@@ -2718,7 +2799,10 @@ class GetAutomationTool(GatedTool):
                 if live_state is None
                 else None
             ),
-            "misread_values": cast(JsonValueType, find_misread_scalars(config)),
+            "misread_values": cast(
+                JsonValueType,
+                mirror_secrets.mask_misread(find_misread_scalars(config)),
+            ),
         }
 
 
@@ -2727,21 +2811,25 @@ class WriteAutomationTool(WriteGatedTool):
 
     name = "write_automation"
     description = (
-        "Create or update an automation. If the id already exists, it's "
-        "updated in place in whichever file actually defines it (default "
-        "file or a package) - never blindly appended to automations.yaml, "
-        "which would create a silent duplicate for package-defined "
-        "automations. For a brand new automation, pass 'package' to target "
-        "an existing packages/*.yaml file, or omit it for the default "
-        "automations.yaml. Always reloads automations afterward - never "
-        "requires a restart. Pass expected_hash (from get_file_metadata or "
-        "a prior read) to detect concurrent edits. The config is checked with HA's own "
-        "automation validation first; one HA would refuse to set up is refused "
-        "with HA's error, before any token or write. enabled (true/false) "
-        "also turns it on or off after the reload - HA otherwise restores "
-        "an id's last on/off state, so a deleted automation restored under "
-        "its old id comes back off (set_automation_enabled does this alone)."
-    ) + _CONFIRM_TOKEN_NOTE
+        (
+            "Create or update an automation. If the id already exists, it's "
+            "updated in place in whichever file actually defines it (default "
+            "file or a package) - never blindly appended to automations.yaml, "
+            "which would create a silent duplicate for package-defined "
+            "automations. For a brand new automation, pass 'package' to target "
+            "an existing packages/*.yaml file, or omit it for the default "
+            "automations.yaml. Always reloads automations afterward - never "
+            "requires a restart. Pass expected_hash (from get_file_metadata or "
+            "a prior read) to detect concurrent edits. The config is checked with HA's own "
+            "automation validation first; one HA would refuse to set up is refused "
+            "with HA's error, before any token or write. enabled (true/false) "
+            "also turns it on or off after the reload - HA otherwise restores "
+            "an id's last on/off state, so a deleted automation restored under "
+            "its old id comes back off (set_automation_enabled does this alone)."
+        )
+        + _MASKED_WRITE_NOTE
+        + _CONFIRM_TOKEN_NOTE
+    )
     parameters = _write_schema(
         {
             vol.Required("automation_id"): str,
@@ -2755,6 +2843,17 @@ class WriteAutomationTool(WriteGatedTool):
     def __init__(self, automation_manager: AutomationManager) -> None:
         """Init with the AutomationManager backing this tool."""
         self._manager = automation_manager
+
+    @override
+    async def _masked_originals(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The automation's config as it is now (issue #151)."""
+        try:
+            _, config = await self._manager.get_automation(args["automation_id"])
+        except (AutomationNotFoundError, DuplicateAutomationIdError):
+            return {}
+        return {"config": to_json_safe(config)}
 
     @override
     async def _refusal(
@@ -3628,7 +3727,7 @@ class ListTemplateEntitiesTool(GatedTool):
         "any domain) are covered by list_derived_sensors / "
         "get_derived_sensor / update_derived_sensor (domain='template'). "
         "describe_entity says where any entity is defined."
-    )
+    ) + _MASKED_READ_NOTE
     parameters = vol.Schema({})
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
@@ -3643,7 +3742,10 @@ class ListTemplateEntitiesTool(GatedTool):
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """List every template: entity."""
-        return cast(JsonObjectType, {"items": await self._manager.list_entities()})
+        items = await self._manager.list_entities()
+        for item in items:
+            item["config"] = mirror_secrets.mask_credentials(item["config"])
+        return cast(JsonObjectType, {"items": items})
 
 
 class GetTemplateEntityTool(GatedTool):
@@ -3651,9 +3753,13 @@ class GetTemplateEntityTool(GatedTool):
 
     name = "get_template_entity"
     description = (
-        "Read a YAML `template:` entity's current config by its unique_id "
-        "(from list_template_entities)."
-    ) + _MISREAD_VALUES_NOTE
+        (
+            "Read a YAML `template:` entity's current config by its unique_id "
+            "(from list_template_entities)."
+        )
+        + _MASKED_READ_NOTE
+        + _MISREAD_VALUES_NOTE
+    )
     parameters = vol.Schema({vol.Required("unique_id"): str})
 
     def __init__(self, template_yaml_manager: TemplateYamlManager) -> None:
@@ -3678,8 +3784,11 @@ class GetTemplateEntityTool(GatedTool):
             "file_path": location.file_path,
             "is_package": location.is_package,
             "platform": location.platform,
-            "config": config,
-            "misread_values": cast(JsonValueType, find_misread_scalars(config)),
+            "config": mirror_secrets.mask_credentials(config),
+            "misread_values": cast(
+                JsonValueType,
+                mirror_secrets.mask_misread(find_misread_scalars(config)),
+            ),
         }
 
 
@@ -3843,25 +3952,29 @@ class UpdateTemplateEntityTool(WriteGatedTool):
 
     name = "update_template_entity"
     description = (
-        "Update an existing YAML `template:` entity's config by its "
-        "unique_id (from list_template_entities). config replaces only that "
-        "entity's own dict - sibling entities and the block's triggers/"
-        "conditions/variables are left untouched. To change the block "
-        "itself - a trigger-based block's triggers, conditions, variables or "
-        "actions - pass those instead of (or with) config: each replaces "
-        "the block's key in place (null removes conditions/variables/"
-        "actions), checked with HA's own validation, then reloaded. That "
-        "changes every entity in the block - the preview lists them all - "
-        "and keeps their state (accumulators, counters, attributes), unlike "
-        "delete + create. Turning a state-based block into a trigger-based "
-        "one (or back) is refused. To change an entity's "
-        "unique_id, use delete_template_entity + create_template_entity "
-        "instead (a rename is really two operations, not supported "
-        "directly here). Fails with a permission error if the entity "
-        "lives in configuration.yaml itself, which is read-only under "
-        "this integration's default security policy - only "
-        "package-defined entities can be updated this way."
-    ) + _CONFIRM_TOKEN_NOTE
+        (
+            "Update an existing YAML `template:` entity's config by its "
+            "unique_id (from list_template_entities). config replaces only that "
+            "entity's own dict - sibling entities and the block's triggers/"
+            "conditions/variables are left untouched. To change the block "
+            "itself - a trigger-based block's triggers, conditions, variables or "
+            "actions - pass those instead of (or with) config: each replaces "
+            "the block's key in place (null removes conditions/variables/"
+            "actions), checked with HA's own validation, then reloaded. That "
+            "changes every entity in the block - the preview lists them all - "
+            "and keeps their state (accumulators, counters, attributes), unlike "
+            "delete + create. Turning a state-based block into a trigger-based "
+            "one (or back) is refused. To change an entity's "
+            "unique_id, use delete_template_entity + create_template_entity "
+            "instead (a rename is really two operations, not supported "
+            "directly here). Fails with a permission error if the entity "
+            "lives in configuration.yaml itself, which is read-only under "
+            "this integration's default security policy - only "
+            "package-defined entities can be updated this way."
+        )
+        + _MASKED_WRITE_NOTE
+        + _CONFIRM_TOKEN_NOTE
+    )
     parameters = _write_schema(
         {
             vol.Required("unique_id"): str,
@@ -3880,6 +3993,17 @@ class UpdateTemplateEntityTool(WriteGatedTool):
     @staticmethod
     def _block(args: dict[str, Any]) -> dict[str, Any] | None:
         return {field: args[field] for field in BLOCK_FIELDS if field in args} or None
+
+    @override
+    async def _masked_originals(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The entity's config as it is now (issue #151)."""
+        try:
+            _, config = await self._manager.get_entity(args["unique_id"])
+        except (TemplateEntityNotFoundError, DuplicateTemplateUniqueIdError):
+            return {}
+        return {"config": config}
 
     @override
     async def _preview_context(
@@ -4574,7 +4698,8 @@ class GetTraceTool(GatedTool):
         "child_id ran a script - pass that to get_trace for its own steps. "
         "include_variables (default true) adds what each step changed, "
         "e.g. the trigger's from_state/to_state; include_config adds the "
-        "automation's config as it was when this run happened. Read-only."
+        "automation's config as it was when this run happened, literal "
+        "credentials masked like get_automation's. Read-only."
     )
     parameters = vol.Schema(
         {
@@ -4940,7 +5065,7 @@ class ListScriptsTool(GatedTool):
         "config. Same layout-aware, package-safe file resolution as "
         "write_script - a plain file read can silently miss "
         "package-defined scripts."
-    )
+    ) + _MASKED_READ_NOTE
     parameters = vol.Schema({})
 
     def __init__(self, script_manager: ScriptManager) -> None:
@@ -4960,7 +5085,7 @@ class ListScriptsTool(GatedTool):
                 "script_id": script_id,
                 "file_path": location.file_path,
                 "is_package": location.is_package,
-                "config": to_json_safe(config),
+                "config": mirror_secrets.mask_credentials(to_json_safe(config)),
             }
             for location, script_id, config in await self._manager.all_scripts()
         ]
@@ -4972,12 +5097,16 @@ class GetScriptTool(GatedTool):
 
     name = "get_script"
     description = (
-        "Read a script's config by id, resolving which file actually "
-        "defines it (the default scripts.yaml, or a packages/*.yaml "
-        "file) - a plain file read can silently miss package-defined "
-        "scripts. Fails clearly if the id isn't found or is defined in "
-        "more than one file, rather than guessing."
-    ) + _MISREAD_VALUES_NOTE
+        (
+            "Read a script's config by id, resolving which file actually "
+            "defines it (the default scripts.yaml, or a packages/*.yaml "
+            "file) - a plain file read can silently miss package-defined "
+            "scripts. Fails clearly if the id isn't found or is defined in "
+            "more than one file, rather than guessing."
+        )
+        + _MASKED_READ_NOTE
+        + _MISREAD_VALUES_NOTE
+    )
     parameters = vol.Schema({vol.Required("script_id"): str})
 
     def __init__(self, script_manager: ScriptManager) -> None:
@@ -5001,8 +5130,11 @@ class GetScriptTool(GatedTool):
         return {
             "file_path": location.file_path,
             "is_package": location.is_package,
-            "config": to_json_safe(config),
-            "misread_values": cast(JsonValueType, find_misread_scalars(config)),
+            "config": mirror_secrets.mask_credentials(to_json_safe(config)),
+            "misread_values": cast(
+                JsonValueType,
+                mirror_secrets.mask_misread(find_misread_scalars(config)),
+            ),
         }
 
 
@@ -5011,18 +5143,22 @@ class WriteScriptTool(WriteGatedTool):
 
     name = "write_script"
     description = (
-        "Create or update a script. If the id already exists, it's "
-        "updated in place in whichever file actually defines it (default "
-        "file or a package) - never blindly appended to scripts.yaml, "
-        "which would create a silent duplicate for package-defined "
-        "scripts. For a brand new script, pass 'package' to target an "
-        "existing packages/*.yaml file, or omit it for the default "
-        "scripts.yaml. Always reloads scripts afterward - never requires "
-        "a restart. Pass expected_hash (from get_file_metadata or a prior "
-        "read) to detect concurrent edits. The config is checked with HA's own "
-        "script validation first; one HA would refuse to set up is refused "
-        "with HA's error, before any token or write."
-    ) + _CONFIRM_TOKEN_NOTE
+        (
+            "Create or update a script. If the id already exists, it's "
+            "updated in place in whichever file actually defines it (default "
+            "file or a package) - never blindly appended to scripts.yaml, "
+            "which would create a silent duplicate for package-defined "
+            "scripts. For a brand new script, pass 'package' to target an "
+            "existing packages/*.yaml file, or omit it for the default "
+            "scripts.yaml. Always reloads scripts afterward - never requires "
+            "a restart. Pass expected_hash (from get_file_metadata or a prior "
+            "read) to detect concurrent edits. The config is checked with HA's own "
+            "script validation first; one HA would refuse to set up is refused "
+            "with HA's error, before any token or write."
+        )
+        + _MASKED_WRITE_NOTE
+        + _CONFIRM_TOKEN_NOTE
+    )
     parameters = _write_schema(
         {
             vol.Required("script_id"): str,
@@ -5035,6 +5171,17 @@ class WriteScriptTool(WriteGatedTool):
     def __init__(self, script_manager: ScriptManager) -> None:
         """Init with the ScriptManager backing this tool."""
         self._manager = script_manager
+
+    @override
+    async def _masked_originals(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The script's config as it is now (issue #151)."""
+        try:
+            _, config = await self._manager.get_script(args["script_id"])
+        except (ScriptNotFoundError, DuplicateScriptIdError):
+            return {}
+        return {"config": to_json_safe(config)}
 
     @override
     async def _refusal(
@@ -5131,7 +5278,7 @@ class ListRestCommandsTool(GatedTool):
         "package-defined rest_commands. Read-only. Pass "
         "domain='shell_command' to list shell_command entries instead "
         "(their config is the command string itself)."
-    )
+    ) + _MASKED_READ_NOTE
     parameters = vol.Schema({vol.Optional("domain"): _COMMAND_DOMAIN_SCHEMA})
 
     def __init__(self, rest_command_manager: RestCommandManager) -> None:
@@ -5151,7 +5298,7 @@ class ListRestCommandsTool(GatedTool):
                 "rest_command_id": rest_command_id,
                 "file_path": location.file_path,
                 "is_package": location.is_package,
-                "config": to_json_safe(config),
+                "config": mirror_secrets.mask_credentials(to_json_safe(config)),
             }
             for location, rest_command_id, config in await self._manager.all_rest_commands(
                 tool_input.tool_args.get("domain", REST_COMMAND_KEY)
@@ -5331,21 +5478,25 @@ class WritePackagePlatformEntityTool(WriteGatedTool):
 
     name = "write_package_platform_entity"
     description = (
-        "Create or replace one YAML platform entry in a package: config is "
-        "the entry (with platform, and a unique_id or else a name to find it "
-        "by). An entry of this domain + platform with the same unique_id - or "
-        "the same name, for one without - is replaced in its own file; "
-        "otherwise the config is a new entry in package (an existing "
-        "packages/ file). More than one match is refused; file narrows it. "
-        "The config is checked against the platform's own PLATFORM_SCHEMA "
-        "first. Refused: literal credentials (use !secret), command_line / "
-        "shell_command platforms (shell execution, read-only by design), "
-        "and for a rest platform a templated host, a new host unless "
-        "allow_new_host, verify_ssl: false unless allow_insecure_tls. The "
-        "preview shows the entry before and after and every reference to "
-        "its entity; the result says whether a reload took it in or a "
-        "restart is needed."
-    ) + _CONFIRM_TOKEN_NOTE
+        (
+            "Create or replace one YAML platform entry in a package: config is "
+            "the entry (with platform, and a unique_id or else a name to find it "
+            "by). An entry of this domain + platform with the same unique_id - or "
+            "the same name, for one without - is replaced in its own file; "
+            "otherwise the config is a new entry in package (an existing "
+            "packages/ file). More than one match is refused; file narrows it. "
+            "The config is checked against the platform's own PLATFORM_SCHEMA "
+            "first. Refused: literal credentials (use !secret), command_line / "
+            "shell_command platforms (shell execution, read-only by design), "
+            "and for a rest platform a templated host, a new host unless "
+            "allow_new_host, verify_ssl: false unless allow_insecure_tls. The "
+            "preview shows the entry before and after and every reference to "
+            "its entity; the result says whether a reload took it in or a "
+            "restart is needed."
+        )
+        + _MASKED_WRITE_NOTE
+        + _CONFIRM_TOKEN_NOTE
+    )
     parameters = _write_schema(
         {
             vol.Required("domain"): str,
@@ -5364,6 +5515,34 @@ class WritePackagePlatformEntityTool(WriteGatedTool):
     ) -> None:
         self._manager = manager
         self._writer = writer
+
+    @override
+    async def _masked_originals(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The entry's config as it is now (issue #151) - found by the
+        unique_id, else the name, it was sent back with."""
+        config = args.get("config") or {}
+        unique_id, name = config.get("unique_id"), config.get("name")
+        selector = (
+            {"unique_id": str(unique_id)}
+            if unique_id is not None
+            else {"name": str(name)} if name is not None else None
+        )
+        if selector is None:
+            return {}
+        try:
+            found = await self._manager.find(
+                args["domain"],
+                str(config.get("platform", "")),
+                file=args.get("file"),
+                **selector,
+            )
+        except ValueError:
+            return {}
+        if len(found) != 1:
+            return {}
+        return {"config": to_json_safe(await self._manager.get_entry(found[0]))}
 
     async def _plan(
         self, hass: HomeAssistant, args: dict[str, Any]

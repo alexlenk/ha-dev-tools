@@ -176,6 +176,18 @@ def find_file_credentials(path: str, content: str) -> list[str]:
 WITHHELD = "<withheld: a literal credential - move it to secrets.yaml (!secret)>"
 
 
+def _mask_entry(key: Any, value: Any) -> Any:
+    """`value` as mask_credentials shows it under `key`."""
+    if (
+        _is_sensitive_key(key)
+        and isinstance(value, str | int | float)
+        and not isinstance(value, bool)
+        and not str(value).startswith(("!secret ", "!env_var "))
+    ):
+        return WITHHELD
+    return mask_credentials(value)
+
+
 def mask_credentials(node: Any) -> Any:
     """A JSON-safe config (yaml_style.to_json_safe) with every literal
     credential replaced by WITHHELD, for a read-only tool's answer:
@@ -183,23 +195,147 @@ def mask_credentials(node: Any) -> Any:
     passwords in URLs and bearer tokens inside any string - the same checks
     get_config_file withholds a block for (issue #105)."""
     if isinstance(node, dict):
-        return {
-            key: (
-                WITHHELD
-                if _is_sensitive_key(key)
-                and isinstance(value, str | int | float)
-                and not isinstance(value, bool)
-                and not str(value).startswith(("!secret ", "!env_var "))
-                else mask_credentials(value)
-            )
-            for key, value in node.items()
-        }
+        return {key: _mask_entry(key, value) for key, value in node.items()}
     if isinstance(node, list):
         return [mask_credentials(item) for item in node]
     if isinstance(node, str):
         node = _URL_USERINFO.sub(f"://{WITHHELD}@", node)
         return _BEARER.sub(f"Bearer {WITHHELD}", node)
     return node
+
+
+def mask_misread(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """find_misread_scalars' findings, without the value of one under a
+    credential-shaped key - they echo what's written."""
+    masked = []
+    for finding in findings:
+        key = re.split(r"[.\[]", str(finding.get("path", "")))[-1]
+        if _is_sensitive_key(key):
+            finding = {**finding, "written": WITHHELD, "ha_reads_as": WITHHELD}
+        masked.append(finding)
+    return masked
+
+
+# --- A masked config written back (issue #151) --------------------------------
+#
+# The read tools mask literal credentials, but an agent reads a config,
+# changes one field and writes the whole item back - the placeholder would
+# overwrite the real value. So a write puts each original back: the value
+# at the same place in the current config if it masks to exactly what came
+# back, else the one value anywhere under the same key that does. Anything
+# else - the text around a masked part edited, a new item, two originals
+# that fit - is refused, never guessed.
+
+_MISSING = object()
+
+
+def contains_withheld(node: Any) -> bool:
+    if isinstance(node, dict):
+        return any(contains_withheld(value) for value in node.values())
+    if isinstance(node, list):
+        return any(contains_withheld(item) for item in node)
+    return isinstance(node, str) and WITHHELD in node
+
+
+def _path(parts: tuple[Any, ...]) -> str:
+    text = ""
+    for part in parts:
+        text += (
+            f"[{part}]"
+            if isinstance(part, int)
+            else (f".{part}" if text else str(part))
+        )
+    return text
+
+
+def _leaves(node: Any, key: Any = None) -> list[tuple[Any, Any]]:
+    """(the key it's under, value) for every scalar - a list item's key is
+    the list's."""
+    if isinstance(node, dict):
+        return [leaf for k, v in node.items() for leaf in _leaves(v, k)]
+    if isinstance(node, list):
+        return [leaf for item in node for leaf in _leaves(item, key)]
+    return [(key, node)]
+
+
+def _at(node: Any, parts: tuple[Any, ...]) -> Any:
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and isinstance(part, int) and part < len(node):
+            node = node[part]
+        else:
+            return _MISSING
+    return node
+
+
+def restore_withheld(new: Any, current: Any) -> tuple[Any, list[str], list[Any]]:
+    """`new` with each value holding WITHHELD replaced by its original from
+    `current` (None: there is none). Returns (restored, paths that couldn't
+    be, the originals put back)."""
+    problems: list[str] = []
+    restored: list[Any] = []
+    index = _leaves(current) if current is not None else []
+
+    def fix(node: Any, parts: tuple[Any, ...], key: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: fix(v, parts + (k,), k) for k, v in node.items()}
+        if isinstance(node, list):
+            return [fix(item, parts + (i,), key) for i, item in enumerate(node)]
+        if not (isinstance(node, str) and WITHHELD in node):
+            return node
+        same = _at(current, parts) if current is not None else _MISSING
+        if same is not _MISSING and _mask_entry(key, same) == node:
+            restored.append(same)
+            return same
+        fits = {
+            repr(value): value
+            for leaf_key, value in index
+            if leaf_key == key and _mask_entry(leaf_key, value) == node
+        }
+        if len(fits) == 1:
+            value = next(iter(fits.values()))
+            restored.append(value)
+            return value
+        problems.append(_path(parts))
+        return node
+
+    return fix(new, (), None), problems, restored
+
+
+def _fragments(value: Any) -> list[str]:
+    """The parts of a restored value that must not show up in an answer."""
+    text = str(value)
+    found = [text]
+    found += [m.group(0)[3:-1] for m in _URL_USERINFO.finditer(text)]
+    found += [m.group(0).split(None, 1)[1] for m in _BEARER.finditer(text)]
+    return [fragment for fragment in found if len(fragment) >= 3]
+
+
+def scrub(node: Any, originals: list[Any]) -> Any:
+    """`node` with every restored original (and its URL password / bearer
+    token) replaced by WITHHELD - an answer computed from a restored
+    config, a validation error quoting a value, must not carry it."""
+    fragments = sorted(
+        {fragment for value in originals for fragment in _fragments(value)},
+        key=len,
+        reverse=True,
+    )
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {key: clean(value) for key, value in item.items()}
+        if isinstance(item, list):
+            return [clean(value) for value in item]
+        if isinstance(item, str):
+            for fragment in fragments:
+                item = item.replace(fragment, WITHHELD)
+            return item
+        if not isinstance(item, bool) and item in originals:
+            return WITHHELD
+        return item
+
+    return clean(node)
 
 
 def literal_credentials(node: Any, path: str = "") -> list[str]:
