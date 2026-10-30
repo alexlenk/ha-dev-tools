@@ -18,9 +18,8 @@ that, for free, because it doesn't know or care whether the tools it's
 serving came from Assist or from a custom integration.
 
 Consequence: this integration cannot function on a Home Assistant version
-before `mcp_server` shipped (2026.3+; this project targets 2026.8.2+, the
-version whose `Requires-Python` floor - 3.14.2 - happens to also be what CI
-runs against). There is no fallback transport for older installs, by
+before `mcp_server` shipped (2026.3+; this project targets 2026.10.0+, the
+first release with `llm.ToolResult` and tool annotations - issue #152). There is no fallback transport for older installs, by
 design - building one would mean re-implementing exactly the thing
 `mcp_server` already does correctly.
 
@@ -137,9 +136,7 @@ each domain's schema: it calls `hass.config_entries.flow.async_init`/
 whatever step id the flow is currently on. When the caller hasn't supplied
 input for that step, it raises `FlowStepRequiredError` carrying the step's
 own schema - serialized the same way HA's own `config_entries` HTTP view
-does (`voluptuous_serialize.convert(schema, custom_serializer=
-cv.custom_serializer)` up to HA 2026.8, probatio's `to_field_list` from
-2026.9 on, whichever `cv` itself imports - see "Two HA-side traps" below)
+does (probatio's `to_field_list` - see "Two HA-side traps" below)
 - so a caller (the LLM) can discover each step's
 fields and retry, accumulating a `steps` dict keyed by step id until the
 flow finishes. A `MENU` result needs no special-casing beyond accepting

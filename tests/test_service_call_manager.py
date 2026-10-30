@@ -445,3 +445,105 @@ async def test_control_entities_reports_each_outcome(hass: HomeAssistant):
             "state_after": None,
         },
     ]
+
+
+# --- set_automation_enabled (issue #184) ------------------------------------------
+
+
+def test_summarize_trigger():
+    from custom_components.ha_dev_tools.service_call_manager import summarize_trigger
+
+    assert (
+        summarize_trigger(
+            {
+                "trigger": "state",
+                "entity_id": "binary_sensor.door",
+                "to": "on",
+                "id": "x",
+            }
+        )
+        == "state: entity_id=binary_sensor.door, to=on"
+    )
+    assert summarize_trigger({"platform": "homeassistant"}) == "homeassistant"
+    assert summarize_trigger({}) == "?"
+    assert summarize_trigger("!input trigger") == "!input trigger"
+
+
+@pytest.mark.asyncio
+async def test_plan_and_set_automation_enabled(hass: HomeAssistant):
+    from custom_components.ha_dev_tools.service_call_manager import (
+        AutomationEnableRefusedError,
+        plan_automation_enabled,
+        set_automations_enabled,
+    )
+
+    hass.states.async_set(
+        "automation.lights",
+        "off",
+        {"id": "lights", "friendly_name": "Lights", "last_triggered": "2026-10-01"},
+    )
+    hass.states.async_set("automation.fan", "on", {"id": "fan"})
+    hass.states.async_set("automation.broken", "off", {"id": "broken"})
+
+    with pytest.raises(AutomationEnableRefusedError) as err:
+        plan_automation_enabled(hass, ["lights", "lights", "gone"], True, {})
+    assert "more than once" in str(err.value)
+    assert "gone: no automation.* entity" in str(err.value)
+
+    plan = plan_automation_enabled(
+        hass,
+        ["lights", "fan", "broken"],
+        True,
+        {
+            "lights": {"triggers": {"trigger": "sun", "event": "sunset"}},
+            "fan": {"trigger": [{"platform": "time", "at": "07:00"}]},
+            "broken": None,
+        },
+    )
+    assert plan[0] == {
+        "automation_id": "lights",
+        "entity_id": "automation.lights",
+        "alias": "Lights",
+        "state_now": "off",
+        "last_triggered": "2026-10-01",
+        "triggers": ["sun: event=sunset"],
+        "change": "off -> on",
+    }
+    assert plan[1]["change"] == "already on"
+    assert plan[1]["triggers"] == ["time: at=07:00"]
+    assert plan[2]["triggers"] == [] and plan[2]["alias"] == "automation.broken"
+
+    callers = []
+
+    async def turn_on(call):
+        callers.append(call.context.user_id)
+        entity_id = call.data["entity_id"]
+        if entity_id == "automation.broken":
+            raise RuntimeError("automation failed to start")
+        hass.states.async_set(entity_id, "on", {"id": entity_id})
+
+    hass.services.async_register("automation", "turn_on", turn_on)
+    results = await set_automations_enabled(hass, plan, True, "user-1")
+    assert results == [
+        {
+            "automation_id": "lights",
+            "entity_id": "automation.lights",
+            "state_before": "off",
+            "state_after": "on",
+        },
+        {
+            "automation_id": "fan",
+            "entity_id": "automation.fan",
+            "state_before": "on",
+            "state_after": "on",
+        },
+        {"automation_id": "broken", "error": "automation failed to start"},
+    ]
+    assert callers == ["user-1"] * 3
+
+    async def turn_off(call):
+        hass.states.async_remove(call.data["entity_id"])
+
+    hass.services.async_register("automation", "turn_off", turn_off)
+    off = await set_automations_enabled(hass, plan[:1], False)
+    assert off[0]["state_after"] is None

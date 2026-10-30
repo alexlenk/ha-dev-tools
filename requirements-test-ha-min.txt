@@ -5,10 +5,12 @@
 # minimum needs its own CI run, not just the current release (issue #84).
 -r requirements-test-common.txt
 
-# conversation/manifest.json's requirements at homeassistant==2026.8.2 -
+# conversation/manifest.json's requirements at homeassistant==2026.10.0 -
 # see requirements-test.txt for why these are needed at all.
-hassil==3.11.0
-home-assistant-intents==2026.7.30
+gazetteer-matcher==1.1.0
+hassil==3.12.1
+home-assistant-intents==2026.10.6
 
-# Pins homeassistant==2026.8.2 transitively.
-pytest-homeassistant-custom-component==0.13.356
+# Pins homeassistant==2026.10.0 transitively - the first release with
+# llm.ToolResult and llm.ToolAnnotations (issue #152).
+pytest-homeassistant-custom-component==0.13.371

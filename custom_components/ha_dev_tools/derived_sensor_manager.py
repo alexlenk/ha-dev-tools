@@ -28,7 +28,7 @@ machinery generically: it steps `async_configure` in a loop, handing
 each step the caller-supplied input for that step's id, and raises
 `FlowStepRequiredError` (carrying the step's own schema, serialized the
 same way `homeassistant.helpers.data_entry_flow`'s HTTP view does -
-`voluptuous_serialize.convert(..., custom_serializer=cv.custom_serializer)`)
+probatio's `to_field_list(..., custom_serializer=cv.custom_serializer)`)
 when the caller hasn't supplied input for the step the flow is
 currently on. A caller (the LLM) can therefore discover each step's
 fields by calling with no/partial `steps` first, then retry with them
@@ -78,11 +78,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any, cast
 
-import voluptuous_serialize
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType, UnknownFlow, section
 from homeassistant.helpers import config_validation as cv
+from probatio import to_field_list as _to_field_list
 from voluptuous import Invalid as VoluptuousInvalid
 from voluptuous import Marker
 
@@ -175,14 +175,7 @@ def _get_entry(hass: HomeAssistant, entry_id: str) -> ConfigEntry:
 # config_validation happened to re-export it (what this used to look up),
 # 2026.10's imports probatio as a module instead, and the lookup silently
 # fell back to voluptuous_serialize - the same crash, on every flow's first
-# step (issue #137). HA before 2026.9 has no probatio, and a matching
-# voluptuous custom_serializer.
-try:
-    from probatio import to_field_list as _to_field_list
-except ImportError:  # pragma: no cover - HA before 2026.9
-    _to_field_list = voluptuous_serialize.convert
-
-
+# step (issue #137) - hence the import from probatio at the top.
 def _serialize_schema(schema: Any) -> list[dict[str, Any]]:
     if schema is None:
         return []

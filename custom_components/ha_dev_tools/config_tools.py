@@ -23,6 +23,8 @@ from __future__ import annotations
 import string
 from typing import Any
 
+# HA validates with probatio, whose Invalid isn't voluptuous'.
+import probatio
 import voluptuous
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -30,16 +32,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.check_config import async_check_ha_config_file
 from homeassistant.helpers.translation import async_get_translations
+from probatio.humanize import humanize_error as probatio_humanize_error
 from voluptuous.humanize import humanize_error
 
-try:  # HA 2026.10 validates with probatio, whose Invalid isn't voluptuous'.
-    import probatio
-    from probatio.humanize import humanize_error as probatio_humanize_error
-except ImportError:  # pragma: no cover - older HA, voluptuous only
-    probatio = None  # type: ignore[assignment]
-INVALID: tuple[type[Exception], ...] = (voluptuous.Invalid,) + (
-    (probatio.Invalid,) if probatio is not None else ()
-)
+INVALID: tuple[type[Exception], ...] = (voluptuous.Invalid, probatio.Invalid)
 
 # Domains whose "failed to set up" repairs mean a config item HA refused to
 # load - automation/script create them as `validation_failed_<part>` with
@@ -224,6 +220,17 @@ async def reload_domain(
     if entry_id is None and hass.services.has_service(domain, "reload"):
         await hass.services.async_call(domain, "reload", blocking=True)
         return {"reloaded": True, "domain": domain}
+    if domain == "homeassistant" and entry_id is None:
+        # Core config: customize, name, units, ... - no restart (issue #183).
+        await hass.services.async_call(
+            "homeassistant", "reload_core_config", blocking=True
+        )
+        return {
+            "reloaded": True,
+            "domain": domain,
+            "service": "homeassistant.reload_core_config",
+            "note": "customize applies to each entity at its next state update",
+        }
 
     entries = hass.config_entries.async_entries(domain)
     if entry_id is not None:
@@ -281,8 +288,6 @@ def humanize_invalid(config: Any, err: Exception) -> str:
     """HA's own text for a validation error - voluptuous' or, on HA
     2026.10, probatio's."""
     humanize: Any = (
-        probatio_humanize_error
-        if probatio is not None and isinstance(err, probatio.Invalid)
-        else humanize_error
+        probatio_humanize_error if isinstance(err, probatio.Invalid) else humanize_error
     )
     return str(humanize(config, err))

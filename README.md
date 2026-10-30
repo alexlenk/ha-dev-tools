@@ -44,7 +44,7 @@ a live instance.
 
 ## Quick start
 
-Needs Home Assistant **2026.8.2+** (see [Requirements](#requirements) below
+Needs Home Assistant **2026.10.0+** (see [Requirements](#requirements) below
 for the full list, including client-specific versions).
 
 1. Install via HACS or manually - see [Installation](#installation) below.
@@ -96,7 +96,8 @@ That's it - ask it something.
 Every write tool (`write_automation`, `delete_automation`, `write_script`,
 the helper/derived-sensor/template-entity CRUD tools, `delete_entity`/
 `delete_entities`, `write_dashboard`/`patch_dashboard`, `write_energy_config`,
-`write_rest_command`, the package platform-entry tools) always requires
+`write_rest_command`, the package platform-entry tools, `write_customize`,
+`set_automation_enabled`, `control_entities`) always requires
 two calls: **propose**
 (no arguments changed, no side effects - returns a preview of what would be
 applied plus a short-lived `confirm_token`) and **confirm** (the identical
@@ -124,9 +125,10 @@ account, full stop).
 
 ## Requirements
 
-- Home Assistant **2026.8.2 or newer** - the release that shipped the native
-  `mcp_server` integration this depends on. That release itself requires
-  Python 3.14.2+.
+- Home Assistant **2026.10.0 or newer** - the first release whose tool API
+  has `ToolResult` and tool annotations (issue #152; returning plain JSON
+  stops working in 2027.11). The native `mcp_server` integration this
+  depends on shipped earlier; HA itself requires Python 3.14.2+.
 - The `mcp_server` integration, configured to expose the `dev_tools` API (see
   Quick start above).
 - If connecting with Claude Code, **Claude Code 2.1 or newer** - it's the
@@ -195,6 +197,7 @@ matters for setup, covered below.
 | Tool | What it does |
 |---|---|
 | `find_entities` | Area/domain/name-scoped entity lookup - avoids dumping hundreds of entities |
+| `describe_entity` | Where an entity is defined and which tools read and change it: a UI helper (Template helper of any domain, Min/Max, Utility Meter, ... - the derived-sensor tools), an integration's config entry, an automation or script (with its file), a storage or YAML helper, a YAML `template:` entity (file and block), a package platform entry, or YAML without a `unique_id` (with candidates by name) - plus each owning tool's arguments. Start here when diagnosing an entity |
 | `render_template` | Render a Jinja2 template against live state, never raising on error |
 | `validate_template` | Check template syntax and flag referenced entities that don't exist |
 | `get_automation` | Layout-aware read: resolves whether an automation lives in `automations.yaml` or a `packages/*.yaml` file, and reports whether it's currently enabled - that's runtime-only state the YAML itself never shows |
@@ -206,7 +209,7 @@ matters for setup, covered below.
 | `list_package_platform_entities` / `write_package_platform_entity` / `delete_package_platform_entities` | YAML platform entries in packages - `sensor: - platform: statistics`, `binary_sensor:`, `switch:`, ... Found by domain + platform + unique_id (or name), checked against the platform's own schema before writing. `command_line` is refused (shell execution), `rest` entries follow the rest_command rules above. The preview shows every reference to the entity; the result says whether a reload took it in or a restart is needed |
 | `check_config` | Home Assistant's own full config validation. With git mirroring on, a passing check also snapshots your hand-edited config (below) |
 | `get_config_file` | Raw text of a hand-edited config file - `configuration.yaml`, anything it `!include`s, `packages/*.yaml`, `custom_templates/*.jinja` - with `!secret`/`!include` as written, live or (`source: mirror`) its last good snapshot. Reads a file that no longer parses, where the structured tools can't. `key` (e.g. `irrigation_unlimited`) returns just that top-level block, wherever it lives - an integration's own YAML config. Withholds a file (or with `key`, a block) with a literal credential in it; never returns `secrets.yaml` |
-| `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting |
+| `reload_domain` | Reload a domain's config (e.g. `automation`) without restarting; `homeassistant` reloads the core config (`customize`, name, units) |
 
 **Configure**
 | Tool | What it does |
@@ -215,17 +218,19 @@ matters for setup, covered below.
 | `delete_entity` | Soft-delete an entity from the entity registry - Home Assistant reconnects it automatically if the same integration re-registers it later; only truly orphaned entries are purged for good, after 30 days. That 30-day window is Home Assistant's own behavior, not something this tool adds - a backup past it only happens if git mirroring (below) is also turned on |
 | `delete_entities` | Same as `delete_entity`, for a list of entity_ids in one propose/confirm pair - for bulk cleanup, avoids one round trip (and one mirror commit pair) per entity |
 | `update_entities` | What the entity and device settings dialogs do, for several at once: rename an entity_id, set name, room, `device_class`, icon, disabled or hidden, and "Show as" a switch as a light/fan/cover/lock/siren/valve, labels (`labels` sets the whole set, `add_labels`/`remove_labels` change it) and `categories` (`{scope: category}`); for devices, name, room, disabled and labels. Rooms, labels and categories are matched by exact name or id. Every item is checked first - an unknown room or a taken entity_id refuses the whole batch. A rename onto an id that already has statistics is flagged in the preview, since HA won't move the entity's history onto it. A rename lists every place the old id is used (YAML, dashboards, persons' trackers, helpers); `update_references: true` rewrites the ones it can |
-| `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) plus the general-purpose Template helper (any entity domain - light, switch, sensor, ...) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create); `update_derived_sensor` also takes a flat `options` patch of just the fields to change, and leaves every other field as it was |
+| `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for UI-created helpers that are config entries: the **Template helper** (any entity domain - sensor, binary_sensor, switch, light, ...) and the calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create); `update_derived_sensor` also takes a flat `options` patch of just the fields to change, and leaves every other field as it was |
 | `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. `update_template_entity` can also change a trigger-based block's `triggers` / `conditions` / `variables` / `actions` in place - the preview lists every entity in the block, and a reload keeps their state (unlike delete + create). For the config-entry Template *helper* instead, see the row above |
 | `list_dashboards` | List every configured Lovelace dashboard (title, url_path, icon, mode, require_admin, show_in_sidebar) - storage- and YAML-mode alike. Use before `get_dashboard` when checking every dashboard for something, since a non-default dashboard's url_path otherwise has to already be known |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction). `get_dashboard` also returns the config's `config_hash` |
 | `patch_dashboard` | Changes part of a dashboard without re-sending the whole config: add/replace/remove a view, section or card, or `set` a value at a JSON pointer. Everything else is saved exactly as read. Ops are planned against `get_dashboard`'s `config_hash` (required), and a dashboard changed since is refused. Ambiguous selectors (e.g. two sections with the same heading) are refused. The preview lists each touched node before/after; the result has the new hash for the next patch |
+| `write_customize` | Set or remove `homeassistant: customize:` attributes in a package for one or more entities - the only way to give an integration's sensor a `state_class` (needed for long-term statistics) or a missing `device_class`. Only `state_class`, `device_class`, `unit_of_measurement`, `friendly_name`, `icon` and `assumed_state`, each value checked; combinations HA won't compile statistics for are warned about in the preview. Creates the package file if needed; an entity customized in another file (or `configuration.yaml`) is refused. Applied without a restart (config check - a new error rolls it back -, `reload_core_config`, each entity's state rewritten) and reported per entity |
 | `get_energy_config` / `write_energy_config` | Read/write the Energy dashboard's own source config (grid/solar/battery/gas/water entities, cost settings) - a separate HA subsystem from Lovelace dashboards, not reachable through `get_dashboard`. Each field in a write wholesale-replaces that section; omitting a field leaves it untouched |
 
 **Act**
 | Tool | What it does |
 |---|---|
 | `trigger_automation` | Run an existing automation immediately by its config id, the same as the UI's "Run actions" button - for one-shot testing without a throwaway automation edit cycle. Like the button, the run is left to finish on its own - a client timeout never cuts it off; it returns at once with the run's `context_id` (`wait_seconds` waits for a short run's outcome). Only ever triggers an automation already in reviewed config; never accepts an arbitrary entity_id or service |
+| `set_automation_enabled` | Turn automations on or off (the UI's enable toggle) by config id, one or several - the preview shows each one's alias, state, last triggered and triggers, so turning one on shows what will start firing. `write_automation` takes `enabled` to do the same after a write (a deleted automation restored under its old id otherwise comes back off) |
 | `set_number_value` | Set a `number` or `input_number` entity's value directly (e.g. an EMHASS battery-schedule slot, a Modbus-backed inverter setting) - scoped to exactly these two domains, not a generic service-call tool |
 | `set_boolean_value` | Turn an `input_boolean` helper on or off directly - scoped to just this virtual helper domain |
 | `control_entities` | Turn entities on, off or toggle them without writing an automation: `switch`, `light` (with optional `brightness_pct`), `fan`, `input_boolean`, `climate`, `media_player`, `humidifier`, `cover` and `valve` (on opens, off closes). The preview shows each entity's name, area, current state and the service it would call; the result shows each one's state before and after. `lock`, `alarm_control_panel` and `siren` are never controlled, and neither is any device or entity listed under "Devices/Entities agents may never control" on the Configure page (a garage door, say) - such a call is refused before a confirm token is issued |

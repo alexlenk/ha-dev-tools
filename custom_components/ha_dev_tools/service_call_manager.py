@@ -335,3 +335,116 @@ async def control_entities(
             }
         )
     return results
+
+
+# --- set_automation_enabled: an automation on or off (issue #184) ---------------
+#
+# automation.turn_on / turn_off - the UI's enable toggle, a runtime state HA
+# restores across restarts, never the YAML. control_entities doesn't cover
+# it (an automation isn't a device) and update_entities' `disabled` is the
+# registry disable, a different thing. Addressed by config id like
+# trigger_automation; the preview shows what each one reacts to, so turning
+# one on shows what will start firing.
+
+
+class AutomationEnableRefusedError(Exception):
+    """A set_automation_enabled call that can't go ahead - nothing changed."""
+
+
+def summarize_trigger(trigger: Any) -> str:
+    """One line for a trigger: its type, then its other fields."""
+    if not isinstance(trigger, dict):
+        return str(trigger)
+    kind = trigger.get("trigger") or trigger.get("platform") or "?"
+    rest = ", ".join(
+        f"{key}={value}"
+        for key, value in trigger.items()
+        if key not in ("trigger", "platform", "id")
+    )
+    return f"{kind}: {rest}" if rest else str(kind)
+
+
+def plan_automation_enabled(
+    hass: HomeAssistant,
+    automation_ids: list[str],
+    enabled: bool,
+    configs: dict[str, dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """Each automation's live entity, state and triggers - or every reason
+    the call is refused. `configs` holds each id's config (None when it
+    isn't in a file this integration reads)."""
+    problems: list[str] = []
+    if len(set(automation_ids)) != len(automation_ids):
+        problems.append("an automation id is listed more than once")
+    plan = []
+    for automation_id in automation_ids:
+        state = audit_manager.find_automation_state(hass, automation_id)
+        if state is None:
+            problems.append(
+                f"{automation_id}: no automation.* entity for this id - reload "
+                "automations (reload_domain) if it was just added"
+            )
+            continue
+        config = configs.get(automation_id) or {}
+        triggers = config.get("triggers", config.get("trigger")) or []
+        if isinstance(triggers, dict):
+            triggers = [triggers]
+        wanted = "on" if enabled else "off"
+        plan.append(
+            {
+                "automation_id": automation_id,
+                "entity_id": state.entity_id,
+                "alias": state.attributes.get("friendly_name", state.entity_id),
+                "state_now": state.state,
+                "last_triggered": (
+                    str(last)
+                    if (last := state.attributes.get("last_triggered"))
+                    else None
+                ),
+                "triggers": [summarize_trigger(trigger) for trigger in triggers],
+                "change": (
+                    f"already {wanted}"
+                    if state.state == wanted
+                    else f"{state.state} -> {wanted}"
+                ),
+            }
+        )
+    if problems:
+        raise AutomationEnableRefusedError("; ".join(problems))
+    return plan
+
+
+async def set_automations_enabled(
+    hass: HomeAssistant,
+    plan: list[dict[str, Any]],
+    enabled: bool,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """automation.turn_on / turn_off for each planned automation, as
+    `user_id`; each one's state before and after. turn_off stops a run in
+    progress too, as the UI's toggle does."""
+    service = "turn_on" if enabled else "turn_off"
+    results = []
+    for step in plan:
+        entity_id = step["entity_id"]
+        try:
+            await hass.services.async_call(
+                "automation",
+                service,
+                {"entity_id": entity_id},
+                blocking=True,
+                context=Context(user_id=user_id),
+            )
+        except Exception as err:  # noqa: BLE001 - reported per automation
+            results.append({"automation_id": step["automation_id"], "error": str(err)})
+            continue
+        state = hass.states.get(entity_id)
+        results.append(
+            {
+                "automation_id": step["automation_id"],
+                "entity_id": entity_id,
+                "state_before": step["state_now"],
+                "state_after": state.state if state else None,
+            }
+        )
+    return results

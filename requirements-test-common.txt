@@ -15,8 +15,8 @@ hypothesis>=6.0.0
 
 # Additional test utilities
 # aioresponses is NOT usable here, despite being listed as a dependency -
-# left unimported anywhere. homeassistant (both tested versions, 2026.8.2
-# and 2026.9.4) hard-pins aiohttp==3.14.3 exactly, not a floor - confirmed
+# left unimported anywhere. homeassistant (both tested versions, 2026.10.0
+# and 2026.10.4) hard-pins aiohttp (3.14.4 / 3.14.5) exactly, not a floor - confirmed
 # directly by a real resolution failure, not assumed. aioresponses==0.7.9
 # (its latest release; confirmed no newer one exists) constructs
 # aiohttp.ClientResponse directly for every mocked call, and aiohttp
@@ -37,23 +37,20 @@ pyyaml>=6.0.0
 aiofiles>=23.0.0
 aiohttp>=3.8.0
 ruamel.yaml>=0.18.0
-# HA itself stopped pulling this in with 2026.9 (issue #84); manifest.json
-# requires it, so the test env has to install it explicitly too.
-voluptuous-serialize>=2.6.0
 
 # Transitive deps of homeassistant.components.mcp_server (its own
-# manifest.json requirements - identical at 2026.8.2 and 2026.9.4,
+# manifest.json requirements - identical at 2026.10.0 and 2026.10.4,
 # confirmed by reading both) - not installed automatically by
 # pytest-homeassistant-custom-component. Needed because test_mcp_repair.py
 # adds a real (Mock)ConfigEntry for the mcp_server domain, which HA's own
 # hass fixture then imports and unloads at test teardown like any other
 # loaded component. Move to the per-version files if they ever diverge.
-mcp==1.26.0
+mcp==1.28.1
 aiohttp_sse==2.2.0
-anyio==4.13.0
+anyio==4.14.2
 
 # Transitive dep of homeassistant.components.mqtt (its own manifest.json
-# requirement - identical at 2026.8.2 and 2026.9.4) - not installed
+# requirement - identical at 2026.10.0 and 2026.10.4) - not installed
 # automatically by pytest-homeassistant-custom-component, same situation
 # as mcp_server's deps above. Needed because mqtt_manager.py imports
 # `homeassistant.components.mqtt` (`__init__.py` re-exports

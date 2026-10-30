@@ -97,9 +97,13 @@ async def test_an_inactive_user_isnt_resolved(hass: HomeAssistant):
 
 
 async def _call(hass, tool, user, **args):
-    return await tool.async_call(
-        hass, llm.ToolInput(tool_name=tool.name, tool_args=args), _llm_context(user.id)
-    )
+    return (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name=tool.name, tool_args=args),
+            _llm_context(user.id),
+        )
+    ).data
 
 
 @pytest.mark.asyncio

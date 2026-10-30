@@ -172,8 +172,9 @@ HA Dev Tools → Configure), not YAML.
 
 ## Scoped service-call tools
 
-`trigger_automation`, `set_number_value`, `set_boolean_value` and
-`control_entities` (`service_call_manager.py`) call Home Assistant services - a different
+`trigger_automation`, `set_automation_enabled`, `set_number_value`,
+`set_boolean_value` and `control_entities` (`service_call_manager.py`)
+call Home Assistant services - a different
 surface than the path allowlist above, which only governs file-touching
 tools. A generic `call_service` tool (domain + service + arbitrary data) was
 considered and rejected: it would be able to reach *any* registered
@@ -217,7 +218,22 @@ light. No other service or service data can be reached through it.
 - The preview names each entity, its area, its current state and the
   exact service call, so the user confirms what will actually move.
 
-All four still go through the same two `GatedTool` checks (arm file +
+`set_automation_enabled` (issue #184) calls only `automation.turn_on` /
+`turn_off`, for automations addressed by config id that already resolve to
+a live entity - the same boundary as `trigger_automation`. It changes a
+runtime state HA restores across restarts, never the YAML; the preview
+lists each automation's triggers, so turning one on shows what will start
+firing. (`write_automation`'s `enabled` does the same after a write.)
+
+`write_customize` (issue #183) is a config write, not a service call: it
+edits `homeassistant: customize:` in a package, for a fixed set of
+attributes (`state_class`, `device_class`, `unit_of_measurement`,
+`friendly_name`, `icon`, `assumed_state`), each value checked. It then
+calls `homeassistant.reload_core_config` and `homeassistant.update_entity`
+for the entities it changed - nothing else - and rolls the file back if
+HA's config check reports a new error.
+
+All of these still go through the same two `GatedTool` checks (arm file +
 admin) as every other tool, plus the same `WriteGatedTool` propose/confirm
 gate as `write_automation` - this scoping is in addition to those, not a
 replacement for them.

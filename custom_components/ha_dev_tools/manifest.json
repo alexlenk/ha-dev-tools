@@ -11,9 +11,8 @@
   "issue_tracker": "https://github.com/alexlenk/ha-dev-tools/issues",
   "requirements": [
     "aiofiles>=23.0.0",
-    "ruamel.yaml>=0.18.0",
-    "voluptuous-serialize>=2.6.0"
+    "ruamel.yaml>=0.18.0"
   ],
   "single_config_entry": true,
-  "version": "2.31.0"
+  "version": "2.32.0"
 }
