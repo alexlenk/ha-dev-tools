@@ -334,6 +334,7 @@ async def test_dev_tools_real_tools_registered(
         "list_traces",
         "get_trace",
         "trigger_automation",
+        "delete_package",
         "set_automation_enabled",
         "write_customize",
         "set_number_value",

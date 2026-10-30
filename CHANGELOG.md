@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.34.0] - 2026-10-30
+
+### Added
+- **The package write tools create a missing package file** (issue #189). Until now, a new topic meant creating `packages/<name>.yaml` by hand on the host.
+  - This covers `write_automation`, `write_script`, `create_template_entity`, `write_package_platform_entity`, `write_rest_command` and `write_customize`.
+  - The new entry still goes through each tool's own checks, so no empty package files are created.
+  - The name must be lowercase letters, digits and underscores (subfolders allowed). It must not repeat a package name that already exists in any subfolder, because `!include_dir_named` names packages after their file.
+  - `configuration.yaml` must load `packages/` with `!include_dir_named`. Otherwise Home Assistant wouldn't pick the file up, and the write is refused with the reason (including for `!include_dir_merge_named`, whose file layout these tools don't write).
+- **`delete_package`** deletes a package file that holds no configuration any more (only comments, blank lines or `{}`). A file that still holds anything is refused, naming its top-level keys.
+
+### Changed
+- **Renamed to "Dev Tools MCP"** (was "HA Dev Tools MCP"). The name is shown in HACS, the integration list, the setup and options dialogs, the MCP Server's API list, and the notifications.
+  - It's a display name only. The domain `ha_dev_tools` and the API id `dev_tools` are unchanged, so existing installs and MCP Server setups keep working without changes.
+  - An existing config entry keeps its old title until you rename it in the UI.
+
 ## [2.33.2] - 2026-10-30
 
 ### Fixed

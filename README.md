@@ -1,6 +1,6 @@
-<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="HA Dev Tools MCP logo">
+<img src="https://raw.githubusercontent.com/alexlenk/ha-dev-tools/main/custom_components/ha_dev_tools/brand/icon.png" width="72" align="left" alt="Dev Tools MCP logo">
 
-# HA Dev Tools MCP
+# Dev Tools MCP
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
@@ -48,11 +48,11 @@ Needs Home Assistant **2026.10.0+** (see [Requirements](#requirements) below
 for the full list, including client-specific versions).
 
 1. Install via HACS or manually - see [Installation](#installation) below.
-2. **Settings → Devices & Services → Add Integration → HA Dev Tools.**
+2. **Settings → Devices & Services → Add Integration → Dev Tools MCP.**
 3. **Settings → Devices & Services → Add Integration → Model Context
    Protocol Server** (Home Assistant's own built-in integration) - in its
    setup, add `dev_tools` to the exposed APIs. This step is easy to miss and
-   is the single most common way to end up stuck: skip it and HA Dev Tools'
+   is the single most common way to end up stuck: skip it and Dev Tools MCP's
    card still shows healthy, but an MCP client just gets a bare 404 (a
    **Settings → System → Repairs** issue will flag it if you do).
 4. **Arm it.** Every tool except a diagnostic ping refuses to run until you
@@ -139,8 +139,9 @@ account, full stop).
 
 ### HACS (recommended)
 
-1. Open HACS and search for **HA Dev Tools MCP** (it's in the default HACS
-   list, so no custom repository is needed).
+1. Open HACS and search for **Dev Tools MCP** (called HA Dev Tools MCP
+   before 2.34.0; it's in the default HACS list, so no custom repository
+   is needed).
 2. Download it.
 3. Restart Home Assistant.
 
@@ -219,11 +220,12 @@ matters for setup, covered below.
 | `delete_entities` | Same as `delete_entity`, for a list of entity_ids in one propose/confirm pair - for bulk cleanup, avoids one round trip (and one mirror commit pair) per entity |
 | `update_entities` | What the entity and device settings dialogs do, for several at once: rename an entity_id, set name, room, `device_class`, icon, disabled or hidden, and "Show as" a switch as a light/fan/cover/lock/siren/valve, labels (`labels` sets the whole set, `add_labels`/`remove_labels` change it) and `categories` (`{scope: category}`); for devices, name, room, disabled and labels. Rooms, labels and categories are matched by exact name or id. Every item is checked first - an unknown room or a taken entity_id refuses the whole batch. A rename onto an id that already has statistics is flagged in the preview, since HA won't move the entity's history onto it. A rename lists every place the old id is used (YAML, dashboards, persons' trackers, helpers); `update_references: true` rewrites the ones it can |
 | `list_derived_sensors` / `get_derived_sensor` / `create_derived_sensor` / `update_derived_sensor` / `delete_derived_sensor` / `reload_derived_sensor` | CRUD for UI-created helpers that are config entries: the **Template helper** (any entity domain - sensor, binary_sensor, switch, light, ...) and the calculated/derived sensor helpers (Min/Max, Utility Meter, Integration [Riemann sum], Statistics, Threshold, Derivative, Filter) - a second helper family implemented as config entries rather than storage items; create/update discover each step's fields interactively since some of these flows are multi-step or menu-driven (Template's first step picks which entity domain to create); `update_derived_sensor` also takes a flat `options` patch of just the fields to change, and leaves every other field as it was |
-| `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into an existing package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. `update_template_entity` can also change a trigger-based block's `triggers` / `conditions` / `variables` / `actions` in place - the preview lists every entity in the block, and a reload keeps their state (unlike delete + create). For the config-entry Template *helper* instead, see the row above |
+| `list_template_entities` / `get_template_entity` / `create_template_entity` / `update_template_entity` / `delete_template_entity` | Layout-aware, package-safe CRUD for YAML `template:` entities (sensor, binary_sensor, number, switch, ...) - resolves whether an entity lives in `configuration.yaml` or a `packages/*.yaml` file, same pattern as `get_automation`/`write_automation`. New entities always go into a package (`configuration.yaml` itself is read-only here); every write requires the entity to have its own `unique_id`. `update_template_entity` can also change a trigger-based block's `triggers` / `conditions` / `variables` / `actions` in place - the preview lists every entity in the block, and a reload keeps their state (unlike delete + create). For the config-entry Template *helper* instead, see the row above |
 | `list_dashboards` | List every configured Lovelace dashboard (title, url_path, icon, mode, require_admin, show_in_sidebar) - storage- and YAML-mode alike. Use before `get_dashboard` when checking every dashboard for something, since a non-default dashboard's url_path otherwise has to already be known |
 | `get_dashboard` / `write_dashboard` | Read/write a Lovelace dashboard (storage mode; YAML-mode dashboards are read-only here, matching HA's own restriction). `get_dashboard` also returns the config's `config_hash` |
 | `patch_dashboard` | Changes part of a dashboard without re-sending the whole config: add/replace/remove a view, section or card, or `set` a value at a JSON pointer. Everything else is saved exactly as read. Ops are planned against `get_dashboard`'s `config_hash` (required), and a dashboard changed since is refused. Ambiguous selectors (e.g. two sections with the same heading) are refused. The preview lists each touched node before/after; the result has the new hash for the next patch |
 | `write_customize` | Set or remove `homeassistant: customize:` attributes in a package for one or more entities - the only way to give an integration's sensor a `state_class` (needed for long-term statistics) or a missing `device_class`. Only `state_class`, `device_class`, `unit_of_measurement`, `friendly_name`, `icon` and `assumed_state`, each value checked; combinations HA won't compile statistics for are warned about in the preview. Creates the package file if needed; an entity customized in another file (or `configuration.yaml`) is refused. Applied without a restart (config check - a new error rolls it back -, `reload_core_config`, each entity's state rewritten) and reported per entity |
+| `delete_package` | Delete a `packages/*.yaml` file that holds no configuration any more (only comments, blank lines or `{}`); one that still holds anything is refused, naming its top-level keys. There's no `create_package`: every package write tool (`write_automation`, `write_script`, `create_template_entity`, `write_package_platform_entity`, `write_rest_command`, `write_customize`) creates the package file its new content goes into when it doesn't exist yet - a lowercase name (`house_state.yaml`, `heating/rooms.yaml`) no other package already has, and only when `configuration.yaml` loads `packages/` with `!include_dir_named` |
 | `get_energy_config` / `write_energy_config` | Read/write the Energy dashboard's own source config (grid/solar/battery/gas/water entities, cost settings) - a separate HA subsystem from Lovelace dashboards, not reachable through `get_dashboard`. Each field in a write wholesale-replaces that section; omitting a field leaves it untouched |
 
 **Act**

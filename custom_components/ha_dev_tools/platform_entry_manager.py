@@ -32,6 +32,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from . import config_tools
 from .file_manager import FileManager, package_file
+from .packages import new_package_problem
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
@@ -307,11 +308,11 @@ class PlatformEntryManager:
         *,
         package: str | None = None,
         file: str | None = None,
-    ) -> tuple[EntryLocation | None, str, str, str]:
+    ) -> tuple[EntryLocation | None, str, str | None, str]:
         """(the entry replaced, or None for a new one; its file; content
-        before; content after). An entry with this domain, platform and
-        unique_id (or name, without one) is replaced; otherwise the config
-        is a new entry in `package`."""
+        before - None for a file this creates; content after). An entry
+        with this domain, platform and unique_id (or name, without one) is
+        replaced; otherwise the config is a new entry in `package`."""
         platform = str(config.get("platform", ""))
         unique_id, name = _identity(config)
         if unique_id is None and name is None:
@@ -336,14 +337,19 @@ class PlatformEntryManager:
                 "no such entry yet - pass package (a packages/ file) to create it"
             )
         try:
-            content = await self.file_manager.read_file(file_path)
+            content: str | None = await self.file_manager.read_file(file_path)
         except FileNotFoundError:
-            raise PlatformEntryError(
-                f"package file '{file_path}' doesn't exist - create it first"
-            ) from None
+            # A new package file, created with the entry (issue #189).
+            if problem := await new_package_problem(
+                self.hass, self.file_manager, file_path
+            ):
+                raise PlatformEntryError(
+                    f"can't create '{file_path}': {problem}"
+                ) from None
+            content = None
         prepared = quote_ambiguous_scalars(dict(config))
         after = await self.hass.async_add_executor_job(
-            self._build, content, domain, location, prepared
+            self._build, content or "", domain, location, prepared
         )
         return location, file_path, content, after
 

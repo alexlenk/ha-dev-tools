@@ -1,6 +1,6 @@
 {
   "domain": "ha_dev_tools",
-  "name": "HA Dev Tools MCP",
+  "name": "Dev Tools MCP",
   "after_dependencies": ["energy", "hassio", "http", "logbook", "mqtt", "recorder"],
   "codeowners": ["@alexlenk"],
   "config_flow": true,
@@ -14,5 +14,5 @@
     "ruamel.yaml>=0.18.0"
   ],
   "single_config_entry": true,
-  "version": "2.33.2"
+  "version": "2.34.0"
 }

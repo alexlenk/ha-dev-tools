@@ -34,6 +34,7 @@ from ruamel.yaml.comments import CommentedMap
 
 from . import mirror_secrets
 from .file_manager import package_file
+from .packages import new_package_problem
 from .rest_command_manager import (
     DEFAULT_CONFIG_FILE,
     REST_COMMAND_KEY,
@@ -62,7 +63,7 @@ class RestCommandWriteError(ValueError):
 class RestCommandPlan:
     rest_command_id: str
     file_path: str
-    content_before: str
+    content_before: str | None  # None: a package file this creates
     content_after: str
     report: dict[str, Any]
 
@@ -193,14 +194,19 @@ class RestCommandWriter:
             raise RestCommandWriteError("; ".join(problems))
 
         try:
-            content = await self.manager.file_manager.read_file(file_path)
+            content: str | None = await self.manager.file_manager.read_file(file_path)
         except FileNotFoundError:
-            raise RestCommandWriteError(
-                f"package file '{file_path}' doesn't exist - create it first"
-            ) from None
+            # A new package file, created with the entry (issue #189).
+            if problem := await new_package_problem(
+                self.hass, self.manager.file_manager, file_path
+            ):
+                raise RestCommandWriteError(
+                    f"can't create '{file_path}': {problem}"
+                ) from None
+            content = None
         prepared = quote_ambiguous_scalars(dict(config))
         after = await self.hass.async_add_executor_job(
-            _build, content, rest_command_id, prepared
+            _build, content or "", rest_command_id, prepared
         )
         report = {
             "rest_command_id": rest_command_id,

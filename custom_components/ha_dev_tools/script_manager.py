@@ -34,6 +34,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from .file_manager import FileManager, package_file
+from .packages import new_package_problem
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
@@ -278,13 +279,15 @@ class ScriptManager:
             location = locations[0]
         elif package:
             file_path = package_file(package)
+            # A new package file is created with it (issue #189).
             if not await self.hass.async_add_executor_job(
                 (self._config_dir / file_path).is_file
-            ):
-                raise ScriptNotFoundError(
-                    f"Package file '{file_path}' does not exist - create it "
-                    "first, this tool won't invent a new package file"
+            ) and (
+                problem := await new_package_problem(
+                    self.hass, self.file_manager, file_path
                 )
+            ):
+                raise ScriptNotFoundError(f"can't create '{file_path}': {problem}")
             location = ScriptLocation(file_path=file_path, is_package=True)
         else:
             location = ScriptLocation(file_path=DEFAULT_SCRIPTS_FILE, is_package=False)

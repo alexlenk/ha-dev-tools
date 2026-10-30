@@ -51,6 +51,7 @@ from . import (
     mirror,
     mirror_secrets,
     mqtt_manager,
+    packages,
     platform_entry_manager,
     references,
     registry_manager,
@@ -82,7 +83,7 @@ from .derived_sensor_manager import (
     FlowStepRequiredError,
     InvalidDerivedSensorDomainError,
 )
-from .file_manager import FileManager
+from .file_manager import FileManager, package_file
 from .helper_manager import (
     HELPER_DOMAINS,
     InvalidHelperDomainError,
@@ -117,7 +118,7 @@ from .yaml_style import find_misread_scalars, to_json_safe
 _LOGGER = logging.getLogger(__name__)
 
 API_ID = "dev_tools"
-API_NAME = "HA Dev Tools"
+API_NAME = "Dev Tools MCP"
 API_PROMPT = (
     "Tools for developing and maintaining this Home Assistant instance: "
     "authoring and validating automations, reading logs, and looking up "
@@ -1698,7 +1699,7 @@ def _notify_statistics_result(
     persistent_notification.async_create(
         hass,
         f"`{operation}` {outcome}",
-        title=f"HA Dev Tools: {operation}",
+        title=f"Dev Tools MCP: {operation}",
         notification_id=f"{DOMAIN}_{operation}",
     )
 
@@ -2817,7 +2818,8 @@ class WriteAutomationTool(WriteGatedTool):
             "file or a package) - never blindly appended to automations.yaml, "
             "which would create a silent duplicate for package-defined "
             "automations. For a brand new automation, pass 'package' to target "
-            "an existing packages/*.yaml file, or omit it for the default "
+            "a packages/*.yaml file (created if missing), "
+            "or omit it for the default "
             "automations.yaml. Always reloads automations afterward - never "
             "requires a restart. Pass expected_hash (from get_file_metadata or "
             "a prior read) to detect concurrent edits. The config is checked with HA's own "
@@ -3834,8 +3836,9 @@ class CreateTemplateEntityTool(WriteGatedTool):
         "block instead). 'config' must include a 'unique_id' - required "
         "for every write this tool family does, since a template entity "
         "otherwise has no way to be addressed again by update/"
-        "delete_template_entity. 'package' must name an existing "
-        "packages/*.yaml file (relative to packages/) - required, no "
+        "delete_template_entity. 'package' names a packages/*.yaml file "
+        "(relative to packages/; created if missing) - "
+        "required, no "
         "default-file fallback: configuration.yaml itself is read-only "
         "under this integration's default security policy, so new "
         "entities can only be created in a package. 'triggers' is "
@@ -5148,8 +5151,9 @@ class WriteScriptTool(WriteGatedTool):
             "updated in place in whichever file actually defines it (default "
             "file or a package) - never blindly appended to scripts.yaml, "
             "which would create a silent duplicate for package-defined "
-            "scripts. For a brand new script, pass 'package' to target an "
-            "existing packages/*.yaml file, or omit it for the default "
+            "scripts. For a brand new script, pass 'package' to target a "
+            "packages/*.yaml file (created if missing), "
+            "or omit it for the default "
             "scripts.yaml. Always reloads scripts afterward - never requires "
             "a restart. Pass expected_hash (from get_file_metadata or a prior "
             "read) to detect concurrent edits. The config is checked with HA's own "
@@ -5483,8 +5487,9 @@ class WritePackagePlatformEntityTool(WriteGatedTool):
             "the entry (with platform, and a unique_id or else a name to find it "
             "by). An entry of this domain + platform with the same unique_id - or "
             "the same name, for one without - is replaced in its own file; "
-            "otherwise the config is a new entry in package (an existing "
-            "packages/ file). More than one match is refused; file narrows it. "
+            "otherwise the config is a new entry in package (a packages/ "
+            "file, created if missing). More than one "
+            "match is refused; file narrows it. "
             "The config is checked against the platform's own PLATFORM_SCHEMA "
             "first. Refused: literal credentials (use !secret), command_line / "
             "shell_command platforms (shell execution, read-only by design), "
@@ -5546,7 +5551,7 @@ class WritePackagePlatformEntityTool(WriteGatedTool):
 
     async def _plan(
         self, hass: HomeAssistant, args: dict[str, Any]
-    ) -> tuple[dict[str, Any], Any, str, str, str]:
+    ) -> tuple[dict[str, Any], Any, str, str | None, str]:
         domain, config = args["domain"], dict(args["config"])
         platform = str(config.get("platform", ""))
         problems: list[str] = []
@@ -5772,7 +5777,8 @@ class WriteRestCommandTool(WriteGatedTool):
     description = (
         "Create or replace one rest_command entry (url, method, headers, "
         "payload, ...) by id in a packages/*.yaml file - an existing id is "
-        "replaced where it's defined, a new one goes into package. Writes "
+        "replaced where it's defined, a new one goes into package (created "
+        "if missing). Writes "
         "config only; running it still takes an automation or script. "
         "Refused: a templated scheme or host in url (templates only in the "
         "path, query, payload, headers), a host no rest_command uses yet "
@@ -5926,7 +5932,8 @@ class WriteCustomizeTool(WriteGatedTool):
         "device_class (one of the domain's own), unit_of_measurement, "
         "friendly_name, icon and assumed_state. An entity already "
         "customized is changed where it is; otherwise pass package (a "
-        "packages/ file - created if missing). One customized in another "
+        "packages/ file - created if missing). One "
+        "customized in another "
         "file, or in configuration.yaml (read-only), is refused. The "
         "preview shows each entity's state and attributes now, its entry "
         "before/after, and warnings (a combination HA won't compile "
@@ -5999,6 +6006,81 @@ class WriteCustomizeTool(WriteGatedTool):
         )
 
 
+class DeletePackageTool(WriteGatedTool):
+    """Delete an empty package file - see packages.py (issue #189)."""
+
+    name = "delete_package"
+    description = (
+        "Delete a packages/*.yaml file that holds no configuration any more "
+        "(only comments, blank lines or {}) - e.g. after its last entry was "
+        "deleted. A file that still holds anything is refused, naming its "
+        "top-level keys; delete those with their own tools first. The "
+        "write tools create a missing package file themselves, so there is "
+        "no create_package."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema({vol.Required("package"): str})
+
+    def __init__(self, file_manager: FileManager) -> None:
+        """Init with the FileManager the package is deleted through."""
+        self._files = file_manager
+
+    async def _content(self, args: dict[str, Any]) -> tuple[str, str]:
+        file_path = package_file(args["package"])
+        try:
+            return file_path, await self._files.read_file(file_path)
+        except FileNotFoundError:
+            raise ValueError(f"there is no '{file_path}'") from None
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """A missing file, or one that still holds configuration."""
+        try:
+            file_path, content = await self._content(tool_input.tool_args)
+        except ValueError as exc:
+            return str(exc)
+        if await hass.async_add_executor_job(packages.is_empty, content):
+            return None
+        keys = await hass.async_add_executor_job(packages.top_level_keys, content)
+        return (
+            f"'{file_path}' still holds configuration ({', '.join(keys)}) - "
+            "delete its entries with their own tools first"
+        )
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The file and what's left in it (comments)."""
+        file_path, content = await self._content(tool_input.tool_args)
+        return {"would_delete": file_path, "content": content}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Delete the file; mirror it as emptied."""
+        file_path, content = await self._content(tool_input.tool_args)
+        await self._files.delete_file(file_path)
+        return await _mirror_file_write(
+            hass,
+            {"deleted": file_path},
+            file_path=file_path,
+            content_before=content,
+            content_after="",
+        )
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
@@ -6067,6 +6149,7 @@ class DevToolsAPI(llm.API):
                 ListTracesTool(),
                 GetTraceTool(),
                 TriggerAutomationTool(),
+                DeletePackageTool(self.rest_command_manager.file_manager),
                 WriteCustomizeTool(
                     customize_write.CustomizeWriter(
                         self.hass, self.rest_command_manager.file_manager

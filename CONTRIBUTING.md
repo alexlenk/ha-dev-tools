@@ -1,4 +1,4 @@
-# Contributing to HA Dev Tools
+# Contributing to Dev Tools MCP
 
 Thanks for your interest in contributing. This document covers how the
 project is actually built and tested today - see

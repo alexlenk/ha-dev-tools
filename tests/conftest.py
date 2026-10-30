@@ -54,7 +54,7 @@ def mock_config_entry():
     """Create a mock config entry for the integration."""
     return MockConfigEntry(
         domain=DOMAIN,
-        title="HA Dev Tools",
+        title="Dev Tools MCP",
         data={},
         options={},
         entry_id="test_entry_id",
