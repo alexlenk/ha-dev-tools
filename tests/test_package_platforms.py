@@ -560,7 +560,7 @@ async def test_entry_manager_edges(hass: HomeAssistant, platforms, tmp_path):
     )
     with pytest.raises(PlatformEntryError, match="2 matching entries"):
         await platforms.plan_write("sensor", {**STATS, "unique_id": "one"})
-    with pytest.raises(PlatformEntryError, match="doesn't exist - create it"):
+    with pytest.raises(PlatformEntryError, match="doesn't load packages/"):
         await platforms.plan_write(
             "sensor", {**STATS, "unique_id": "x"}, package="missing.yaml"
         )
@@ -599,7 +599,7 @@ async def test_rest_command_edges(hass: HomeAssistant, writer, tmp_path):
     )
     plan = await writer.plan_write("dynamic", {"url": "http://doorbird.local/y"})
     assert plan.report["new_host"] is False  # doorbird.local is known
-    with pytest.raises(RestCommandWriteError, match="doesn't exist - create it"):
+    with pytest.raises(RestCommandWriteError, match="doesn't load packages/"):
         await writer.plan_write(
             "fresh", {"url": "http://doorbird.local/z"}, package="missing.yaml"
         )

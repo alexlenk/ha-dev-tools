@@ -61,6 +61,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from .file_manager import FileManager, package_file
+from .packages import new_package_problem
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
@@ -253,14 +254,14 @@ class TemplateBatchError(Exception):
 class TemplateWriteResult:
     """What a template entity write actually did - location, reload status,
     and before/after file content, for mirror.py (docs/AUTOMATION_TESTING_DESIGN.md's
-    "Mirroring" section) to push. Unlike write_automation, content_before is
-    never None here: create_entity already requires its target package file
-    to exist, and update_entity/delete_entity only reach this point via
-    find_entity, which already found the entity in an existing file."""
+    "Mirroring" section) to push. content_before is None only for a package
+    file create_entity created (issue #189); update_entity/delete_entity
+    only reach this point via find_entity, which found the entity in an
+    existing file."""
 
     location: TemplateEntityLocation
     reloaded: bool
-    content_before: str
+    content_before: str | None
     content_after: str
     # For a block-level edit (issue #140): every entity the block defines,
     # and its changed keys before and after.
@@ -543,16 +544,21 @@ class TemplateYamlManager:
         triggers = quote_ambiguous_scalars(triggers) if triggers else triggers
 
         file_path = package_file(package)
-        if not await self.hass.async_add_executor_job(
+        # A new package file is created with it (issue #189).
+        content_before: str | None = None
+        if await self.hass.async_add_executor_job(
             (self._config_dir / file_path).is_file
         ):
-            raise TemplateEntityNotFoundError(
-                f"Package file '{file_path}' does not exist - create it "
-                "first, this tool won't invent a new package file"
-            )
-
-        content_before = await self.file_manager.read_file(file_path)
-        document = await self.hass.async_add_executor_job(_load_yaml, content_before)
+            content_before = await self.file_manager.read_file(file_path)
+        elif problem := await new_package_problem(
+            self.hass, self.file_manager, file_path
+        ):
+            raise TemplateEntityNotFoundError(f"can't create '{file_path}': {problem}")
+        document = (
+            await self.hass.async_add_executor_job(_load_yaml, content_before)
+            if content_before is not None
+            else None
+        )
         content_after, block_index = await self.hass.async_add_executor_job(
             self._build_create_content,
             document,

@@ -54,6 +54,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from .file_manager import FileManager, package_file
+from .packages import new_package_problem
 from .yaml_style import (
     merge_preserving_style,
     quote_ambiguous_scalars,
@@ -277,6 +278,11 @@ class CustomizeWriter:
         try:
             before: str | None = await self.file_manager.read_file(file_path)
         except FileNotFoundError:
+            # A new package file (issue #189) - checked like every writer's.
+            if problem := await new_package_problem(
+                self.hass, self.file_manager, file_path
+            ):
+                raise CustomizeError(f"can't create '{file_path}': {problem}") from None
             before = None
         current = {
             entity_id: dict(entries[0][1])

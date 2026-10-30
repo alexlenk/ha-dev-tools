@@ -231,8 +231,9 @@ candidate, not just `packages/*.yaml`.
 Reads and writes are scoped differently on purpose. `configuration.yaml`
 is in `DEFAULT_READ_ONLY_PATHS`, not `DEFAULT_WRITE_PATHS` - so an entity
 defined directly in `configuration.yaml` can be listed/read same as any
-other, but `create_entity` always targets an existing `packages/*.yaml`
-file (`package` is a required argument, no default-file fallback the way
+other, but `create_entity` always targets a `packages/*.yaml` file,
+created if it doesn't exist yet (issue #189, see `packages.py`; `package`
+is a required argument, no default-file fallback the way
 `write_automation` has one), and `update_entity`/`delete_entity` on an
 entity that resolves to `configuration.yaml` fails with `FileManager`'s
 own `PermissionError` - the correct, intended outcome. This split only
