@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.32.0] - 2026-10-30
+
+### Added
+- **`describe_entity`: where an entity is defined, and which tools read and change it** (issue #185).
+  - It tells apart: a UI helper config entry (the Template helper of any domain, Min/Max, Utility Meter, ...), an integration's entity, an automation or script (with its file), a storage or YAML helper, a YAML `template:` entity (file and block), a package platform entry, one outside packages, and YAML without a `unique_id` (with candidates matched by name).
+  - It lists each owning tool together with the arguments to call it with.
+- **`set_automation_enabled`: turn automations on or off** (issue #184).
+  - Automations are addressed by config id, one or several.
+  - The preview shows each one's alias, state, last triggered and triggers.
+  - The result shows each one's state before and after.
+- **`write_automation` takes `enabled`** to turn the automation on or off after the write. An automation restored under its old id otherwise comes back off (issue #184).
+- **`write_customize`: `homeassistant: customize:` in packages** (issue #183). It is the way to give an integration's sensor a `state_class` for long-term statistics, or a missing `device_class`.
+  - Only `state_class`, `device_class`, `unit_of_measurement`, `friendly_name`, `icon` and `assumed_state` can be set. Each value is checked.
+  - The preview warns about combinations HA won't compile statistics for, non-numeric states and missing entities.
+  - It creates the package file if needed. An entity customized in another file, or in `configuration.yaml`, is refused.
+  - It applies without a restart: HA's config check runs, and a new error rolls the write back. Then `reload_core_config` runs and each entity's state is rewritten. The result reports per entity whether the attributes are now there.
+- **`reload_domain` with `homeassistant` reloads the core config** (`homeassistant.reload_core_config`) instead of reporting that there is no reload service (issue #183).
+
+### Changed
+- **Every tool returns HA's `ToolResult` and declares tool annotations** (issue #152).
+  - HA 2026.10 deprecates tools that return plain JSON, and it stops working in 2027.11.
+  - A failed call is now flagged, so MCP clients see `isError`.
+  - Read tools are marked read-only. Writes are marked destructive unless they only add something or set a state. No tool is open-world.
+- **Requires Home Assistant 2026.10.0 or newer** (was 2026.8.2). That is the first release with `ToolResult` and tool annotations. HACS keeps older installs on 2.31.0.
+
+### Fixed
+- **`list_template_entities` no longer says UI Template helpers aren't supported by any tool** (issue #185). It points to the derived-sensor tools, which do support them. Those tools' descriptions now lead with the Template helper, so a search for "template helper" finds them.
+
 ## [2.31.0] - 2026-10-22
 
 ### Added

@@ -21,14 +21,10 @@ from typing import Any, cast, override
 
 import aiohttp
 
-try:
-    # HA 2026.9+ validates with probatio and types its schemas (llm.Tool's
-    # parameters, a flow's data_schema) as probatio's - the voluptuous it
-    # installs is a shim handing out the same objects (issue #138).
-    import probatio as vol
-except ImportError:  # pragma: no cover - HA before 2026.9
-    import voluptuous as vol  # type: ignore[no-redef]
-
+# HA validates with probatio and types its schemas (llm.Tool's parameters,
+# a flow's data_schema) as probatio's - the voluptuous it installs is a
+# shim handing out the same objects (issue #138).
+import probatio as vol
 from homeassistant.auth.models import User
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
@@ -43,11 +39,13 @@ from . import (
     audit_manager,
     config_snapshot,
     config_tools,
+    customize_write,
     dashboard_manager,
     dashboard_patch,
     derived_sensor_manager,
     energy_manager,
     entity_manager,
+    entity_source,
     helper_manager,
     history_manager,
     mirror,
@@ -363,6 +361,38 @@ _CONFIRM_TOKEN_NOTE = (
 )
 
 
+# MCP tool annotations (issue #152) - hints for the client, not a gate:
+# every write is still arm + admin + confirm-gated. Nothing here reaches
+# outside Home Assistant (the mirror push is an audit side effect).
+READ_ONLY = llm.ToolAnnotations(
+    read_only=True, destructive=False, idempotent=True, open_world=False
+)
+# Replaces or removes what's there - the default for a write.
+OVERWRITE = llm.ToolAnnotations(
+    read_only=False, destructive=True, idempotent=False, open_world=False
+)
+# Adds something new; nothing existing is changed.
+ADDITIVE = llm.ToolAnnotations(
+    read_only=False, destructive=False, idempotent=False, open_world=False
+)
+# Sets a state to a given value - the same call twice changes nothing more.
+SET_STATE = llm.ToolAnnotations(
+    read_only=False, destructive=False, idempotent=True, open_world=False
+)
+# Runs something (an automation, a toggle) - each call acts again.
+ACTION = llm.ToolAnnotations(
+    read_only=False, destructive=False, idempotent=False, open_world=False
+)
+
+
+def _tool_result(data: JsonObjectType, *, failed: bool | None = None) -> llm.ToolResult:
+    """A tool's response as HA's ToolResult (issue #152): a top-level
+    "error" is a failed call, so MCP clients see isError."""
+    return llm.ToolResult(
+        data=data, error="error" in data if failed is None else failed
+    )
+
+
 class GatedTool(llm.Tool):
     """Base for every dev_tools tool except the diagnostic ping.
 
@@ -378,12 +408,28 @@ class GatedTool(llm.Tool):
     A successful call extends the idle arm window via touch_armed().
     """
 
-    # HA 2026.10+ records which integration provides a tool (and logs one
-    # that doesn't say); a plain class attribute before that.
+    # HA records which integration provides a tool (and logs one that
+    # doesn't say).
     integration = DOMAIN
+    annotations = READ_ONLY
 
     @override
     async def async_call(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> llm.ToolResult:
+        """The gated call's response as a ToolResult."""
+        data = await self._call(hass, tool_input, llm_context)
+        return _tool_result(data, failed=self._failed(data))
+
+    def _failed(self, data: JsonObjectType) -> bool | None:
+        """Override when a top-level "error" isn't the call failing; None
+        keeps the default."""
+        return None
+
+    async def _call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
@@ -438,15 +484,17 @@ class WriteGatedTool(GatedTool):
     of writes sees expiry coming instead of failing partway through.
     """
 
+    annotations = OVERWRITE
+
     @override
-    async def async_call(
+    async def _call(
         self,
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
     ) -> JsonObjectType:
         """Run the gated call, then report the arm window it just extended."""
-        result = await super().async_call(hass, tool_input, llm_context)
+        result = await super()._call(hass, tool_input, llm_context)
         return {
             **result,
             "arm": cast(JsonValueType, await access_control.arm_status(hass)),
@@ -588,6 +636,7 @@ class DevToolsPingTool(llm.Tool):
 
     integration = DOMAIN
     name = "dev_tools_ping"
+    annotations = READ_ONLY
     description = (
         "Check that the ha_dev_tools API is registered and reachable, and "
         "whether dev_tools is currently armed ('arm': armed, expires_at, "
@@ -604,13 +653,59 @@ class DevToolsPingTool(llm.Tool):
         hass: HomeAssistant,
         tool_input: llm.ToolInput,
         llm_context: llm.LLMContext,
-    ) -> JsonObjectType:
+    ) -> llm.ToolResult:
         """Return a status payload, including the arm window (issue #63)."""
-        return {
-            "status": "ok",
-            "domain": DOMAIN,
-            "arm": cast(JsonValueType, await access_control.arm_status(hass)),
-        }
+        return _tool_result(
+            {
+                "status": "ok",
+                "domain": DOMAIN,
+                "arm": cast(JsonValueType, await access_control.arm_status(hass)),
+            }
+        )
+
+
+class DescribeEntityTool(GatedTool):
+    """Where an entity is defined and which tools own it - see
+    entity_source.py (issue #185)."""
+
+    name = "describe_entity"
+    description = (
+        "Where is this entity defined, and which tools read and change it? "
+        "Start here when diagnosing an entity: returns its state, registry "
+        "entry (platform, config entry, device, area) and defined_in - one "
+        "of ui_helper (a UI-created helper config entry: Template helper of "
+        "any domain, Min/Max, Utility Meter, ... - get/update_derived_sensor), "
+        "integration (an integration's config entry), automation, script, "
+        "storage_helper (input_*, counter, timer, ... made in the UI), "
+        "yaml_helper, yaml_template (a template: block in "
+        "configuration.yaml or a package, with file and block), "
+        "package_platform_entry (a `<domain>: - platform: ...` entry in a "
+        "package), yaml_platform (one outside packages) or no_unique_id "
+        "(YAML without a unique_id - with candidates by name) - plus the "
+        "tools, with their arguments, that read and change it. Read-only."
+    )
+    parameters = vol.Schema({vol.Required("entity_id"): str})
+
+    def __init__(self, resolver: entity_source.EntitySourceResolver) -> None:
+        """Init with the resolver backing this tool."""
+        self._resolver = resolver
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Resolve the entity's definition."""
+        try:
+            user = await helper_manager.resolve_user(hass, llm_context)
+            return cast(
+                JsonObjectType,
+                await self._resolver.describe(tool_input.tool_args["entity_id"], user),
+            )
+        except (UnresolvedUserError, LookupError) as exc:
+            return _tool_error(exc)
 
 
 class FindEntitiesTool(GatedTool):
@@ -2541,6 +2636,7 @@ class ReloadDomainTool(GatedTool):
     """Reload a domain's config (automation/script/scene/...) - never a full restart."""
 
     name = "reload_domain"
+    annotations = SET_STATE
     description = (
         "Reload a domain's configuration without restarting Home Assistant "
         "- e.g. domain='automation' after editing automations. Most config "
@@ -2641,7 +2737,10 @@ class WriteAutomationTool(WriteGatedTool):
         "requires a restart. Pass expected_hash (from get_file_metadata or "
         "a prior read) to detect concurrent edits. The config is checked with HA's own "
         "automation validation first; one HA would refuse to set up is refused "
-        "with HA's error, before any token or write."
+        "with HA's error, before any token or write. enabled (true/false) "
+        "also turns it on or off after the reload - HA otherwise restores "
+        "an id's last on/off state, so a deleted automation restored under "
+        "its old id comes back off (set_automation_enabled does this alone)."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {
@@ -2649,6 +2748,7 @@ class WriteAutomationTool(WriteGatedTool):
             vol.Required("config"): dict,
             vol.Optional("package"): str,
             vol.Optional("expected_hash"): str,
+            vol.Optional("enabled"): bool,
         }
     )
 
@@ -2696,6 +2796,10 @@ class WriteAutomationTool(WriteGatedTool):
                 hass, "automation", args["automation_id"]
             ),
         }
+        if "enabled" in args:
+            response["enabled"] = await _set_enabled_after_write(
+                hass, args, llm_context
+            )
         return await _mirror_file_write(
             hass,
             response,
@@ -2735,6 +2839,27 @@ class WriteAutomationTool(WriteGatedTool):
             kind="automation",
             entity_id=args["automation_id"],
         )
+
+
+async def _set_enabled_after_write(
+    hass: HomeAssistant, args: dict[str, Any], llm_context: llm.LLMContext
+) -> JsonObjectType:
+    """write_automation's `enabled`: turn the just-reloaded automation on
+    or off (issue #184)."""
+    automation_id = args["automation_id"]
+    try:
+        plan = service_call_manager.plan_automation_enabled(
+            hass, [automation_id], args["enabled"], {automation_id: args["config"]}
+        )
+    except service_call_manager.AutomationEnableRefusedError as exc:
+        return _tool_error(exc)
+    results = await service_call_manager.set_automations_enabled(
+        hass,
+        plan,
+        args["enabled"],
+        llm_context.context.user_id if llm_context.context else None,
+    )
+    return cast(JsonObjectType, results[0])
 
 
 def _one_or_many(args: dict[str, Any], single: str, many: str) -> list[str]:
@@ -2980,6 +3105,7 @@ class CreateHelperTool(WriteGatedTool):
     """Create a new helper item."""
 
     name = "create_helper"
+    annotations = ADDITIVE
     description = (
         "Create a new helper (input_boolean, counter, timer, etc.) via "
         "the same mechanism the UI's Helpers page uses. 'config' fields "
@@ -3172,17 +3298,21 @@ def _derived_sensor_mirror_path(domain: str, entry_id: str) -> str:
     return f"derived_sensors/{domain}/{entry_id}.json"
 
 
+_UI_HELPERS = (
+    "UI helpers (config entries): Template helper (any domain: sensor, "
+    "binary_sensor, switch, light, cover, ...), Min/Max, Utility Meter, "
+    "Integration (Riemann sum), Statistics, Threshold, Derivative, Filter. "
+)
+
+
 class ListDerivedSensorsTool(GatedTool):
     """List config-entry-based derived/calculated sensor helpers."""
 
     name = "list_derived_sensors"
     description = (
-        "List calculated/derived sensor helpers - Min/Max, Utility Meter, "
-        "Integration (Riemann sum), Statistics, Threshold, Derivative, "
-        "Filter - plus the general-purpose Template helper (can create an "
-        "entity in almost any domain: sensor, switch, light, cover, ...; "
-        "picking which one is that domain's own first, menu-driven step). "
-        "A second helper family alongside list_helpers' nine domains, "
+        _UI_HELPERS + "List them - the Template helper can create an entity in almost "
+        "any domain (picking which one is that domain's own first, "
+        "menu-driven step). A second helper family alongside list_helpers', "
         "implemented as config entries rather than storage items. Omit "
         "domain to list across all eight. Does not cover YAML-defined "
         "template: sensors living in configuration.yaml/packages - use "
@@ -3212,8 +3342,9 @@ class GetDerivedSensorTool(GatedTool):
 
     name = "get_derived_sensor"
     description = (
-        "Read a calculated/derived sensor helper's current config by its "
-        "config entry id (from list_derived_sensors)."
+        _UI_HELPERS + "Read one's current config (for a Template helper: its template "
+        "and options) by its config entry id (from list_derived_sensors, or "
+        "describe_entity for an entity id)."
     )
     parameters = vol.Schema({vol.Required("entry_id"): str})
 
@@ -3256,8 +3387,9 @@ class CreateDerivedSensorTool(WriteGatedTool):
     """Create a new derived-sensor config entry by driving its real config flow."""
 
     name = "create_derived_sensor"
+    annotations = ADDITIVE
     description = (
-        "Create a new calculated/derived sensor helper (min_max, "
+        _UI_HELPERS + "Create a new calculated/derived sensor helper (min_max, "
         "utility_meter, integration [Riemann sum], statistics, threshold, "
         "derivative, or filter), or a Template helper (any entity domain, "
         "not just sensors) via the same config flow the UI's Add Helper "
@@ -3305,8 +3437,8 @@ class UpdateDerivedSensorTool(WriteGatedTool):
 
     name = "update_derived_sensor"
     description = (
-        "Update an existing calculated/derived sensor helper's config by "
-        "its entry id (from list_derived_sensors), via the same options "
+        _UI_HELPERS + "Update an existing one's config (a Template helper's template "
+        "too) by its entry id (from list_derived_sensors), via the same options "
         "flow the UI's helper edit page uses. Simplest form: pass options "
         "as a flat dict of just the fields to change (e.g. "
         '{"entity_ids": [...]}, or {"state": "{{ ... }}"} for a '
@@ -3389,7 +3521,7 @@ class DeleteDerivedSensorTool(WriteGatedTool):
 
     name = "delete_derived_sensor"
     description = (
-        "Delete a calculated/derived sensor helper by its entry id. To "
+        _UI_HELPERS + "Delete one by its entry id. To "
         "delete several at once, pass entry_ids (a list) instead of "
         "entry_id: one confirmation, and every id is checked to exist "
         "before any is deleted."
@@ -3453,8 +3585,9 @@ class ReloadDerivedSensorTool(GatedTool):
     """Force a derived-sensor entry to recompute without changing its options."""
 
     name = "reload_derived_sensor"
+    annotations = SET_STATE
     description = (
-        "Reload a calculated/derived sensor helper by its entry id, without "
+        _UI_HELPERS + "Reload one by its entry id, without "
         "changing any of its options - e.g. after an entity it reads from "
         "was reconfigured elsewhere. update_derived_sensor already reloads "
         "automatically when it changes options; use this only when nothing "
@@ -3491,9 +3624,10 @@ class ListTemplateEntitiesTool(GatedTool):
         "(sensor, binary_sensor, number, switch, ...). Entities without "
         "their own unique_id are listed here too, but note they aren't "
         "addressable by create/update/delete_template_entity - only ones "
-        "with a unique_id are. Does not cover the config-entry-based "
-        "Template *helper* (UI-created) - not yet supported by any tool "
-        "here."
+        "with a unique_id are. UI-created Template helpers (config entries, "
+        "any domain) are covered by list_derived_sensors / "
+        "get_derived_sensor / update_derived_sensor (domain='template'). "
+        "describe_entity says where any entity is defined."
     )
     parameters = vol.Schema({})
 
@@ -3582,6 +3716,7 @@ class CreateTemplateEntityTool(WriteGatedTool):
     """Create a new YAML template: entity in its own new template: block."""
 
     name = "create_template_entity"
+    annotations = ADDITIVE
     description = (
         "Create a new YAML `template:` entity (sensor, binary_sensor, "
         "number, switch, ...) - always in a brand new template: block, "
@@ -4496,6 +4631,7 @@ class TriggerAutomationTool(WriteGatedTool):
     """Run an existing automation on demand - see service_call_manager.py."""
 
     name = "trigger_automation"
+    annotations = ACTION
     description = (
         "Run an existing automation immediately by its config id (not its "
         "entity_id - automation.<id> is never valid, see get_automation), "
@@ -4545,11 +4681,108 @@ class TriggerAutomationTool(WriteGatedTool):
             return _tool_error(exc)
         return {"triggered": True, **run}
 
+    @override
+    def _failed(self, data: JsonObjectType) -> bool | None:
+        """A run that failed after being started is the run's outcome,
+        reported under "error" - the trigger itself worked."""
+        return False if data.get("triggered") else None
+
+
+class SetAutomationEnabledTool(WriteGatedTool):
+    """Turn automations on or off - see service_call_manager.py (issue #184)."""
+
+    name = "set_automation_enabled"
+    annotations = SET_STATE
+    description = (
+        "Turn one or more automations on or off (the UI's enable toggle - "
+        "automation.turn_on / turn_off), by config id (as get_automation; "
+        "automation_id, or automation_ids for several). A runtime state HA "
+        "restores across restarts - the YAML isn't changed. Not the entity "
+        "registry's disable (update_entities' disabled). Turning one off "
+        "also stops a run in progress, like the UI. An id without a live "
+        "automation.* entity is refused before a confirm_token is issued. "
+        "The preview shows each one's alias, current state, last_triggered "
+        "and its triggers one per line, so turning one on shows what will "
+        "start firing; the result each one's state before and after."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Optional("automation_id"): str,
+            vol.Optional("automation_ids"): [str],
+            vol.Required("enabled"): bool,
+        }
+    )
+
+    def __init__(self, automation_manager: AutomationManager) -> None:
+        """Init with the AutomationManager the triggers are read from."""
+        self._manager = automation_manager
+
+    async def _plan(
+        self, hass: HomeAssistant, args: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        ids = _one_or_many(args, "automation_id", "automation_ids")
+        configs: dict[str, dict[str, Any] | None] = {}
+        for automation_id in ids:
+            try:
+                _, config = await self._manager.get_automation(automation_id)
+            except (AutomationNotFoundError, DuplicateAutomationIdError):
+                config = None
+            configs[automation_id] = config
+        return service_call_manager.plan_automation_enabled(
+            hass, ids, args["enabled"], configs
+        )
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """Every reason the automations can't be switched, if any."""
+        try:
+            await self._plan(hass, tool_input.tool_args)
+        except (ValueError, service_call_manager.AutomationEnableRefusedError) as exc:
+            return str(exc)
+        return None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Each automation, its state and what it reacts to."""
+        return {
+            "would_set": cast(
+                JsonValueType, await self._plan(hass, tool_input.tool_args)
+            )
+        }
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Turn each one on or off; report its state before and after."""
+        args = tool_input.tool_args
+        results = await service_call_manager.set_automations_enabled(
+            hass,
+            await self._plan(hass, args),
+            args["enabled"],
+            llm_context.context.user_id if llm_context.context else None,
+        )
+        return {"results": cast(JsonValueType, results)}
+
 
 class SetNumberValueTool(WriteGatedTool):
     """Set a number/input_number entity's value - see service_call_manager.py."""
 
     name = "set_number_value"
+    annotations = SET_STATE
     description = (
         "Set a `number` or `input_number` entity's value directly - e.g. "
         "to test a single write in isolation (an EMHASS battery-schedule "
@@ -4588,6 +4821,7 @@ class SetBooleanValueTool(WriteGatedTool):
     """Turn an input_boolean helper on/off - see service_call_manager.py."""
 
     name = "set_boolean_value"
+    annotations = SET_STATE
     description = (
         "Turn an `input_boolean` helper on or off directly. Scoped to just "
         "this virtual helper domain - control_entities turns other "
@@ -4623,6 +4857,7 @@ class ControlEntitiesTool(WriteGatedTool):
     service_call_manager.py's control_entities."""
 
     name = "control_entities"
+    annotations = ACTION
     description = (
         "Turn one or more entities on, off or toggle them directly, "
         "without writing an automation: switch, light, fan, input_boolean, "
@@ -5496,6 +5731,95 @@ class DeleteRestCommandTool(WriteGatedTool):
         )
 
 
+class WriteCustomizeTool(WriteGatedTool):
+    """`homeassistant: customize:` entries in packages - see
+    customize_write.py (issue #183)."""
+
+    name = "write_customize"
+    description = (
+        "Set or remove customize attributes (homeassistant: customize: in a "
+        "package) for one or more entities - the only way to give an "
+        "integration's sensor a state_class (without one a numeric sensor "
+        "gets no long-term statistics) or a missing device_class. entities "
+        "maps entity_id -> {attribute: value}; null removes that attribute, "
+        "an entity left with none is removed. Only state_class "
+        "(measurement / total / total_increasing, sensors only), "
+        "device_class (one of the domain's own), unit_of_measurement, "
+        "friendly_name, icon and assumed_state. An entity already "
+        "customized is changed where it is; otherwise pass package (a "
+        "packages/ file - created if missing). One customized in another "
+        "file, or in configuration.yaml (read-only), is refused. The "
+        "preview shows each entity's state and attributes now, its entry "
+        "before/after, and warnings (a combination HA won't compile "
+        "statistics for, a non-numeric state, an entity that doesn't "
+        "exist). Applied without a restart: HA's config check (a new error "
+        "rolls the write back), homeassistant.reload_core_config, each "
+        "entity's state rewritten - the result says per entity whether it "
+        "now has the attributes. Statistics start from then; no backfill."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("entities"): vol.All({str: dict}, vol.Length(min=1)),
+            vol.Optional("package"): str,
+        }
+    )
+
+    def __init__(self, writer: customize_write.CustomizeWriter) -> None:
+        """Init with the writer backing this tool."""
+        self._writer = writer
+
+    async def _plan(self, args: dict[str, Any]) -> customize_write.CustomizePlan:
+        return await self._writer.plan(
+            dict(args["entities"]), package=args.get("package")
+        )
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """Every reason the customize write is refused, if any."""
+        try:
+            await self._plan(tool_input.tool_args)
+        except ValueError as exc:
+            return str(exc)
+        return None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Each entity's attributes now and its entry before/after."""
+        plan = await self._plan(tool_input.tool_args)
+        return {"would_write": cast(JsonValueType, plan.preview())}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Write, check, reload core config, report per entity."""
+        try:
+            plan = await self._plan(tool_input.tool_args)
+            applied = await self._writer.apply(plan)
+        except (ValueError, OSError, HomeAssistantError) as exc:
+            return _tool_error(exc)
+        return await _mirror_file_write(
+            hass,
+            {"customized": cast(JsonValueType, applied)},
+            file_path=plan.file_path,
+            content_before=plan.content_before,
+            content_after=plan.content_after,
+        )
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
@@ -5524,6 +5848,15 @@ class DevToolsAPI(llm.API):
             tools=[
                 DevToolsPingTool(),
                 FindEntitiesTool(),
+                DescribeEntityTool(
+                    entity_source.EntitySourceResolver(
+                        self.hass,
+                        self.automation_manager,
+                        self.script_manager,
+                        self.template_yaml_manager,
+                        platforms,
+                    )
+                ),
                 EntityHealthReportTool(),
                 DeleteEntityTool(),
                 DeleteEntitiesTool(),
@@ -5555,6 +5888,12 @@ class DevToolsAPI(llm.API):
                 ListTracesTool(),
                 GetTraceTool(),
                 TriggerAutomationTool(),
+                WriteCustomizeTool(
+                    customize_write.CustomizeWriter(
+                        self.hass, self.rest_command_manager.file_manager
+                    )
+                ),
+                SetAutomationEnabledTool(self.automation_manager),
                 SetNumberValueTool(),
                 SetBooleanValueTool(),
                 ControlEntitiesTool(),

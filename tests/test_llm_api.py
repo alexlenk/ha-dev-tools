@@ -199,13 +199,96 @@ async def test_dev_tools_ping_tool_reachable(
     tool_names = {tool.name for tool in api_instance.tools}
     assert "dev_tools_ping" in tool_names
 
-    result = await DevToolsPingTool().async_call(
-        hass, llm.ToolInput(tool_name="dev_tools_ping", tool_args={}), _llm_context()
-    )
+    result = (
+        await DevToolsPingTool().async_call(
+            hass,
+            llm.ToolInput(tool_name="dev_tools_ping", tool_args={}),
+            _llm_context(),
+        )
+    ).data
     assert _without_arm(result) == {"status": "ok", "domain": DOMAIN}
     # Works while not armed, and says how to arm (issue #63).
     assert result["arm"]["armed"] is False
     assert "arm_command" in result["arm"]
+
+
+@pytest.mark.asyncio
+async def test_tools_return_tool_results(
+    hass: HomeAssistant, setup_integration_with_entry, admin_user, caplog
+):
+    """Every tool answers with a ToolResult (issue #152) - no deprecation
+    warning through HA's own call path, and a failed call is flagged."""
+    api_instance = await llm.async_get_api(hass, API_ID, _llm_context(admin_user.id))
+    ping = await api_instance.async_call_tool(
+        llm.ToolInput(tool_name="dev_tools_ping", tool_args={})
+    )
+    assert isinstance(ping, llm.ToolResult) and ping.error is False
+
+    _arm(hass)
+    api_instance = await llm.async_get_api(hass, API_ID, _llm_context(admin_user.id))
+    failed = await api_instance.async_call_tool(
+        llm.ToolInput(
+            tool_name="get_automation", tool_args={"automation_id": "no_such_id"}
+        )
+    )
+    assert failed.error is True and "error" in failed.data
+    assert "deprecated" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_trigger_automation_run_error_is_not_a_failed_call(
+    hass: HomeAssistant, admin_user
+):
+    """The run's own error is its outcome; the trigger itself worked."""
+    _arm(hass)
+    tool = TriggerAutomationTool()
+    args = {"automation_id": "kitchen_id"}
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="trigger_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
+    with patch(
+        "custom_components.ha_dev_tools.llm_api.service_call_manager.trigger_automation",
+        AsyncMock(return_value={"entity_id": "automation.k", "error": "boom"}),
+    ):
+        result = await tool.async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="trigger_automation",
+                tool_args={**args, "confirm_token": proposal["confirm_token"]},
+            ),
+            _llm_context(admin_user.id),
+        )
+    assert result.error is False and result.data["error"] == "boom"
+
+    # Not triggered at all: a failed call.
+    failed = await tool.async_call(
+        hass,
+        llm.ToolInput(tool_name="trigger_automation", tool_args={"bogus": 1}),
+        _llm_context(admin_user.id),
+    )
+    assert failed.error is True
+
+
+@pytest.mark.asyncio
+async def test_tool_annotations(hass: HomeAssistant, setup_integration_with_entry):
+    """Read tools are read-only; writes are destructive unless they only add
+    or set a state (issue #152). Nothing is open-world."""
+    api_instance = await llm.async_get_api(hass, API_ID, _llm_context())
+    tools = {tool.name: tool.annotations for tool in api_instance.tools}
+    assert not any(annotation.open_world for annotation in tools.values())
+    for name in ("find_entities", "get_automation", "dev_tools_ping"):
+        assert tools[name].read_only and tools[name].idempotent
+    for name in ("write_automation", "delete_entity", "clear_statistics"):
+        assert not tools[name].read_only and tools[name].destructive
+    for name in ("create_helper", "control_entities", "trigger_automation"):
+        assert not tools[name].destructive and not tools[name].idempotent
+    for name in ("reload_domain", "set_boolean_value"):
+        assert not tools[name].read_only
+        assert not tools[name].destructive and tools[name].idempotent
 
 
 @pytest.mark.asyncio
@@ -219,6 +302,7 @@ async def test_dev_tools_real_tools_registered(
     assert tool_names == {
         "dev_tools_ping",
         "find_entities",
+        "describe_entity",
         "entity_health_report",
         "delete_entity",
         "delete_entities",
@@ -250,6 +334,8 @@ async def test_dev_tools_real_tools_registered(
         "list_traces",
         "get_trace",
         "trigger_automation",
+        "set_automation_enabled",
+        "write_customize",
         "set_number_value",
         "set_boolean_value",
         "control_entities",
@@ -317,11 +403,13 @@ async def test_gated_tool_refuses_when_not_armed(
 ):
     """A real gated tool (not just access_control's own unit tests) refuses when unarmed."""
     with pytest.raises(NotArmedError):
-        await FindEntitiesTool().async_call(
-            hass,
-            llm.ToolInput(tool_name="find_entities", tool_args={}),
-            _llm_context(admin_user.id),
-        )
+        (
+            await FindEntitiesTool().async_call(
+                hass,
+                llm.ToolInput(tool_name="find_entities", tool_args={}),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
 
 @pytest.mark.asyncio
@@ -331,11 +419,13 @@ async def test_gated_tool_refuses_non_admin_even_when_armed(
     _arm(hass)
 
     with pytest.raises(NotAdminError):
-        await FindEntitiesTool().async_call(
-            hass,
-            llm.ToolInput(tool_name="find_entities", tool_args={}),
-            _llm_context(non_admin_user.id),
-        )
+        (
+            await FindEntitiesTool().async_call(
+                hass,
+                llm.ToolInput(tool_name="find_entities", tool_args={}),
+                _llm_context(non_admin_user.id),
+            )
+        ).data
 
 
 @pytest.mark.asyncio
@@ -346,11 +436,13 @@ async def test_gated_tool_succeeds_when_armed_and_admin(
     path = access_control._arm_file_path(hass)
     mtime_before = path.stat().st_mtime
 
-    result = await FindEntitiesTool().async_call(
-        hass,
-        llm.ToolInput(tool_name="find_entities", tool_args={}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await FindEntitiesTool().async_call(
+            hass,
+            llm.ToolInput(tool_name="find_entities", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert isinstance(result, dict)
     # A successful call extends the idle window (touch_armed).
@@ -387,19 +479,23 @@ async def test_delete_entity_tool_confirm_flow_removes_from_registry(
     tool = DeleteEntityTool()
     args = {"entity_id": "light.kitchen_light"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_entity", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_entity", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_entity", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_entity", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert _without_arm(result) == {"deleted": True, "entity_id": "light.kitchen_light"}
     # Write tools report the arm window this call just extended (issue #63).
@@ -518,19 +614,23 @@ async def test_delete_entities_tool_confirm_flow_removes_all_from_registry(
     tool = DeleteEntitiesTool()
     args = {"entity_ids": ["light.kitchen_light", "light.bedroom_light"]}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_entities", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_entities", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_entities", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_entities", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert _without_arm(result) == {
         "deleted": True,
@@ -958,13 +1058,15 @@ async def test_get_automation_reports_currently_enabled_true(
     )
     hass.states.async_set("automation.my_automation", "on", {"id": "my_automation"})
 
-    result = await GetAutomationTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetAutomationTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["currently_enabled"] is True
     assert result["runtime_state_note"] is None
@@ -988,13 +1090,15 @@ async def test_get_automation_reports_misread_values(
         "  action: []\n"
     )
 
-    result = await GetAutomationTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetAutomationTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["config"]["condition"][0]["before"] == "17:00:00"
     assert result["misread_values"] == [
@@ -1018,13 +1122,15 @@ async def test_get_automation_reports_currently_enabled_false(
     )
     hass.states.async_set("automation.my_automation", "off", {"id": "my_automation"})
 
-    result = await GetAutomationTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetAutomationTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["currently_enabled"] is False
 
@@ -1040,13 +1146,15 @@ async def test_get_automation_reports_unknown_when_never_reloaded(
         "- id: my_automation\n  trigger: []\n  action: []\n"
     )
 
-    result = await GetAutomationTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_automation", tool_args={"automation_id": "my_automation"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetAutomationTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_automation", tool_args={"automation_id": "my_automation"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["currently_enabled"] is None
     assert result["runtime_state_note"] is not None
@@ -1062,13 +1170,15 @@ async def test_get_automation_returns_error_for_missing_id(
         "- id: some_other_id\n  trigger: []\n  action: []\n"
     )
 
-    result = await GetAutomationTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_automation", tool_args={"automation_id": "missing"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetAutomationTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_automation", tool_args={"automation_id": "missing"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert "error" in result
 
@@ -1098,11 +1208,13 @@ async def test_get_script_returns_config(hass: HomeAssistant, admin_user, tmp_pa
         "my_script:\n  alias: Mine\n  sequence: []\n"
     )
 
-    result = await GetScriptTool(manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "my_script"}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetScriptTool(manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="get_script", tool_args={"script_id": "my_script"}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["file_path"] == "scripts.yaml"
     assert result["config"]["alias"] == "Mine"
@@ -1119,11 +1231,13 @@ async def test_get_script_reports_misread_values(
     _arm(hass)
     (tmp_path / "scripts.yaml").write_text("my_script:\n  sequence:\n  - delay: 1:30\n")
 
-    result = await GetScriptTool(manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "my_script"}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetScriptTool(manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="get_script", tool_args={"script_id": "my_script"}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["misread_values"] == [
         {"path": "sequence[0].delay", "line": 3, "written": "1:30", "ha_reads_as": 90}
@@ -1138,11 +1252,13 @@ async def test_get_script_returns_error_for_missing_id(
     _arm(hass)
     (tmp_path / "scripts.yaml").write_text("other_id:\n  sequence: []\n")
 
-    result = await GetScriptTool(manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "missing"}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetScriptTool(manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="get_script", tool_args={"script_id": "missing"}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert "error" in result
 
@@ -1159,11 +1275,13 @@ async def test_list_scripts_returns_every_script(
         "script:\n  b:\n    sequence: []\n"
     )
 
-    result = await ListScriptsTool(manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="list_scripts", tool_args={}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await ListScriptsTool(manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="list_scripts", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     ids = {item["script_id"] for item in result["items"]}
     assert ids == {"a", "b"}
@@ -1180,19 +1298,23 @@ async def test_write_script_tool_confirm_flow_writes_and_reloads(
     tool = WriteScriptTool(manager)
     args = {"script_id": "new_script", "config": {"alias": "New", "sequence": []}}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="write_script", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_script", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="write_script", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_script", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["file_path"] == "scripts.yaml"
     assert result["setup_error"] is None
@@ -1365,13 +1487,15 @@ async def test_get_rest_command_returns_config(
         "rest_command:\n  my_cmd:\n    url: http://example.com\n"
     )
 
-    result = await GetRestCommandTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_rest_command", tool_args={"rest_command_id": "my_cmd"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetRestCommandTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_rest_command", tool_args={"rest_command_id": "my_cmd"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["file_path"] == "configuration.yaml"
     assert result["config"]["url"] == "http://example.com"
@@ -1387,13 +1511,15 @@ async def test_get_rest_command_returns_error_for_missing_id(
         "rest_command:\n  other_id:\n    url: http://example.com\n"
     )
 
-    result = await GetRestCommandTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_rest_command", tool_args={"rest_command_id": "missing"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await GetRestCommandTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_rest_command", tool_args={"rest_command_id": "missing"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert "error" in result
 
@@ -1412,11 +1538,13 @@ async def test_list_rest_commands_returns_every_command(
         "rest_command:\n  b:\n    url: http://b\n"
     )
 
-    result = await ListRestCommandsTool(manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="list_rest_commands", tool_args={}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await ListRestCommandsTool(manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="list_rest_commands", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     ids = {item["rest_command_id"] for item in result["items"]}
     assert ids == {"a", "b"}
@@ -1435,21 +1563,28 @@ async def test_rest_command_tools_read_shell_commands_via_domain(
         "rest_command:\n  my_cmd:\n    url: http://example.com\n"
     )
 
-    got = await GetRestCommandTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_rest_command",
-            tool_args={"rest_command_id": "cache_prices", "domain": "shell_command"},
-        ),
-        _llm_context(admin_user.id),
-    )
-    listed = await ListRestCommandsTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="list_rest_commands", tool_args={"domain": "shell_command"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    got = (
+        await GetRestCommandTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_rest_command",
+                tool_args={
+                    "rest_command_id": "cache_prices",
+                    "domain": "shell_command",
+                },
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
+    listed = (
+        await ListRestCommandsTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="list_rest_commands", tool_args={"domain": "shell_command"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert got["config"] == "curl -s http://x"
     assert [item["rest_command_id"] for item in listed["items"]] == ["cache_prices"]
@@ -1479,18 +1614,22 @@ async def test_rest_command_reads_with_secret_tag_are_json_safe(
         "    url: http://plain\n"
     )
 
-    got = await GetRestCommandTool(manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_rest_command", tool_args={"rest_command_id": "doorbird"}
-        ),
-        _llm_context(admin_user.id),
-    )
-    listed = await ListRestCommandsTool(manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="list_rest_commands", tool_args={}),
-        _llm_context(admin_user.id),
-    )
+    got = (
+        await GetRestCommandTool(manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_rest_command", tool_args={"rest_command_id": "doorbird"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
+    listed = (
+        await ListRestCommandsTool(manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="list_rest_commands", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     json.dumps(got)
     json.dumps(listed)
@@ -1523,23 +1662,29 @@ async def test_automation_and_script_reads_with_secret_tag_are_json_safe(
         "      target: !secret my_phone\n"
     )
 
-    automation = await GetAutomationTool(automation_manager).async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="get_automation", tool_args={"automation_id": "notify"}
-        ),
-        _llm_context(admin_user.id),
-    )
-    script = await GetScriptTool(script_manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="get_script", tool_args={"script_id": "call"}),
-        _llm_context(admin_user.id),
-    )
-    scripts = await ListScriptsTool(script_manager).async_call(
-        hass,
-        llm.ToolInput(tool_name="list_scripts", tool_args={}),
-        _llm_context(admin_user.id),
-    )
+    automation = (
+        await GetAutomationTool(automation_manager).async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="get_automation", tool_args={"automation_id": "notify"}
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
+    script = (
+        await GetScriptTool(script_manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="get_script", tool_args={"script_id": "call"}),
+            _llm_context(admin_user.id),
+        )
+    ).data
+    scripts = (
+        await ListScriptsTool(script_manager).async_call(
+            hass,
+            llm.ToolInput(tool_name="list_scripts", tool_args={}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     for result in (automation, script, scripts):
         json.dumps(result)
@@ -1571,18 +1716,22 @@ class _StubWriteTool(WriteGatedTool):
 
 async def _confirm(hass, tool, admin_user, args: dict) -> dict:
     """Drive a WriteGatedTool through its propose call, then confirm with the returned token."""
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name=tool.name, tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name=tool.name, tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    return await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name=tool.name, tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    return (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name=tool.name, tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
 
 @pytest.mark.asyncio
@@ -1593,11 +1742,13 @@ async def test_write_gated_tool_first_call_requires_confirmation(
     _arm(hass)
     tool = _StubWriteTool()
 
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert tool.write_called is False
     assert result["confirmation_required"] is True
@@ -1675,11 +1826,13 @@ async def test_write_gated_tool_dry_run_still_requires_armed_and_admin(
     tool = _StubWriteTool()
 
     with pytest.raises(NotArmedError):
-        await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="stub_write", tool_args={}),
-            _llm_context(admin_user.id),
-        )
+        (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="stub_write", tool_args={}),
+                _llm_context(admin_user.id),
+            )
+        ).data
     assert tool.write_called is False
 
 
@@ -1691,13 +1844,16 @@ async def test_write_gated_tool_rejects_unknown_token(
     _arm(hass)
     tool = _StubWriteTool()
 
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="stub_write", tool_args={"foo": "bar", "confirm_token": "nope"}
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="stub_write",
+                tool_args={"foo": "bar", "confirm_token": "nope"},
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert tool.write_called is False
     assert result["confirmation_required"] is True
@@ -1712,20 +1868,27 @@ async def test_write_gated_tool_token_does_not_authorize_different_args(
     _arm(hass)
     tool = _StubWriteTool()
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="stub_write", tool_args={"foo": "bar"}),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
-    drifted = await tool.async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="stub_write",
-            tool_args={"foo": "different", "confirm_token": proposal["confirm_token"]},
-        ),
-        _llm_context(admin_user.id),
-    )
+    drifted = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="stub_write",
+                tool_args={
+                    "foo": "different",
+                    "confirm_token": proposal["confirm_token"],
+                },
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert tool.write_called is False
     assert drifted["confirmation_required"] is True
@@ -1740,27 +1903,33 @@ async def test_write_gated_tool_token_is_single_use(
     tool = _StubWriteTool()
     args = {"foo": "bar"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="stub_write", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="stub_write", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
 
-    first = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    first = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert _without_arm(first) == {"wrote": True}
     assert tool.write_called is True
 
     tool.write_called = False
-    replay = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    replay = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="stub_write", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert replay["confirmation_required"] is True
     assert tool.write_called is False
 
@@ -3045,20 +3214,26 @@ async def test_write_energy_config_tool_confirm_flow(
         "custom_components.ha_dev_tools.llm_api.energy_manager.write_energy_config",
         AsyncMock(return_value={"energy_sources": []}),
     ) as mock_write:
-        proposal = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="write_energy_config", tool_args=args),
-            _llm_context(admin_user.id),
-        )
+        proposal = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="write_energy_config", tool_args=args),
+                _llm_context(admin_user.id),
+            )
+        ).data
         assert proposal["confirmation_required"] is True
         mock_write.assert_not_called()
 
         confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="write_energy_config", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(
+                    tool_name="write_energy_config", tool_args=confirmed_args
+                ),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert result["saved"] is True
     mock_write.assert_called_once()
@@ -3184,11 +3359,13 @@ async def test_trigger_automation_tool_confirm_flow_calls_manager(
     tool = TriggerAutomationTool()
     args = {"automation_id": "kitchen_id"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="trigger_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="trigger_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
@@ -3202,11 +3379,13 @@ async def test_trigger_automation_tool_confirm_flow_calls_manager(
             }
         ),
     ) as mock_trigger:
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="trigger_automation", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="trigger_automation", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert _without_arm(result) == {
         "triggered": True,
@@ -3240,11 +3419,13 @@ async def test_set_number_value_tool_confirm_flow_calls_manager(
     tool = SetNumberValueTool()
     args = {"entity_id": "number.battery_charge_slot", "value": 42.5}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="set_number_value", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="set_number_value", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
@@ -3252,11 +3433,13 @@ async def test_set_number_value_tool_confirm_flow_calls_manager(
         "custom_components.ha_dev_tools.llm_api.service_call_manager.set_number_value",
         AsyncMock(return_value=None),
     ) as mock_set:
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="set_number_value", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="set_number_value", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert _without_arm(result) == {
         "entity_id": "number.battery_charge_slot",
@@ -3289,11 +3472,13 @@ async def test_set_boolean_value_tool_confirm_flow_calls_manager(
     tool = SetBooleanValueTool()
     args = {"entity_id": "input_boolean.vacation_mode", "state": True}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="set_boolean_value", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="set_boolean_value", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
@@ -3301,11 +3486,13 @@ async def test_set_boolean_value_tool_confirm_flow_calls_manager(
         "custom_components.ha_dev_tools.llm_api.service_call_manager.set_boolean_value",
         AsyncMock(return_value=None),
     ) as mock_set:
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="set_boolean_value", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="set_boolean_value", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert _without_arm(result) == {
         "entity_id": "input_boolean.vacation_mode",
@@ -3337,14 +3524,16 @@ async def test_control_entities_tool_refuses_before_a_token(
     _arm(hass)
     hass.states.async_set("lock.front_door", "locked")
 
-    result = await ControlEntitiesTool().async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="control_entities",
-            tool_args={"entity_ids": ["lock.front_door"], "action": "off"},
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await ControlEntitiesTool().async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="control_entities",
+                tool_args={"entity_ids": ["lock.front_door"], "action": "off"},
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert "confirm_token" not in result
     assert result["error_type"] == "Invalid"
@@ -3366,11 +3555,13 @@ async def test_control_entities_tool_confirm_flow(hass: HomeAssistant, admin_use
     tool = ControlEntitiesTool()
     args = {"entity_ids": ["light.desk"], "action": "on", "brightness_pct": 30}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="control_entities", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="control_entities", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["would_call"] == [
         {
             "entity_id": "light.desk",
@@ -3383,14 +3574,16 @@ async def test_control_entities_tool_confirm_flow(hass: HomeAssistant, admin_use
     ]
     assert hass.states.get("light.desk").state == "off"
 
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(
-            tool_name="control_entities",
-            tool_args={**args, "confirm_token": proposal["confirm_token"]},
-        ),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(
+                tool_name="control_entities",
+                tool_args={**args, "confirm_token": proposal["confirm_token"]},
+            ),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert _without_arm(result) == {
         "results": [
@@ -4094,11 +4287,13 @@ async def test_write_automation_tool_dry_run_mirrors_to_proposed_branch(
         "config": {"alias": "New", "trigger": [], "action": []},
     }
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="write_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     fake_session = _FakeMirrorSession(
@@ -4118,11 +4313,13 @@ async def test_write_automation_tool_dry_run_mirrors_to_proposed_branch(
         "custom_components.ha_dev_tools.mirror.async_get_clientsession",
         return_value=fake_session,
     ):
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="write_automation", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="write_automation", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert result["dry_run"] is True
     assert result["mirror"]["mirrored"] is True
@@ -4150,17 +4347,21 @@ async def test_write_automation_tool_dry_run_no_mirror_key_when_mirroring_disabl
     tool = WriteAutomationTool(manager)
     args = {"automation_id": "my_automation", "config": {"trigger": [], "action": []}}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="write_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="write_automation", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["dry_run"] is True
     assert "mirror" not in result
@@ -4267,19 +4468,23 @@ async def test_delete_automation_tool_confirm_flow_deletes_and_reloads(
     tool = DeleteAutomationTool(manager)
     args = {"automation_id": "gone"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["deleted"] is True
     assert result["file_path"] == "automations.yaml"
@@ -4301,17 +4506,21 @@ async def test_delete_automation_tool_not_found_returns_tool_error(
     tool = DeleteAutomationTool(manager)
     args = {"automation_id": "does_not_exist"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["error_type"] == "AutomationNotFoundError"
     assert "does_not_exist" in result["error"]
@@ -4341,17 +4550,21 @@ async def test_delete_automation_tool_dry_run_not_found_skips_mirror(
     tool = DeleteAutomationTool(manager)
     args = {"automation_id": "does_not_exist"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     confirmed_args = {**args, "confirm_token": proposal["confirm_token"]}
-    result = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
-        _llm_context(admin_user.id),
-    )
+    result = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+            _llm_context(admin_user.id),
+        )
+    ).data
 
     assert result["dry_run"] is True
     assert result["mirror"]["mirrored"] is False
@@ -4379,11 +4592,13 @@ async def test_delete_automation_tool_mirrors_when_enabled(
     tool = DeleteAutomationTool(manager)
     args = {"automation_id": "gone"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     fake_session = _FakeMirrorSession(
         [
             _FakeMirrorResponse(200, {"default_branch": "main"}),  # GET repo info
@@ -4401,11 +4616,13 @@ async def test_delete_automation_tool_mirrors_when_enabled(
         "custom_components.ha_dev_tools.mirror.async_get_clientsession",
         return_value=fake_session,
     ):
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert result["mirror"]["mirrored"] is True
     assert result["mirror"]["commits"] == ["before", "after"]
@@ -4435,11 +4652,13 @@ async def test_delete_automation_tool_dry_run_mirrors_to_proposed_branch(
     tool = DeleteAutomationTool(manager)
     args = {"automation_id": "my_automation"}
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="delete_automation", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="delete_automation", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     fake_session = _FakeMirrorSession(
@@ -4459,11 +4678,13 @@ async def test_delete_automation_tool_dry_run_mirrors_to_proposed_branch(
         "custom_components.ha_dev_tools.mirror.async_get_clientsession",
         return_value=fake_session,
     ):
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="delete_automation", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert result["dry_run"] is True
     assert result["mirror"]["mirrored"] is True
@@ -4512,11 +4733,13 @@ async def test_write_script_tool_dry_run_mirrors_to_proposed_branch(
         "config": {"alias": "New", "sequence": []},
     }
 
-    proposal = await tool.async_call(
-        hass,
-        llm.ToolInput(tool_name="write_script", tool_args=args),
-        _llm_context(admin_user.id),
-    )
+    proposal = (
+        await tool.async_call(
+            hass,
+            llm.ToolInput(tool_name="write_script", tool_args=args),
+            _llm_context(admin_user.id),
+        )
+    ).data
     assert proposal["confirmation_required"] is True
 
     fake_session = _FakeMirrorSession(
@@ -4536,11 +4759,13 @@ async def test_write_script_tool_dry_run_mirrors_to_proposed_branch(
         "custom_components.ha_dev_tools.mirror.async_get_clientsession",
         return_value=fake_session,
     ):
-        result = await tool.async_call(
-            hass,
-            llm.ToolInput(tool_name="write_script", tool_args=confirmed_args),
-            _llm_context(admin_user.id),
-        )
+        result = (
+            await tool.async_call(
+                hass,
+                llm.ToolInput(tool_name="write_script", tool_args=confirmed_args),
+                _llm_context(admin_user.id),
+            )
+        ).data
 
     assert result["dry_run"] is True
     assert result["mirror"]["mirrored"] is True
