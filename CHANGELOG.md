@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.35.0] - 2026-10-31
+
+### Added
+- **`set_value`: set the value of an entity that holds one, without an automation** (issue #194).
+  - Covers `input_text`/`text`, `input_select`/`select`, `input_number`/`number`, `counter`, `input_datetime`, `date`, `time` and `datetime`.
+  - The value is checked against what the entity allows: text length and pattern, the select options, min/max, a whole number for a counter, and date/time/both as the `input_datetime` has.
+  - The preview shows the current state, the service call, and every automation whose triggers name the entity, with whether it's on (and so will fire).
+  - Devices and entities excluded on the Configure page are refused, as for `control_entities`.
+  - The result shows the state before and after.
+  - `set_number_value` keeps working; its description now points to `set_value`.
+
 ## [2.34.1] - 2026-10-30
 
 ### Fixed

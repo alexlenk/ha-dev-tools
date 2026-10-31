@@ -189,9 +189,9 @@ Dev Tools MCP → Configure), not YAML.
 
 ## Scoped service-call tools
 
-`trigger_automation`, `set_automation_enabled`, `set_number_value`,
-`set_boolean_value` and `control_entities` (`service_call_manager.py`)
-call Home Assistant services - a different
+`trigger_automation`, `set_automation_enabled`, `set_value`,
+`set_number_value`, `set_boolean_value` and `control_entities`
+(`service_call_manager.py`) call Home Assistant services - a different
 surface than the path allowlist above, which only governs file-touching
 tools. A generic `call_service` tool (domain + service + arbitrary data) was
 considered and rejected: it would be able to reach *any* registered
@@ -249,6 +249,15 @@ attributes (`state_class`, `device_class`, `unit_of_measurement`,
 calls `homeassistant.reload_core_config` and `homeassistant.update_entity`
 for the entities it changed - nothing else - and rolls the file back if
 HA's config check reports a new error.
+
+`set_value` (issue #194) sets a value entity's value, for a fixed list of
+domains each mapped to its own service and field: `input_text`/`text`
+(`set_value`), `input_select`/`select` (`select_option`),
+`input_number`/`number`/`counter` (`set_value`), `input_datetime`
+(`set_datetime`), `date`/`time`/`datetime` (`set_value`). The value is
+checked against what the entity allows before any call. The devices and
+entities `control_entities` refuses are refused here too, and the preview
+lists the automations the change will trigger.
 
 All of these still go through the same two `GatedTool` checks (arm file +
 admin) as every other tool, plus the same `WriteGatedTool` propose/confirm

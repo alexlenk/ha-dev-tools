@@ -547,3 +547,127 @@ async def test_plan_and_set_automation_enabled(hass: HomeAssistant):
     hass.services.async_register("automation", "turn_off", turn_off)
     off = await set_automations_enabled(hass, plan[:1], False)
     assert off[0]["state_after"] is None
+
+
+# --- set_value (issue #194) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "attributes", "value", "data"),
+    [
+        ("input_text.last", {"min": 0, "max": 10}, "none", {"value": "none"}),
+        ("text.label", {"pattern": "[a-z]+"}, "abc", {"value": "abc"}),
+        (
+            "input_select.house",
+            {"options": ["home", "away"]},
+            "away",
+            {"option": "away"},
+        ),
+        ("select.mode", {"options": ["eco"]}, "eco", {"option": "eco"}),
+        ("input_number.temp", {"min": 5, "max": 30}, "21.5", {"value": 21.5}),
+        ("number.slot", {}, 3, {"value": 3.0}),
+        ("counter.cups", {"minimum": 0, "maximum": None}, 4.0, {"value": 4}),
+        (
+            "input_datetime.wake",
+            {"has_date": True, "has_time": True},
+            "2026-10-31 07:30:00",
+            {"datetime": "2026-10-31 07:30:00"},
+        ),
+        (
+            "input_datetime.day",
+            {"has_date": True},
+            "2026-10-31",
+            {"date": "2026-10-31"},
+        ),
+        ("input_datetime.alarm", {"has_time": True}, "07:30:00", {"time": "07:30:00"}),
+        ("date.service", {}, "2026-11-01", {"date": "2026-11-01"}),
+        ("time.start", {}, "06:00", {"time": "06:00"}),
+        (
+            "datetime.next",
+            {},
+            "2026-11-01T06:00:00",
+            {"datetime": "2026-11-01T06:00:00"},
+        ),
+    ],
+)
+def test_plan_value_per_domain(hass: HomeAssistant, entity_id, attributes, value, data):
+    from custom_components.ha_dev_tools.service_call_manager import plan_value
+
+    hass.states.async_set(entity_id, "old", attributes)
+    plan = plan_value(hass, entity_id, value)
+    assert plan["data"] == {"entity_id": entity_id, **data}
+    assert plan["state_now"] == "old"
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "attributes", "value", "problem"),
+    [
+        ("input_text.t", {}, 5, "a text value is a string"),
+        ("input_text.t", {"min": 3}, "ab", "at least 3 characters"),
+        ("input_text.t", {"max": 2}, "abc", "at most 2 characters"),
+        ("text.t", {"pattern": "[0-9]+"}, "x1", "doesn't match"),
+        ("input_select.s", {"options": ["a"]}, "b", "not one of its options"),
+        ("input_number.n", {"min": 1, "max": 5}, 0, "below its minimum 1"),
+        ("number.n", {"max": 5}, 6, "above its maximum 5"),
+        ("number.n", {}, "many", "a number"),
+        ("number.n", {}, True, "a number"),
+        ("counter.c", {}, 1.5, "a whole number"),
+        ("input_datetime.d", {"has_date": True}, "07:00", "a date like"),
+        ("time.t", {}, 7, "a time like"),
+    ],
+)
+def test_plan_value_refuses_what_the_entity_wont_take(
+    hass: HomeAssistant, entity_id, attributes, value, problem
+):
+    from custom_components.ha_dev_tools.service_call_manager import (
+        ValueRefusedError,
+        plan_value,
+    )
+
+    hass.states.async_set(entity_id, "x", attributes)
+    with pytest.raises(ValueRefusedError, match=problem):
+        plan_value(hass, entity_id, value)
+
+
+@pytest.mark.asyncio
+async def test_plan_value_refusals_and_set(hass: HomeAssistant):
+    from custom_components.ha_dev_tools.const import OPT_CONTROL_EXCLUDED_ENTITIES
+    from custom_components.ha_dev_tools.service_call_manager import (
+        ValueRefusedError,
+        plan_value,
+        set_entity_value,
+    )
+
+    with pytest.raises(ValueRefusedError, match="has no value to set here"):
+        plan_value(hass, "switch.desk", "on")
+    with pytest.raises(ValueRefusedError, match="no such entity"):
+        plan_value(hass, "input_text.gone", "x")
+    hass.states.async_set("input_text.secret", "x")
+    _options(hass, **{OPT_CONTROL_EXCLUDED_ENTITIES: ["input_text.secret"]})
+    with pytest.raises(ValueRefusedError, match="excluded from agent control"):
+        plan_value(hass, "input_text.secret", "y")
+
+    hass.states.async_set("input_text.last", "unknown")
+    callers = []
+
+    async def set_value(call):
+        callers.append(call.context.user_id)
+        hass.states.async_set("input_text.last", call.data["value"])
+
+    hass.services.async_register("input_text", "set_value", set_value)
+    result = await set_entity_value(
+        hass, plan_value(hass, "input_text.last", "none"), "user-1"
+    )
+    assert result == {
+        "entity_id": "input_text.last",
+        "state_before": "unknown",
+        "state_after": "none",
+    }
+    assert callers == ["user-1"]
+
+    async def vanish(call):
+        hass.states.async_remove("input_text.last")
+
+    hass.services.async_register("input_text", "set_value", vanish)
+    gone = await set_entity_value(hass, plan_value(hass, "input_text.last", "x"))
+    assert gone["state_after"] is None
