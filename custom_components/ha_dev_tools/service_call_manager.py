@@ -222,6 +222,29 @@ def _excluded(hass: HomeAssistant) -> tuple[set[str], set[str]]:
     )
 
 
+def exclusion_problem(hass: HomeAssistant, entity_id: str) -> str | None:
+    """Why the Configure page's exclusions keep agents off this entity -
+    it, or its device, is listed - or None."""
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    excluded_devices, excluded_entities = _excluded(hass)
+    if entity_id in excluded_entities:
+        return "excluded from agent control (Configure page)"
+    entry = er.async_get(hass).async_get(entity_id)
+    device = (
+        dr.async_get(hass).async_get(entry.device_id)
+        if entry and entry.device_id
+        else None
+    )
+    if device is not None and device.id in excluded_devices:
+        return (
+            f"its device '{device.name_by_user or device.name}' is excluded "
+            "from agent control (Configure page)"
+        )
+    return None
+
+
 def plan_control(
     hass: HomeAssistant,
     entity_ids: list[str],
@@ -241,7 +264,6 @@ def plan_control(
         problems.append("brightness_pct goes with action 'on'")
     if len(set(entity_ids)) != len(entity_ids):
         problems.append("an entity is listed more than once")
-    excluded_devices, excluded_entities = _excluded(hass)
     entities, devices, areas = (
         er.async_get(hass),
         dr.async_get(hass),
@@ -267,16 +289,8 @@ def plan_control(
         device = (
             devices.async_get(entry.device_id) if entry and entry.device_id else None
         )
-        if entity_id in excluded_entities:
-            problems.append(
-                f"{entity_id}: excluded from agent control (Configure page)"
-            )
-            continue
-        if device is not None and device.id in excluded_devices:
-            problems.append(
-                f"{entity_id}: its device '{device.name_by_user or device.name}' is "
-                "excluded from agent control (Configure page)"
-            )
+        if problem := exclusion_problem(hass, entity_id):
+            problems.append(f"{entity_id}: {problem}")
             continue
         if brightness_pct is not None and domain != "light":
             problems.append(f"{entity_id}: brightness_pct is for lights only")
@@ -448,3 +462,154 @@ async def set_automations_enabled(
             }
         )
     return results
+
+
+# --- set_value: a value entity's value (issue #194) ---------------------------
+#
+# One tool for every entity that holds a value rather than an on/off state:
+# helpers (input_text, input_select, input_datetime, input_number, counter)
+# and integration value entities (text, select, date, time, datetime,
+# number). Each domain maps to its own hardcoded service and field - still
+# no passthrough. The value is checked against what the entity itself
+# allows (min/max/pattern, options, has_date/has_time) before anything is
+# called; the Configure page's exclusions apply as for control_entities.
+
+# domain -> (service, the service's value field)
+VALUE_SERVICES: dict[str, tuple[str, str]] = {
+    "input_text": ("set_value", "value"),
+    "text": ("set_value", "value"),
+    "input_select": ("select_option", "option"),
+    "select": ("select_option", "option"),
+    "input_number": ("set_value", "value"),
+    "number": ("set_value", "value"),
+    "counter": ("set_value", "value"),
+    "input_datetime": ("set_datetime", "datetime"),
+    "date": ("set_value", "date"),
+    "time": ("set_value", "time"),
+    "datetime": ("set_value", "datetime"),
+}
+
+
+class ValueRefusedError(Exception):
+    """A set_value call that can't go ahead - nothing was called."""
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError
+    return float(value)
+
+
+def _check_text(value: Any, attributes: Any) -> tuple[Any, str | None]:
+    import re
+
+    if not isinstance(value, str):
+        return value, "a text value is a string"
+    low, high = attributes.get("min"), attributes.get("max")
+    if low is not None and len(value) < int(low):
+        return value, f"at least {low} characters"
+    if high is not None and len(value) > int(high):
+        return value, f"at most {high} characters"
+    pattern = attributes.get("pattern")
+    if pattern and not re.fullmatch(pattern, value):
+        return value, f"doesn't match the entity's pattern {pattern!r}"
+    return value, None
+
+
+def _check_option(value: Any, attributes: Any) -> tuple[Any, str | None]:
+    options = list(attributes.get("options") or [])
+    if value not in options:
+        return value, f"not one of its options {options}"
+    return value, None
+
+
+def _check_number(value: Any, attributes: Any, keys: tuple[str, str]):
+    try:
+        number = _number(value)
+    except (TypeError, ValueError):
+        return value, "a number"
+    low, high = (attributes.get(key) for key in keys)
+    if low is not None and number < float(low):
+        return number, f"below its minimum {low}"
+    if high is not None and number > float(high):
+        return number, f"above its maximum {high}"
+    return number, None
+
+
+def _check_moment(value: Any, kind: str) -> tuple[Any, str | None]:
+    from homeassistant.util import dt as dt_util
+
+    parse = {
+        "date": dt_util.parse_date,
+        "time": dt_util.parse_time,
+        "datetime": dt_util.parse_datetime,
+    }[kind]
+    example = {
+        "date": "2026-10-31",
+        "time": "07:30:00",
+        "datetime": "2026-10-31 07:30:00",
+    }[kind]
+    if not isinstance(value, str) or parse(value) is None:
+        return value, f"a {kind} like '{example}'"
+    return value, None
+
+
+def plan_value(hass: HomeAssistant, entity_id: str, value: Any) -> dict[str, Any]:
+    """The service call that sets `entity_id` to `value`, and what it is
+    now - or every reason it's refused, before anything happens."""
+    domain = _domain_of(entity_id)
+    if domain not in VALUE_SERVICES:
+        raise ValueRefusedError(
+            f"{entity_id}: {domain} has no value to set here (one of "
+            f"{', '.join(sorted(VALUE_SERVICES))}; on/off is control_entities)"
+        )
+    state = hass.states.get(entity_id)
+    if state is None:
+        raise ValueRefusedError(f"{entity_id}: no such entity")
+    if problem := exclusion_problem(hass, entity_id):
+        raise ValueRefusedError(f"{entity_id}: {problem}")
+    attributes = state.attributes
+    service, field = VALUE_SERVICES[domain]
+    if domain in ("input_text", "text"):
+        value, problem = _check_text(value, attributes)
+    elif domain in ("input_select", "select"):
+        value, problem = _check_option(value, attributes)
+    elif domain == "counter":
+        value, problem = _check_number(value, attributes, ("minimum", "maximum"))
+        if problem is None and value != int(value):
+            problem = "a whole number"
+        value = int(value) if problem is None else value
+    elif domain in ("input_number", "number"):
+        value, problem = _check_number(value, attributes, ("min", "max"))
+    elif domain == "input_datetime":
+        has_date, has_time = attributes.get("has_date"), attributes.get("has_time")
+        field = "datetime" if has_date and has_time else "date" if has_date else "time"
+        value, problem = _check_moment(value, field)
+    else:
+        value, problem = _check_moment(value, field)
+    if problem:
+        raise ValueRefusedError(f"{entity_id}: {value!r} isn't valid - {problem}")
+    return {
+        "entity_id": entity_id,
+        "name": attributes.get("friendly_name", entity_id),
+        "state_now": state.state,
+        "value": value,
+        "service": f"{domain}.{service}",
+        "data": {"entity_id": entity_id, field: value},
+    }
+
+
+async def set_entity_value(
+    hass: HomeAssistant, plan: dict[str, Any], user_id: str | None = None
+) -> dict[str, Any]:
+    """Call the planned service as `user_id`; the state before and after."""
+    domain, service = plan["service"].split(".", 1)
+    await hass.services.async_call(
+        domain, service, plan["data"], blocking=True, context=Context(user_id=user_id)
+    )
+    state = hass.states.get(plan["entity_id"])
+    return {
+        "entity_id": plan["entity_id"],
+        "state_before": plan["state_now"],
+        "state_after": state.state if state else None,
+    }

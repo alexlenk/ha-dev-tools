@@ -4917,6 +4917,109 @@ class SetAutomationEnabledTool(WriteGatedTool):
         return {"results": cast(JsonValueType, results)}
 
 
+class SetValueTool(WriteGatedTool):
+    """Set a value entity's value - see service_call_manager.py (issue #194)."""
+
+    name = "set_value"
+    annotations = SET_STATE
+    description = (
+        "Set the value of an entity that holds one - without an automation: "
+        "input_text / text (a string, checked against min/max length and "
+        "pattern), input_select / select (one of its options), input_number "
+        "/ number (within min/max), counter (a whole number within "
+        "minimum/maximum), input_datetime (a date '2026-10-31', a time "
+        "'07:30:00' or both '2026-10-31 07:30:00', as the helper has), date, "
+        "time, datetime. On/off is control_entities. An entity or device "
+        "excluded on the Configure page is refused, and so is a value the "
+        "entity wouldn't take - before a confirm_token is issued. The "
+        "preview shows the current state, the service call, and every "
+        "automation whose triggers name the entity (an 'on' one will fire); "
+        "the result the state before and after."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("entity_id"): str,
+            vol.Required("value"): vol.Any(str, int, float),
+        }
+    )
+
+    def __init__(self, automation_manager: AutomationManager) -> None:
+        """Init with the AutomationManager the triggers are read from."""
+        self._automations = automation_manager
+
+    @staticmethod
+    def _plan(hass: HomeAssistant, args: dict[str, Any]) -> dict[str, Any]:
+        return service_call_manager.plan_value(hass, args["entity_id"], args["value"])
+
+    async def _triggered(self, hass: HomeAssistant, entity_id: str) -> list[Any]:
+        """Automations whose triggers name the entity, and whether each is on."""
+        regex = references.pattern(entity_id)
+        found = []
+        for _, config in await self._automations.all_automations():
+            triggers = config.get("triggers", config.get("trigger"))
+            if not regex.search(json.dumps(to_json_safe(triggers))):
+                continue
+            automation_id = config.get("id")
+            state = (
+                audit_manager.find_automation_state(hass, str(automation_id))
+                if automation_id is not None
+                else None
+            )
+            found.append(
+                {
+                    "automation_id": automation_id,
+                    "alias": config.get("alias"),
+                    "state": state.state if state else None,
+                }
+            )
+        return found
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """Why the value can't be set, if it can't."""
+        try:
+            self._plan(hass, tool_input.tool_args)
+        except service_call_manager.ValueRefusedError as exc:
+            return str(exc)
+        return None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The current state, the call, and what it will trigger."""
+        args = tool_input.tool_args
+        return {
+            "would_set": cast(JsonValueType, self._plan(hass, args)),
+            "triggers_automations": cast(
+                JsonValueType, await self._triggered(hass, args["entity_id"])
+            ),
+        }
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Set it; report the state before and after."""
+        result = await service_call_manager.set_entity_value(
+            hass,
+            self._plan(hass, tool_input.tool_args),
+            llm_context.context.user_id if llm_context.context else None,
+        )
+        return cast(JsonObjectType, result)
+
+
 class SetNumberValueTool(WriteGatedTool):
     """Set a number/input_number entity's value - see service_call_manager.py."""
 
@@ -4929,7 +5032,8 @@ class SetNumberValueTool(WriteGatedTool):
         "entity) without a full automation edit cycle (see issue #76). "
         "Deliberately scoped to just these two domains, not a generic "
         "service-call tool - refuses any other entity domain rather than "
-        "guessing which service to call."
+        "guessing which service to call. set_value does this and more "
+        "(text, select, datetime, counter) - prefer it."
     ) + _CONFIRM_TOKEN_NOTE
     parameters = _write_schema(
         {vol.Required("entity_id"): str, vol.Required("value"): vol.Coerce(float)}
@@ -6167,6 +6271,7 @@ class DevToolsAPI(llm.API):
                     )
                 ),
                 SetAutomationEnabledTool(self.automation_manager),
+                SetValueTool(self.automation_manager),
                 SetNumberValueTool(),
                 SetBooleanValueTool(),
                 ControlEntitiesTool(),
