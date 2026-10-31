@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.36.0] - 2026-10-31
+
+### Added
+- **ESPHome device configs: `list_esphome_configs`, `get_esphome_config`, `write_esphome_config`, `delete_esphome_config`** (issue #197).
+  - They work on the ESPHome Builder's YAMLs in `/config/esphome`, subfolders included (shared `!include` files). An agent that compiles firmware on another host can read the live configs, notice drift when someone edits a device in the add-on, and bring changes back. Compiling and flashing stay out of scope.
+  - Literal credentials (a credential-shaped key such as `password`, or `key` as in `api: encryption: key`) are masked in place on read. A write puts each placeholder sent back unchanged back to the original, so editing a file never replaces a device's API or OTA key and breaks its pairing. A placeholder that matches nothing is refused, and so is a new literal credential: use `!secret`.
+  - A write must parse as YAML (ESPHome's own tags such as `!secret`, `!lambda`, `!include` allowed), takes `expected_hash` from the read, and its preview is a masked diff.
+  - A delete backs the file up first; no backup, no delete.
+  - `secrets.yaml` (in any folder) and hidden files are never listed, read or written. `esphome/**/*.yaml`/`*.yml` joins the default write paths, and the `esphome/.esphome/` build folder joins the denylist.
+
 ## [2.35.0] - 2026-10-31
 
 ### Added

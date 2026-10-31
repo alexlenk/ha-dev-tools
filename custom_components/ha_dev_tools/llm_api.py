@@ -46,6 +46,7 @@ from . import (
     energy_manager,
     entity_manager,
     entity_source,
+    esphome_manager,
     helper_manager,
     history_manager,
     mirror,
@@ -6196,6 +6197,236 @@ class DeletePackageTool(WriteGatedTool):
         )
 
 
+class ListEsphomeConfigsTool(GatedTool):
+    """List ESPHome device configs - see esphome_manager.py (issue #197)."""
+
+    name = "list_esphome_configs"
+    description = (
+        "List the ESPHome Builder configs in /config/esphome: each file's "
+        "name (relative to esphome/), kind (device: top level; include: a "
+        "subfolder file devices !include), size and modified time - to "
+        "notice a device edited in the add-on. secrets.yaml and the "
+        ".esphome/ build folder are never listed. Read-only."
+    )
+    parameters = vol.Schema({})
+
+    def __init__(self, manager: esphome_manager.EsphomeManager) -> None:
+        """Init with the EsphomeManager backing this tool."""
+        self._manager = manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """List the configs."""
+        return {"configs": cast(JsonValueType, await self._manager.list())}
+
+
+class GetEsphomeConfigTool(GatedTool):
+    """Read one ESPHome config, credentials masked (issue #197)."""
+
+    name = "get_esphome_config"
+    description = (
+        "Read one ESPHome config's raw text (name relative to esphome/, e.g. "
+        "'kitchen.yaml' or 'common/wifi.yaml'), tags (!secret, !lambda, "
+        "!include, ...) as written. A literal credential - under key (api: "
+        "encryption: key), password, token, api_key, ... - comes back as "
+        f"'{esphome_manager.PLACEHOLDER}'; 'masked' lists where. Send it back "
+        "unchanged with write_esphome_config to keep the real value. "
+        "content_hash is the live file's, for expected_hash. Never reads "
+        "secrets.yaml. Read-only."
+    )
+    parameters = vol.Schema({vol.Required("name"): str})
+
+    def __init__(self, manager: esphome_manager.EsphomeManager) -> None:
+        """Init with the EsphomeManager backing this tool."""
+        self._manager = manager
+
+    @override
+    async def _run(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The config, masked."""
+        try:
+            return cast(
+                JsonObjectType, await self._manager.get(tool_input.tool_args["name"])
+            )
+        except esphome_manager.EsphomeConfigError as exc:
+            return _tool_error(exc)
+
+
+class WriteEsphomeConfigTool(WriteGatedTool):
+    """Create or replace one ESPHome config (issue #197)."""
+
+    name = "write_esphome_config"
+    description = (
+        "Create or replace one ESPHome config (name relative to esphome/; "
+        "subfolders allowed) with content, its full raw YAML. A "
+        f"'{esphome_manager.PLACEHOLDER}' from get_esphome_config sent back "
+        "unchanged keeps the real credential; one that matches nothing in the "
+        "current file is refused, and so is a new literal credential - use "
+        "!secret (esphome/secrets.yaml, which this never touches). The content "
+        "must parse as YAML (ESPHome's tags allowed). The preview is a diff, "
+        "credentials masked. Pass expected_hash (get_esphome_config's "
+        "content_hash) to refuse a write over a change made in the meantime. "
+        "Doesn't compile or flash."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema(
+        {
+            vol.Required("name"): str,
+            vol.Required("content"): str,
+            vol.Optional("expected_hash"): str,
+        }
+    )
+
+    def __init__(self, manager: esphome_manager.EsphomeManager) -> None:
+        """Init with the EsphomeManager backing this tool."""
+        self._manager = manager
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """A bad name, a mask that can't be put back, a new literal
+        credential, YAML that doesn't parse."""
+        args = tool_input.tool_args
+        try:
+            await self._manager.plan_write(args["name"], args["content"])
+        except esphome_manager.EsphomeConfigError as exc:
+            return str(exc)
+        return None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """The diff against the live file, credentials masked."""
+        args = tool_input.tool_args
+        current, content = await self._manager.plan_write(args["name"], args["content"])
+        return {
+            "file_path": esphome_manager.esphome_path(args["name"]),
+            "creates_file": current is None,
+            "diff": await hass.async_add_executor_job(
+                esphome_manager.diff, current, content, args["name"]
+            ),
+        }
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Write it, mirror it."""
+        args = tool_input.tool_args
+        try:
+            current, content = await self._manager.plan_write(
+                args["name"], args["content"]
+            )
+            await self._manager.write(
+                args["name"], content, expected_hash=args.get("expected_hash")
+            )
+        except (esphome_manager.EsphomeConfigError, ValueError, OSError) as exc:
+            return _tool_error(exc)
+        file_path = esphome_manager.esphome_path(args["name"])
+        return await _mirror_file_write(
+            hass,
+            {"written": file_path, "created": current is None},
+            file_path=file_path,
+            content_before=current,
+            content_after=content,
+        )
+
+
+class DeleteEsphomeConfigTool(WriteGatedTool):
+    """Delete one ESPHome config, backed up first (issue #197)."""
+
+    name = "delete_esphome_config"
+    description = (
+        "Delete one ESPHome config (name relative to esphome/). The file is "
+        "backed up first (and its last state mirrored, with mirroring on). "
+        "The preview shows its content, credentials masked. The device itself "
+        "isn't touched - remove it in the ESPHome add-on / HA as well if it's "
+        "gone for good."
+    ) + _CONFIRM_TOKEN_NOTE
+    parameters = _write_schema({vol.Required("name"): str})
+
+    def __init__(self, manager: esphome_manager.EsphomeManager) -> None:
+        """Init with the EsphomeManager backing this tool."""
+        self._manager = manager
+
+    @override
+    async def _refusal(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> str | None:
+        """A bad name or no such file."""
+        try:
+            name = tool_input.tool_args["name"]
+            if await self._manager.read(name) is None:
+                return f"there is no '{esphome_manager.esphome_path(name)}'"
+        except esphome_manager.EsphomeConfigError as exc:
+            return str(exc)
+        return None
+
+    @override
+    async def _preview_context(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """What would be deleted, masked."""
+        config = await self._manager.get(tool_input.tool_args["name"])
+        return {"would_delete": config["file_path"], "content": config["content"]}
+
+    @override
+    async def _write(
+        self,
+        hass: HomeAssistant,
+        tool_input: llm.ToolInput,
+        llm_context: llm.LLMContext,
+    ) -> JsonObjectType:
+        """Back up, delete, mirror as emptied."""
+        name = tool_input.tool_args["name"]
+        try:
+            before, backup = await self._manager.delete(name)
+        except (esphome_manager.EsphomeConfigError, ValueError, OSError) as exc:
+            return _tool_error(exc)
+        file_path = esphome_manager.esphome_path(name)
+        return await _mirror_file_write(
+            hass,
+            {"deleted": file_path, "backup": backup},
+            file_path=file_path,
+            content_before=before,
+            content_after="",
+        )
+
+
+def _esphome_tools(manager: esphome_manager.EsphomeManager) -> list[llm.Tool]:
+    return [
+        ListEsphomeConfigsTool(manager),
+        GetEsphomeConfigTool(manager),
+        WriteEsphomeConfigTool(manager),
+        DeleteEsphomeConfigTool(manager),
+    ]
+
+
 @dataclass(slots=True, kw_only=True)
 class DevToolsAPI(llm.API):
     """The ha_dev_tools LLM API - holds the backing services real tools are built from."""
@@ -6265,6 +6496,11 @@ class DevToolsAPI(llm.API):
                 GetTraceTool(),
                 TriggerAutomationTool(),
                 DeletePackageTool(self.rest_command_manager.file_manager),
+                *_esphome_tools(
+                    esphome_manager.EsphomeManager(
+                        self.hass, self.rest_command_manager.file_manager
+                    )
+                ),
                 WriteCustomizeTool(
                     customize_write.CustomizeWriter(
                         self.hass, self.rest_command_manager.file_manager
