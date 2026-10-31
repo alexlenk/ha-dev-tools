@@ -76,6 +76,11 @@ DEFAULT_WRITE_PATHS = [
     "/config/automations.yaml",
     "/config/scripts.yaml",
     "/config/packages/**/*.yaml",
+    # ESPHome Builder's device configs (issue #197) - esphome_manager.py
+    # keeps secrets.yaml and the .esphome/ build folder out on top of the
+    # denylist below.
+    "/config/esphome/**/*.yaml",
+    "/config/esphome/**/*.yml",
 ]
 
 # Default denylist (always enforced) - includes sensitive storage files with patterns
@@ -106,6 +111,9 @@ DEFAULT_DENYLIST = [
     # as defense in depth even though access_control.py's own read/touch
     # never goes through this path in the first place.
     ".storage/ha_dev_tools.armed",
+    # ESPHome's build folder: generated sources, firmware, and its own
+    # copies of the device secrets (issue #197).
+    "esphome/.esphome/*",
 ]
 
 # Backward compatibility alias

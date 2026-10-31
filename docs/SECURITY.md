@@ -145,12 +145,16 @@ There's currently no way to customize this - it's defaults-only (no
   also cover every file a readable config file `!include`s: Home Assistant
   reads an included file as part of the file that includes it, so it's
   covered by that file's read permission (the denylist still applies).
-- **Writable**: exactly what `write_automation` needs and nothing more -
-  `automations.yaml` and `packages/**/*.yaml`.
+- **Writable**: exactly what the write tools need and nothing more -
+  `automations.yaml`, `scripts.yaml`, `packages/**/*.yaml`, and the ESPHome
+  Builder's device configs, `esphome/**/*.yaml`/`*.yml` (subfolders
+  included, for shared `!include` files).
 - **Always denied**: `secrets.yaml` (in any folder - Home Assistant also
   reads one from a subfolder such as `packages/`), all auth/credential
-  storage, the arm file itself, and a handful of other sensitive system
-  files - regardless of what read/write defaults say.
+  storage, the arm file itself, ESPHome's `esphome/.esphome/` build folder
+  (generated sources, firmware, and its own copies of the device secrets),
+  and a handful of other sensitive system files - regardless of what
+  read/write defaults say.
 
 `get_config_file` returns a file's raw text, so it adds one more rule: a
 file is withheld entirely if any line of it looks like a literal credential
@@ -176,6 +180,20 @@ guessed. The token stays bound to what was sent, and any answer computed
 from a restored config - a preview, a validation error quoting a value -
 has the originals masked out again, so a credential reaches the agent
 neither way.
+
+The ESPHome tools (`get_esphome_config`, `write_esphome_config`,
+`delete_esphome_config`; issue #197) mask the same way, in the raw text: a
+literal value under a credential-shaped key, or under `key` (`api:
+encryption: key`), is replaced by `"<withheld>"` in place, so comments,
+`!lambda`s and formatting come back byte for byte. A write puts each
+placeholder back (same place, else the one credential under the same key),
+so read-edit-write never replaces a device's API or OTA key with the
+placeholder and breaks its pairing. One that matches nothing is refused,
+and so is a **new** literal credential - new ones go in as
+`!secret <name>`. A literal credential in a multi-line value can't be
+masked in place, so that file isn't returned at all. `secrets.yaml` (in any
+folder) and hidden files are never listed, read or written; a delete backs
+the file up first and is refused if the backup fails.
 
 An earlier version of this project had a `configuration.yaml`-based
 `ha_dev_tools: security:` block for customizing this - it was removed
