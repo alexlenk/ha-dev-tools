@@ -81,6 +81,14 @@ async def storage_path(
     return ".storage/lovelace" if url_path is None else None
 
 
+def unmirrored_reason(storage_path: str | None) -> str:
+    """Why a saved dashboard wasn't mirrored: HA lists no storage file for
+    it, or that file wasn't there to read (issue #192)."""
+    if storage_path is None:
+        return "saved, but HA lists no storage file for this dashboard"
+    return f"saved, but its storage file ({storage_path}) wasn't found to mirror"
+
+
 async def get_dashboard(
     hass: HomeAssistant, user: User, *, url_path: str | None = None
 ) -> dict[str, Any]:

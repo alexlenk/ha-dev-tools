@@ -13,7 +13,7 @@ from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockUser
 
-from custom_components.ha_dev_tools import dashboard_manager, helper_manager
+from custom_components.ha_dev_tools import dashboard_manager, helper_manager, references
 from custom_components.ha_dev_tools.const import DOMAIN
 from custom_components.ha_dev_tools.llm_api import UpdateEntitiesTool
 from custom_components.ha_dev_tools.mirror import MirrorResult
@@ -281,3 +281,42 @@ async def test_labels_and_categories_through_the_tool(hass: HomeAssistant, admin
     assert er.async_get(hass).async_get("automation.morning").categories == {
         "automation": category.category_id
     }
+
+
+@pytest.mark.asyncio
+async def test_unmirrored_dashboards_are_reported(hass: HomeAssistant, admin):
+    """Issue #196: a rewritten dashboard that couldn't be mirrored shows up
+    in the rename's mirror list, not only in a log."""
+    rewrite = AsyncMock(
+        return_value=references.RewriteResult(
+            rewritten={"dashboards": ["guest"]},
+            unmirrored=["dashboard guest: saved, but HA lists no storage file"],
+        )
+    )
+    with (
+        patch(
+            "custom_components.ha_dev_tools.llm_api.references.rewrite_references",
+            rewrite,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.is_mirror_enabled",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.ha_dev_tools.llm_api.mirror.mirror_write",
+            AsyncMock(return_value=MirrorResult(mirrored=True, commits=("after",))),
+        ),
+    ):
+        result = await UpdateEntitiesTool()._write(
+            hass,
+            _input(
+                items=[{"entity_id": OLD, "new_entity_id": NEW}], update_references=True
+            ),
+            _llm_context(admin.id),
+        )
+    assert result["references"][OLD]["mirror"] == [
+        {
+            "mirrored": False,
+            "reason": "dashboard guest: saved, but HA lists no storage file",
+        }
+    ]

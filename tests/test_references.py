@@ -2,14 +2,14 @@
 entity_id (issue #117), against real HA dashboards, persons and files."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
-from custom_components.ha_dev_tools import dashboard_manager, helper_manager
+from custom_components.ha_dev_tools import dashboard_manager, helper_manager, mirror
 from custom_components.ha_dev_tools.const import DOMAIN
 from custom_components.ha_dev_tools.references import (
     _replace,
@@ -18,6 +18,10 @@ from custom_components.ha_dev_tools.references import (
     rewrite_references,
 )
 from custom_components.ha_dev_tools.security import SecurityManager
+from custom_components.ha_dev_tools.ws_call import (
+    WebSocketCommandError,
+    call_ws_command,
+)
 
 OLD = "device_tracker.iphone"
 NEW = "device_tracker.alex_iphone_wifi"
@@ -150,11 +154,12 @@ async def test_rewrite_changes_only_the_id_and_reloads(
     assert persons[0]["device_trackers"] == [NEW, "device_tracker.ipad"]
     assert result.reloaded == ["automation"]
     reload.assert_awaited_once()
+    # Mirroring off: no dashboard storage lookups at all.
     assert [(item.path, item.content_type) for item in result.mirror] == [
         ("automations.yaml", "yaml"),
         ("packages/presence.yaml", "yaml"),
-        (".storage/lovelace", "json"),
     ]
+    assert result.unmirrored == []
 
     # What's left: only what can't be rewritten here.
     left = await find_references(hass, user, OLD)
@@ -222,3 +227,85 @@ async def test_unreadable_yaml_is_skipped(hass: HomeAssistant, user, tmp_path):
     (tmp_path / "packages/binary.yaml").write_bytes(b"\xff\xfe")
     refs = await find_references(hass, user, OLD)
     assert "packages/binary.yaml" not in [ref["path"] for ref in refs["yaml"]]
+
+
+@pytest.mark.asyncio
+async def test_rewritten_dashboards_mirror_their_storage_file(
+    hass: HomeAssistant, user, tmp_path, monkeypatch
+):
+    """Issue #196: the file write_dashboard and snapshots commit -
+    `.storage/lovelace.<id>`, the slugified url_path - read before and after
+    the save; never a JSON dump under `.storage/lovelace.<url_path>`."""
+    await _with_dashboard_and_person(hass, user)
+    guest = await call_ws_command(
+        hass,
+        user,
+        "lovelace/dashboards/create",
+        url_path="dashboard-guest",
+        title="Guest",
+        mode="storage",
+    )
+    assert guest["id"] == "dashboard_guest"
+    await dashboard_manager.write_dashboard(
+        hass, user, {"views": [{"entities": [OLD]}]}, url_path="dashboard-guest"
+    )
+
+    async def dashboards(*_):
+        return [
+            {"url_path": "lovelace", "mode": "storage"},
+            {"url_path": "dashboard-guest", "mode": "storage"},
+        ]
+
+    monkeypatch.setattr(dashboard_manager, "list_dashboards", dashboards)
+    # HA's Store is in memory in tests: stand in for the file on disk.
+    storage = tmp_path / ".storage"
+    storage.mkdir()
+    guest_file = storage / "lovelace.dashboard_guest"
+    guest_file.write_text(f'{{"data": "{OLD}"}}')
+    save = dashboard_manager.write_dashboard
+
+    async def save_to_disk(hass, user, config, *, url_path=None):
+        await save(hass, user, config, url_path=url_path)
+        if url_path == "dashboard-guest":
+            guest_file.write_text(f'{{"data": "{NEW}"}}')
+
+    monkeypatch.setattr(dashboard_manager, "write_dashboard", save_to_disk)
+
+    with patch.object(mirror, "is_mirror_enabled", return_value=True):
+        result = await rewrite_references(hass, user, OLD, NEW)
+
+    assert result.errors == []
+    assert result.rewritten["dashboards"] == ["default", "dashboard-guest"]
+    dashboards_mirrored = [
+        item for item in result.mirror if item.content_type == "json"
+    ]
+    assert [(item.path, item.before, item.after) for item in dashboards_mirrored] == [
+        (
+            ".storage/lovelace.dashboard_guest",
+            f'{{"data": "{OLD}"}}',
+            f'{{"data": "{NEW}"}}',
+        )
+    ]
+    # The default dashboard's file isn't there: rewritten, reported unmirrored.
+    assert result.unmirrored == [
+        "dashboard default: saved, but its storage file (.storage/lovelace) "
+        "wasn't found to mirror"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_ha_lists_no_storage_file_for(
+    hass: HomeAssistant, user, monkeypatch
+):
+    await _with_dashboard_and_person(hass, user)
+    monkeypatch.setattr(
+        dashboard_manager,
+        "storage_path",
+        AsyncMock(side_effect=WebSocketCommandError("unknown_command", "x")),
+    )
+    with patch.object(mirror, "is_mirror_enabled", return_value=True):
+        result = await rewrite_references(hass, user, OLD, NEW)
+    assert result.rewritten["dashboards"] == ["default"]
+    assert result.unmirrored == [
+        "dashboard default: saved, but HA lists no storage file for this dashboard"
+    ]

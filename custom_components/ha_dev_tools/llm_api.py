@@ -1157,7 +1157,7 @@ class UpdateEntitiesTool(WriteGatedTool):
             if result.reloaded:
                 entry["reloaded"] = cast(JsonValueType, result.reloaded)
             if mirror.is_mirror_enabled(hass):
-                entry["mirror"] = [
+                mirrored: list[JsonObjectType] = [
                     _mirror_result_payload(
                         await mirror.mirror_write(
                             hass,
@@ -1169,6 +1169,12 @@ class UpdateEntitiesTool(WriteGatedTool):
                     )
                     for item in result.mirror
                 ]
+                # Rewritten dashboards that couldn't be mirrored (#196).
+                mirrored += [
+                    {"mirrored": False, "reason": reason}
+                    for reason in result.unmirrored
+                ]
+                entry["mirror"] = cast(JsonValueType, mirrored)
         entry["still_referenced"] = cast(
             JsonValueType, await references.find_references(hass, user, old)
         )
@@ -4319,12 +4325,7 @@ async def _save_dashboard(
             **response,
             "mirror": {
                 "mirrored": False,
-                "reason": (
-                    f"saved, but its storage file ({storage_path}) wasn't found "
-                    "to mirror"
-                    if storage_path
-                    else "saved, but HA lists no storage file for this dashboard"
-                ),
+                "reason": dashboard_manager.unmirrored_reason(storage_path),
             },
         }
     return await _mirror_file_write(

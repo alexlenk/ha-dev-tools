@@ -11,6 +11,9 @@ so this finds the rest:
   write allowlist (automations.yaml, scripts.yaml, packages/) can be
   rewritten; references elsewhere are listed for a manual edit.
 - Storage-mode dashboards (a YAML-mode one is listed, never written).
+  With mirroring on, a rewritten dashboard is mirrored as its real
+  storage file, `.storage/lovelace.<id>` read before and after the save -
+  the same file write_dashboard and config snapshots commit (issue #196).
 - Persons' device_trackers.
 - Config entries of UI helpers that name it (group, min_max, template,
   ...) - listed only; update_derived_sensor edits those.
@@ -32,7 +35,7 @@ from typing import Any
 from homeassistant.auth.models import User
 from homeassistant.core import HomeAssistant
 
-from . import dashboard_manager, helper_manager
+from . import dashboard_manager, helper_manager, mirror
 from .config_snapshot import discover_files
 from .const import DOMAIN
 from .file_manager import FileManager
@@ -54,7 +57,7 @@ class Rewrite:
     """One rewritten file/dashboard's before/after, for mirroring."""
 
     path: str
-    before: str
+    before: str | None
     after: str
     content_type: str
 
@@ -67,6 +70,9 @@ class RewriteResult:
     errors: list[str] = field(default_factory=list)
     reloaded: list[str] = field(default_factory=list)
     mirror: list[Rewrite] = field(default_factory=list)
+    # With mirroring on: each rewritten dashboard that couldn't be mirrored,
+    # and why.
+    unmirrored: list[str] = field(default_factory=list)
 
 
 def _security(hass: HomeAssistant) -> SecurityManager:
@@ -190,8 +196,24 @@ async def find_references(
     }
 
 
-def _dashboard_storage_path(url_path: str | None) -> str:
-    return f".storage/lovelace{f'.{url_path}' if url_path else ''}"
+async def _dashboard_storage_path(
+    hass: HomeAssistant, user: User, url_path: str | None
+) -> str | None:
+    try:
+        return await dashboard_manager.storage_path(hass, user, url_path)
+    except WebSocketCommandError:
+        return None
+
+
+async def _read_storage(file_manager: FileManager, path: str | None) -> str | None:
+    """A dashboard's storage file, or None - never raised: the rename
+    already happened, and the rest of the rewrite goes on."""
+    if path is None:
+        return None
+    try:
+        return await file_manager.read_file(path)
+    except (OSError, PermissionError, ValueError):
+        return None
 
 
 async def rewrite_references(
@@ -220,28 +242,34 @@ async def rewrite_references(
         result.rewritten.setdefault("yaml", []).append(ref["path"])
         result.mirror.append(Rewrite(ref["path"], before, after, "yaml"))
 
+    mirroring = mirror.is_mirror_enabled(hass)
     for dashboard in await _dashboards(hass, user, old):
         if dashboard["mode"] != "storage":
             continue
         url_path = dashboard["url_path"]
-        path = _dashboard_storage_path(url_path)
+        name = url_path or "default"
+        path = (
+            await _dashboard_storage_path(hass, user, url_path) if mirroring else None
+        )
+        stored_before = await _read_storage(file_manager, path)
         config, _ = _replace(dashboard["config"], regex, new)
         try:
             await dashboard_manager.write_dashboard(
                 hass, user, config, url_path=url_path
             )
         except (WebSocketCommandError, dashboard_manager.YamlModeDashboardError) as exc:
-            result.errors.append(f"dashboard {url_path or 'default'}: {exc}")
+            result.errors.append(f"dashboard {name}: {exc}")
             continue
-        result.rewritten.setdefault("dashboards", []).append(url_path or "default")
-        result.mirror.append(
-            Rewrite(
-                path,
-                json.dumps(dashboard["config"], indent=2),
-                json.dumps(config, indent=2),
-                "json",
+        result.rewritten.setdefault("dashboards", []).append(name)
+        if not mirroring:
+            continue
+        stored_after = await _read_storage(file_manager, path)
+        if path is None or stored_after is None:
+            result.unmirrored.append(
+                f"dashboard {name}: {dashboard_manager.unmirrored_reason(path)}"
             )
-        )
+            continue
+        result.mirror.append(Rewrite(path, stored_before, stored_after, "json"))
 
     for person in await _persons(hass, user, old):
         trackers = [
