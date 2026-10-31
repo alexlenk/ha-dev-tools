@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.36.1] - 2026-10-31
+
+### Fixed
+- **Dashboards rewritten by an entity rename are mirrored to the right file** (issue #196). `update_entities` with `update_references` committed each rewritten dashboard under `.storage/lovelace.<url_path>` as a JSON dump of its config. That was the old naming #192 already fixed for `write_dashboard` and `patch_dashboard`, so one dashboard's history was split across two files in the mirror repo.
+  - It now mirrors the real storage file, `.storage/lovelace.<id>`, read before and after the save: the same file `write_dashboard`, `patch_dashboard` and config snapshots commit.
+  - A rewritten dashboard that can't be mirrored (HA lists no storage file for it, or the file isn't there) is reported in the rename's `mirror` list as `{mirrored: false, reason}` instead of being committed somewhere else.
+
 ## [2.36.0] - 2026-10-31
 
 ### Added
